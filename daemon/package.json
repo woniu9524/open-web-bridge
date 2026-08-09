@@ -1,0 +1,21 @@
+{
+  "name": "open-web-bridge",
+  "version": "0.8.0",
+  "description": "Open Web Bridge daemon — 本地桥：AI agent ↔ WS ↔ MV3 Chrome 扩展 ↔ 真实浏览器",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "owb-daemon": "src/server.js",
+    "owb-mcp": "src/mcp_server.js",
+    "owb-ctl": "src/client.js"
+  },
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.21.3"
+  }
+}

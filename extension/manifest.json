@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Open Web Bridge",
+  "description": "Let AI agents drive your real browser: semantic snapshots, network capture, hooks, workflows and human handoff, driven by a local daemon via MCP.",
+  "version": "0.8.0",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

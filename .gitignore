@@ -1,0 +1,11 @@
+# Node（lock 文件提交，不忽略）
+node_modules/
+
+# curl-impersonate 二进制（replay 用，不入库）
+bin/
+
+# 参考竞品源码（第三方，不入库）
+参考/
+
+# 分析产物与登录态（敏感，不入库）
+work/

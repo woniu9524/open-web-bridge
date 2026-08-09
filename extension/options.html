@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Open Web Bridge 配对</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 18px; }
+  label { display: block; margin: 16px 0 4px; font-weight: 600; }
+  input { width: 100%; box-sizing: border-box; padding: 8px; font: 13px monospace; border: 1px solid #bbb; border-radius: 6px; }
+  button { margin-top: 16px; padding: 8px 20px; border: 0; border-radius: 6px; background: #1a73e8; color: #fff; cursor: pointer; }
+  #msg { margin-top: 12px; color: #188038; }
+  .hint { color: #666; font-size: 12px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>Open Web Bridge 配对</h1>
+<p>daemon 启动时会在终端打印配对 token（同时写入 <code>work/.token</code>）。把 token 粘贴到下面，保存后扩展自动重连。只需配这一次。</p>
+<label for="token">配对 token</label>
+<input id="token" placeholder="daemon 终端里 [owb-daemon] 配对 token: 后面的那串">
+<label for="wsUrl">daemon 地址（一般不用改）</label>
+<input id="wsUrl" placeholder="ws://127.0.0.1:18086/ws">
+<div class="hint">daemon 已关闭 token 认证（OWB_TOKEN=""）时，token 留空即可。</div>
+<button id="save">保存并重连</button>
+<div id="msg"></div>
+<script src="options.js"></script>
+</body>
+</html>
