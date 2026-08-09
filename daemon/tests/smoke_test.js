@@ -147,36 +147,34 @@ async function main() {
       return 1;
     }
 
-    // 0. 配对 token：文件首启生成；缺失/错误 token 拒（4401）
-    const token = fs.readFileSync(path.join(workdir, ".token"), "utf8").trim();
-    check("token 文件首启生成（48 hex）", /^[0-9a-f]{48}$/.test(token), token);
+    // 0. 无 token 认证：直连可用（本地信任模型）
     let code = await connectExpectClose(`ws://${HOST}:${port}/ws`, null);
-    check("缺 token 拒绝（/ws）", code === 4401, `code=${code}`);
-    code = await connectExpectClose(`ws://${HOST}:${port}/ctl?token=wrong`, null);
-    check("错 token 拒绝（/ctl）", code === 4401, `code=${code}`);
+    check("无 token 直连 /ws 可达（非 4401）", code !== 4401, `code=${code}`);
+    code = await connectExpectClose(`ws://${HOST}:${port}/ctl?token=stale`, null);
+    check("带残留 token 参数仍可连（参数被忽略）", code !== 4401, `code=${code}`);
 
     // 1. 非 hello 首帧被拒
-    code = await connectExpectClose(tk(`ws://${HOST}:${port}/ws`, token),
+    code = await connectExpectClose(`ws://${HOST}:${port}/ws`,
       { type: "nope", payload: {} });
     check("非 hello 首帧拒绝", code === 4400, `code=${code}`);
 
     // 1b. 误连拒绝：其他桥的扩展（client 标识不符，如 kimi-webbridge 碰巧同端口）
-    code = await connectExpectClose(tk(`ws://${HOST}:${port}/ws`, token),
+    code = await connectExpectClose(`ws://${HOST}:${port}/ws`,
       { type: "hello", payload: { extensionVersion: "9.9.9" } });
     check("异族扩展误连拒绝", code === 4400, `code=${code}`);
 
     // 2. http Origin 被拒（防 DNS rebinding）
-    code = await connectExpectClose(tk(`ws://${HOST}:${port}/ws`, token), null,
+    code = await connectExpectClose(`ws://${HOST}:${port}/ws`, null,
       { headers: { Origin: "https://evil.example.com" } });
     check("http Origin 拒绝", code === 4403, `code=${code}`);
 
     // 3. mock 扩展握手 + 工具路由
-    const ext = new MockExtension(port, token);
+    const ext = new MockExtension(port);
     await ext.connect();
     ext.serve();
     check("扩展 hello 握手", true);
 
-    ctl = await ctlConnect(port, token);
+    ctl = await ctlConnect(port);
     let res = await ctlCall(ctl, "status");
     check("工具路由 status",
       res.ok && res.data && res.data.mock === true,
@@ -214,13 +212,13 @@ async function main() {
       jstr([ev1, ev2]));
 
     // 新控制器按 since_seq 补拉
-    ctl2 = await ctlConnect(port, token);
+    ctl2 = await ctlConnect(port);
     ctl2.send(jstr({ type: "events", since_seq: 1 }));
     const replay = await recvJson(ctl2);
     check("event 断线补拉", replay.seq === 2, jstr(replay));
 
     // 4b. 订阅过滤：sources 白名单 + url_pattern
-    ctl3 = await ctlConnect(port, token);
+    ctl3 = await ctlConnect(port);
     ctl3.send(jstr({ type: "subscribe", sources: ["hook:xhr"] }));
     const subAck = await recvJson(ctl3);
     check("subscribe 过滤器回执",
@@ -349,7 +347,7 @@ async function main() {
       res.ok && recTask.ext_sync === false,
       jstr(res));
     // 8c. 重连 mock 扩展，经 ctl 发 3 个会被审计（ext-> tool_call）的调用
-    const ext2 = new MockExtension(port, token);
+    const ext2 = new MockExtension(port);
     await ext2.connect();
     ext2.serve();
     for (let i = 0; i < 3; i++) {

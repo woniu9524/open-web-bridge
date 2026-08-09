@@ -31,9 +31,8 @@ node src/server.js            # 启动 daemon，监听 127.0.0.1:18086
 1. 浏览器打开 `chrome://extensions`
 2. 右上角打开「开发者模式」
 3. 「加载已解压的扩展程序」→ 选择本仓库的 `extension/` 目录
-4. 配对（v0.7.0 起）：daemon 终端会打印 `配对 token: <一串 hex>`，复制后到
-   `chrome://extensions` → Open Web Bridge「详情」→「扩展程序选项」粘贴保存。
-   扩展自动重连，只需配这一次。
+4. 扩展默认连本地 daemon（`ws://127.0.0.1:18086/ws`），无需配对；改地址才需要
+   到「扩展程序选项」配置。
 
 接入 AI 工具（以 Kimi Code 的 `config.toml` 为例，其他 MCP 客户端同构）：
 
@@ -53,10 +52,10 @@ args = ["<仓库绝对路径>/daemon/src/mcp_server.js"]
 ## 安全模型（用前请读）
 
 - daemon 只监听 `127.0.0.1`，并校验 WS 握手的 Host/Origin（防 DNS rebinding）
-- **配对 token**（v0.7.0 起默认启用）：两条通道都校验 `?token=`。token 首启自动生成写入
-  `work/.token`（0600 权限），ctl/MCP 同机自动读取零摩擦，扩展在选项页粘贴一次即可。
-  `OWB_TOKEN=<值>` 可指定固定 token；`OWB_TOKEN=""` 显式关闭认证（不建议在多用户机器上关）
-- token 防的是**本机其他进程/其他用户**连上 daemon；防不住同用户恶意进程（它能读文件系统）。
+- **本地信任模型，无配对 token**：同机任何进程都可连 daemon。这是刻意的简化——
+  连接成本为零；但不要在共享/多用户机器上运行 daemon（同机恶意进程可控制浏览器）
+- token 曾作为本机进程防线（v0.7.0–v0.8.0 默认启用 `?token=` 校验），现已移除；
+  它防不住同用户恶意进程（能读文件系统），收益小于配置成本
   所以 `work/states/` 明文登录态同样只在你信任本机进程的前提下存放，已 gitignore，分享仓库前注意
 - 扩展申请了 `debugger` + `<all_urls>` 权限——这是 CDP 驱动的必要权限，等同于把浏览器控制权交给本机 daemon
 

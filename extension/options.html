@@ -14,13 +14,10 @@
 </style>
 </head>
 <body>
-<h1>Open Web Bridge 配对</h1>
-<p>daemon 启动时会在终端打印配对 token（同时写入 <code>work/.token</code>）。把 token 粘贴到下面，保存后扩展自动重连。只需配这一次。</p>
-<label for="token">配对 token</label>
-<input id="token" placeholder="daemon 终端里 [owb-daemon] 配对 token: 后面的那串">
+<h1>Open Web Bridge 设置</h1>
+<p>扩展默认连接本地 daemon（<code>ws://127.0.0.1:18086/ws</code>）。一般无需配置，保存即重连。</p>
 <label for="wsUrl">daemon 地址（一般不用改）</label>
 <input id="wsUrl" placeholder="ws://127.0.0.1:18086/ws">
-<div class="hint">daemon 已关闭 token 认证（OWB_TOKEN=""）时，token 留空即可。</div>
 <button id="save">保存并重连</button>
 <div id="msg"></div>
 <script src="options.js"></script>

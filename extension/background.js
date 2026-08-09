@@ -41,17 +41,15 @@ const DEFAULT_CONFIG = {
 let config = { ...DEFAULT_CONFIG };
 
 async function loadConfig() {
-  const stored = await chrome.storage.local.get(["wsUrl", "owbToken"]);
+  const stored = await chrome.storage.local.get(["wsUrl"]);
   config.wsUrl = stored.wsUrl || DEFAULT_CONFIG.wsUrl;
-  config.token = stored.owbToken || "";
-  // ws.json（扩展目录内可选文件，e2e 隔离/多实例调试用）：覆盖 wsUrl / token。
+  // ws.json（扩展目录内可选文件，e2e 隔离/多实例调试用）：覆盖 wsUrl。
   // 文件优先于 storage——它是开发者显式放置的配置。
   try {
     const res = await fetch(chrome.runtime.getURL("ws.json"));
     if (res.ok) {
       const j = await res.json();
       if (j.wsUrl) config.wsUrl = j.wsUrl;
-      if (j.token) config.token = j.token;
       log("ws.json override", config.wsUrl);
     }
   } catch (e) {}
@@ -64,12 +62,12 @@ async function boot() {
   connect();
 }
 
-// options 页保存即时生效：wsUrl/owbToken 变化 → 重读配置并立即重连
+// options 页保存即时生效：wsUrl 变化 → 重读配置并立即重连
 // （不等自然断连/4401 轮询）。cleanupWs 会把旧 ws 的回调置 null，
 // close 不会触发 scheduleReconnect，直接 connect 即可。
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (!changes.wsUrl && !changes.owbToken) return;
+  if (!changes.wsUrl) return;
   loadConfig().then(() => {
     cleanupWs();
     connect();
@@ -99,15 +97,9 @@ function send(msg) {
 function connect() {
   if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
   cleanupWs();
-  // 配对 token 走 URL query（daemon 侧在 upgrade 时校验；空 token 直连，
-  // 兼容 OWB_TOKEN="" 关闭认证的 daemon）
-  const url = config.token
-    ? config.wsUrl + (config.wsUrl.includes("?") ? "&" : "?") +
-      "token=" + encodeURIComponent(config.token)
-    : config.wsUrl;
   log("ws connecting", config.wsUrl);
   try {
-    ws = new WebSocket(url);
+    ws = new WebSocket(config.wsUrl);
   } catch (e) {
     scheduleReconnect();
     return;
@@ -136,12 +128,6 @@ function connect() {
     helloAcked = false;
     failSafeFetchAll(); // 红线级：防 Fetch 拦截卡死用户页面
     scheduleDeadman();  // 死开关：daemon 长时间不可达则全面 detach
-    if (ev && ev.code === 4401) {
-      // 配对 token 不对/缺失：用户可能正在 options 页粘贴，重读配置再重连
-      log("配对 token 被 daemon 拒绝（4401）：请在扩展选项页粘贴 daemon 启动时打印的 token");
-      loadConfig().finally(scheduleReconnect);
-      return;
-    }
     scheduleReconnect();
   };
   ws.onerror = () => {

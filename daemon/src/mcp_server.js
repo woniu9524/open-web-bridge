@@ -26,9 +26,9 @@ import WebSocket from "ws";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { HOST, PORT, WORK_DIR, resolveToken, withToken } from "./server.js";
+import { HOST, PORT } from "./server.js";
 
-const CTL_URL = withToken(`ws://${HOST}:${PORT}/ctl`, resolveToken(WORK_DIR));
+const CTL_URL = `ws://${HOST}:${PORT}/ctl`;
 const CALL_TIMEOUT_S = 120.0; // ctl 侧上限 300；MCP 默认给 120，重活（截图/导航慢站）可调大
 
 // ---------------------------------------------------------------------------
@@ -212,7 +212,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } catch (e) {
     return _errResult(
       "CTL_UNREACHABLE",
-      `daemon 不可达（${CTL_URL.replace(/([?&]token=)[^&]+/, "$1***")}）：` +
+      `daemon 不可达（${CTL_URL}）：` +
       `${e && e.message ? e.message : e}。` +
       "先启动 daemon：cd daemon && npm start");
   }

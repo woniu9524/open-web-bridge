@@ -7,13 +7,13 @@
  *   owb-ctl network_detail '{"request_id": "..."}' --timeout 60
  *   owb-ctl --events [--since N] [--sources hook:xhr,network] [--url-pattern REGEX]
  *
- * ctl 通道带配对 token：自动读取 OWB_TOKEN 或 <work>/.token，无需手工配置。
+ * ctl 通道直连（本地信任模型，无 token）。
  */
 import WebSocket from "ws";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { PORT, WORK_DIR, resolveToken, withToken } from "./server.js";
+import { PORT } from "./server.js";
 
 const DOC = `命令行控制器（测试用）：
 
@@ -22,11 +22,11 @@ const DOC = `命令行控制器（测试用）：
   owb-ctl network_detail '{"request_id": "..."}' --timeout 60
   owb-ctl --events [--since N] [--sources hook:xhr,network] [--url-pattern REGEX]
 
-ctl 通道带配对 token：自动读取 OWB_TOKEN 或 <work>/.token，无需手工配置。`;
+ctl 通道直连（本地信任模型，无 token）。`;
 
 function connect() {
   return new Promise((resolve, reject) => {
-    const url = withToken(`ws://127.0.0.1:${PORT}/ctl`, resolveToken(WORK_DIR));
+    const url = `ws://127.0.0.1:${PORT}/ctl`;
     const ws = new WebSocket(url, { maxPayload: 64 * 1024 * 1024 });
     ws.once("open", () => resolve(ws));
     ws.once("error", reject);

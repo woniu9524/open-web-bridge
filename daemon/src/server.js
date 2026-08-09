@@ -6,10 +6,8 @@
  *   扩展  → ws://127.0.0.1:18086/ws   （hello 握手，Host/Origin 校验防 DNS rebinding）
  *   控制器 → ws://127.0.0.1:18086/ctl  （call / subscribe / events 补拉）
  *
- * 仅绑定 127.0.0.1。配对 token（默认启用）：两条通道都校验
- * WS URL 的 ?token= 参数。token 首启自动生成写入 <work>/.token（0600），
- * ctl/MCP 客户端同机自动读取零摩擦，扩展在 options 页粘贴一次即可。
- * OWB_TOKEN 环境变量可指定固定值；OWB_TOKEN="" 显式关闭认证（回到本地信任模型）。
+ * 仅绑定 127.0.0.1。本地信任模型：无 token 认证（同机任意进程可连），
+ * Host/Origin 校验防网页 DNS rebinding。
  *
  * 端口可用环境变量 OWB_PORT 覆盖（e2e 与日常浏览器隔离用；
  * 单扩展模型下两个浏览器实例会在同一端口上互相顶替）。
@@ -19,7 +17,6 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 
@@ -41,30 +38,9 @@ const EXTENSION_CLIENT = "open-web-bridge-extension";
 // 大 tool_result（响应体/截图 base64）走 JSON 文本帧，默认 1MiB 会掐断连接
 const MAX_PAYLOAD = 64 * 1024 * 1024;
 
-// ---- 配对 token -------------------------------------------------------------
-// 解析顺序：OWB_TOKEN 环境变量（非空=固定值，空字符串=显式关闭认证）→
-// <work>/.token（不存在则首启生成 48 位 hex，0600 权限）。
-// 客户端（ctl/MCP）经 resolveToken 同机自动读取，无需配置。
-/** 返回 token 字符串；返回 null 表示认证已显式关闭。 */
-export function resolveToken(workDir = WORK_DIR) {
-  const env = process.env.OWB_TOKEN;
-  if (env !== undefined) return env === "" ? null : env;
-  const p = path.join(workDir, ".token");
-  try {
-    const t = fs.readFileSync(p, "utf8").trim();
-    if (t) return t;
-  } catch (e) { /* 不存在则走下方生成 */ }
-  const t = crypto.randomBytes(24).toString("hex");
-  fs.mkdirSync(workDir, { recursive: true });
-  fs.writeFileSync(p, t, { mode: 0o600 });
-  return t;
-}
-
-/** ctl/ws URL 拼 token 参数（token 为 null 时原样返回）。 */
-export function withToken(url, token) {
-  if (!token) return url;
-  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
-}
+// ---- 安全（Host + Origin 校验防 DNS rebinding / CSRF）----
+// 本地信任模型：仅绑定 127.0.0.1，不做 token 认证（同机任意进程可连）。
+// Host/Origin 是两层防线中的第二层：防网页经 DNS rebinding 打本机 daemon。
 
 // --- 小工具 -----------------------------------------------------------------
 
@@ -146,12 +122,6 @@ export class Bridge {
       return;
     }
     const url = new URL(req.url || "/", "http://x");
-    // 配对 token 校验（this.token 为 null 表示认证已关闭）。
-    // 与 Host/Origin 是两层：Host/Origin 防网页 DNS rebinding，token 防本机进程。
-    if (this.token && url.searchParams.get("token") !== this.token) {
-      ws.close(4401, "bad token");
-      return;
-    }
     const pathname = url.pathname;
     if (pathname === "/ws") {
       this.handleExtension(ws);
@@ -753,15 +723,7 @@ export class Bridge {
 
 export async function serve(workDir = WORK_DIR) {
   const bridge = new Bridge(workDir);
-  bridge.token = resolveToken(workDir);
-  console.log(`[owb-daemon] ws://${HOST}:${PORT}`);
-  if (bridge.token) {
-    console.log(`[owb-daemon] 配对 token: ${bridge.token}`);
-    console.log(`[owb-daemon]   （同机 ctl/MCP 自动读取 ${path.join(workDir, ".token")}；` +
-      "扩展在 options 页粘贴一次即可。OWB_TOKEN=\"\" 可关闭认证）");
-  } else {
-    console.log("[owb-daemon] ⚠️ token 认证已关闭（OWB_TOKEN=\"\"），同机任意进程可连");
-  }
+  console.log(`[owb-daemon] ws://${HOST}:${PORT}（本地信任模型，无 token 认证）`);
   const wss = new WebSocketServer({ host: HOST, port: PORT, maxPayload: MAX_PAYLOAD });
   wss.on("connection", (ws, req) => bridge.onConnection(ws, req));
   await new Promise((resolve, reject) => {

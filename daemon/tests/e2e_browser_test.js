@@ -264,14 +264,10 @@ async function main() {
     }
 
     // 3. headless Chrome + 扩展副本（ws.json 指向独立端口，防日常浏览器顶替）
-    //    token：daemon 首启生成于 <work>/.token，随 ws.json 一起喂给扩展副本
-    const token = fs.readFileSync(
-      path.join(tmpdir, "work", ".token"), "utf8").trim();
     const extCopy = path.join(tmpdir, "ext");
     fs.cpSync(EXT_DIR, extCopy, { recursive: true });
     fs.writeFileSync(path.join(extCopy, "ws.json"), jstr({
       wsUrl: `ws://${HOST}:${e2ePort}/ws`,
-      token,
     }), "utf8");
     chromeProc = spawn(chrome, [
       "--headless=new", "--disable-gpu", "--mute-audio",
@@ -284,7 +280,7 @@ async function main() {
     ], { stdio: "ignore" });
 
     // 4. 等扩展连接
-    ctl = new Ctl(e2ePort, token);
+    ctl = new Ctl(e2ePort);
     await ctl.connect();
     let extReady = false;
     for (let i = 0; i < 60; i++) {
@@ -337,7 +333,7 @@ async function main() {
     }
 
     // 7. hook_preset(xhr)：注入 + reload + 事件流
-    sub = new Ctl(e2ePort, token);
+    sub = new Ctl(e2ePort);
     await sub.connect(true);
     res = await ctl.call("hook_preset", { presets: ["xhr"] });
     check("hook_preset 注册+reload",
@@ -394,7 +390,7 @@ async function main() {
     // 的 evaluate 必须走独立连接 + 后台 promise，否则 evaluate 等 resume、
     // frame_read 等 evaluate 形成死锁（e2e 实测踩坑）。
     await ctl.call("break_xhr", { url_substring: "/api/data" });
-    const ctl2 = new Ctl(e2ePort, token);
+    const ctl2 = new Ctl(e2ePort);
     await ctl2.connect();
     const fireP = ctl2.call("evaluate", { expression: "void window.fireRequest()" });
     fireP.catch(() => {});  // 结果不作硬检查，防未处理 rejection
@@ -445,7 +441,7 @@ async function main() {
     check("break_function 注册",
       res.ok && (res.data || {}).armed === "fn:owbSign",
       jstr(res).slice(0, 200));
-    const ctl3 = new Ctl(e2ePort, token);
+    const ctl3 = new Ctl(e2ePort);
     await ctl3.connect();
     sub.events.length = 0;  // 清掉 break_xhr 阶段的旧 paused 事件，防误匹配
     const fire2 = ctl3.call("evaluate", { expression: "void window.fireRequest()" });
@@ -663,7 +659,7 @@ async function main() {
     // wait_user url_change：独立连接挂起等待（单连接消息顺序处理，同连会自锁），
     // 主连接 1s 后改 href 模拟用户接管；daemon 侧 timeout 须 ≥ timeout_ms/1000 + 10
     sub.events.length = 0;
-    const ctl4 = new Ctl(e2ePort, token);
+    const ctl4 = new Ctl(e2ePort);
     await ctl4.connect();
     const waitP = ctl4.call("wait_user",
       { tabId: v5Tid, condition: "url_change", timeout_ms: 15000 }, 25);
