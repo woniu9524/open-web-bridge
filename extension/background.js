@@ -11,6 +11,8 @@
  * 工具集：
  *  基础: status / list_tabs / find_tab / navigate / evaluate / close_tab
  *  通用: screenshot / click / fill / send_keys / cdp（任意 CDP 逃生舱）
+ *  交互盲区: download / upload / print_pdf / list_frames（iframe 定向 evaluate frame_pattern）
+ *  环境模拟: emulate（设备/网络/地理/时区/语言/权限/UA） / emulate_reset
  *  抓包: network_start / network_stop / network_list / network_detail / get_initiator
  *  录制(HAR): record_start / record_stop / record_status（独立 recorder，主动收 body
  *            + timing + WebSocket；附 console 归档 / storage 变更流 / 导航截图；
@@ -270,6 +272,9 @@ chrome.debugger.onDetach.addListener((source) => {
     recorders.delete(source.tabId); // detach 即停录制（数据随 HARBuilder 已可产出）
     recorderSkipped.delete(source.tabId);
     recorderOrigins.delete(source.tabId);
+    downloadWatchers.delete(source.tabId);
+    frameContexts.delete(source.tabId);
+    emulateState.delete(source.tabId);
     saveHookRegistry();
     pushEvent("debugger", { reason: "detach", tabId: source.tabId });
   }
@@ -288,6 +293,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   recorders.delete(tabId);
   recorderSkipped.delete(tabId);
   recorderOrigins.delete(tabId);
+  downloadWatchers.delete(tabId);
+  frameContexts.delete(tabId);
+  emulateState.delete(tabId);
 });
 
 function cdpCall(tabId, method, params = {}) {
@@ -754,6 +762,12 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     feedRecorderScreenshot(tabId, "navigation", params.frame.url || null);
     return;
   }
+  // 下载：downloadWillBegin + downloadProgress → 一次性 watcher resolve
+  if (method === "Page.downloadWillBegin") return onDownloadBegin(tabId, params);
+  if (method === "Page.downloadProgress") return onDownloadProgress(tabId, params);
+  // 执行上下文：iframe 的 contextId 登记（list_frames / frame 定向 evaluate 用）
+  if (method === "Runtime.executionContextCreated") return onContextCreated(tabId, params);
+  if (method === "Runtime.executionContextDestroyed") return onContextDestroyed(tabId, params);
   // Fetch 域脚本改写（async fire-and-forget，内部异常自吞并放行）
   if (method === "Fetch.requestPaused") {
     handleFetchPaused(tabId, params);
@@ -794,6 +808,84 @@ function truncateForEvent(rec) {
   }
   delete out.requestHeaders; // 事件里不带全量 headers，detail 里取
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// E. 浏览器交互盲区：下载 / 上传 / PDF / iframe
+// ---------------------------------------------------------------------------
+
+/** tabId -> { resolve, reject, filename, url, guid } 一次性下载 watcher */
+const downloadWatchers = new Map();
+/** tabId -> Array<{contextId, frameId, name, url, auxData}> iframe 执行上下文登记 */
+const frameContexts = new Map();
+
+function onDownloadBegin(tabId, params) {
+  const w = downloadWatchers.get(tabId);
+  if (!w) return;
+  w.guid = params.guid;
+  w.url = params.url;
+  w.filename = params.suggestedFilename || w.filename;
+}
+
+function onDownloadProgress(tabId, params) {
+  const w = downloadWatchers.get(tabId);
+  if (!w || params.guid !== w.guid) return;
+  if (params.state === "completed") {
+    w.resolve({ state: "completed", receivedBytes: params.receivedBytes });
+  } else if (params.state === "canceled") {
+    w.reject(new ToolError("DOWNLOAD_CANCELED", "download was canceled", false));
+  }
+}
+
+function onContextCreated(tabId, params) {
+  const ctx = params.context || {};
+  if (!ctx.id || !ctx.auxData) return;
+  let list = frameContexts.get(tabId);
+  if (!list) { list = []; frameContexts.set(tabId, list); }
+  // 去重（同 contextId 不重复登记）
+  if (!list.some((c) => c.contextId === ctx.id)) {
+    list.push({
+      contextId: ctx.id,
+      frameId: ctx.auxData.frameId || null,
+      name: ctx.name || "",
+      url: ctx.origin || "",
+      isDefault: !!ctx.auxData.isDefault,
+    });
+  }
+}
+
+function onContextDestroyed(tabId, params) {
+  const list = frameContexts.get(tabId);
+  if (!list) return;
+  const idx = list.findIndex((c) => c.contextId === params.executionContextId);
+  if (idx >= 0) list.splice(idx, 1);
+}
+
+// 按 frame url/name 子串匹配找 iframe 的 contextId（evaluate 在指定 frame 执行用）
+function resolveFrameContextId(tabId, framePattern) {
+  const list = frameContexts.get(tabId);
+  if (!list || !list.length) return null;
+  // 默认主帧
+  if (!framePattern) {
+    const def = list.find((c) => c.isDefault);
+    return def ? def.contextId : list[0].contextId;
+  }
+  const c = list.find((x) => (x.url && x.url.includes(framePattern)) || (x.name && x.name.includes(framePattern)));
+  return c ? c.contextId : null;
+}
+
+// ---------------------------------------------------------------------------
+// D. 环境模拟：设备 / 网络 / 地理 / 时区 / 语言 / 权限 / UA 覆盖
+// 每项独立可选，emulate_reset 清空。emulateState 记已覆盖项便于 reset + status。
+// ---------------------------------------------------------------------------
+
+/** tabId -> Set<overrideType> 已应用的覆盖类型 */
+const emulateState = new Map();
+
+function emulateApplied(tabId, type) {
+  let s = emulateState.get(tabId);
+  if (!s) { s = new Set(); emulateState.set(tabId, s); }
+  s.add(type);
 }
 
 // ---------------------------------------------------------------------------
@@ -1839,10 +1931,21 @@ const tools = {
     if (!args.expression) throw new ToolError("BAD_ARGS", "evaluate: expression is required");
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
+    // frame_pattern：在指定 iframe 的执行上下文里求值（先用 list_frames 看 frame 列表）
+    let contextId = undefined;
+    if (args.frame_pattern != null) {
+      try { await cdpCall(tabId, "Runtime.enable"); } catch (e) {}
+      contextId = resolveFrameContextId(tabId, args.frame_pattern);
+      if (!contextId) {
+        throw new ToolError("FRAME_NOT_FOUND",
+          `no iframe context matching ${JSON.stringify(args.frame_pattern)}; call list_frames first`, true);
+      }
+    }
     const res = await cdpCall(tabId, "Runtime.evaluate", {
       expression: args.expression,
       returnByValue: args.returnByValue !== false,
       awaitPromise: !!args.awaitPromise,
+      contextId,
     });
     if (res.exceptionDetails) {
       throw new ToolError(
@@ -2027,6 +2130,242 @@ const tools = {
     const rec = recorders.get(tabId);
     if (!rec) return { tabId, recording: false };
     return statusOf(tabId, rec);
+  },
+
+  // ---- E1. 文件下载（Page.setDownloadBehavior + downloadProgress 等）----
+
+  async download(args) {
+    const tabId = await resolveTabId(args);
+    if (!args.selector && !args.url) {
+      throw new ToolError("BAD_ARGS", "download: selector 或 url 必填一个", false);
+    }
+    await ensureAttached(tabId);
+    try { await cdpCall(tabId, "Page.enable"); } catch (e) {}
+    // 默认下载目录：浏览器默认 Downloads；save_path（绝对路径）可覆盖
+    const dlPath = args.save_path || "";
+    try {
+      await cdpCall(tabId, "Page.setDownloadBehavior",
+        dlPath ? { behavior: "allow", downloadPath: dlPath } : { behavior: "allow", eventsEnabled: true });
+    } catch (e) {
+      // 旧版 Chrome 仅支持 behavior+downloadPath，eventsEnabled 可能不支持
+      await cdpCall(tabId, "Page.setDownloadBehavior",
+        dlPath ? { behavior: "allow", downloadPath: dlPath } : { behavior: "default" });
+    }
+    // 登记一次性 watcher
+    const timeoutMs = Math.min(args.timeout_ms || 60000, 180000);
+    const watchPromise = new Promise((resolve, reject) => {
+      const w = { resolve, reject, filename: "", url: "", guid: null };
+      downloadWatchers.set(tabId, w);
+    });
+    // 触发下载：url 直接导航，或 click selector
+    try {
+      if (args.url) {
+        await cdpCall(tabId, "Page.navigate", { url: args.url });
+      } else {
+        await tools.click({ tabId, selector: args.selector });
+      }
+    } catch (e) {
+      downloadWatchers.delete(tabId);
+      throw e;
+    }
+    // 等下载收尾
+    let result;
+    try {
+      const timer = new Promise((_, reject) =>
+        setTimeout(() => reject(new ToolError("TIMEOUT", `download not completed in ${timeoutMs}ms`, true)), timeoutMs));
+      result = await Promise.race([watchPromise, timer]);
+    } finally {
+      downloadWatchers.delete(tabId);
+    }
+    const fullPath = dlPath && result.filename ? dlPath.replace(/[\\/]+$/, "") + "/" + result.filename : result.filename || "(default dir)";
+    pushEvent("download", { tabId, filename: result.filename, url: watchPromise.url });
+    return { tabId, filename: result.filename, path: fullPath, receivedBytes: result.receivedBytes, state: result.state };
+  },
+
+  // ---- E2. 文件上传（页面内 DataTransfer + File，无需文件系统）----
+
+  async upload(args) {
+    if (!args.selector) throw new ToolError("BAD_ARGS", "upload: selector is required", false);
+    if (!Array.isArray(args.files) || !args.files.length) {
+      throw new ToolError("BAD_ARGS", "upload: files array required", false);
+    }
+    const tabId = await resolveTabId(args);
+    await ensureAttached(tabId);
+    // 校验 + 归一化文件项
+    const norm = args.files.map((f) => {
+      if (!f || !f.name || f.base64 == null) {
+        throw new ToolError("BAD_ARGS", "upload: each file needs {name, base64}", false);
+      }
+      return { name: String(f.name), base64: String(f.base64), mime: f.mime || "application/octet-stream" };
+    });
+    // 页面内：找 input、构造 File、赋给 .files、派发 change（绕文件系统，relay 模式也能用）
+    const expr = `(() => {
+      const input = document.querySelector(${JSON.stringify(args.selector)});
+      if (!input) return { ok: false, error: "selector not found" };
+      const dt = new DataTransfer();
+      for (const f of ${JSON.stringify(norm)}) {
+        const bin = atob(f.base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        dt.items.add(new File([bytes], f.name, { type: f.mime }));
+      }
+      input.files = dt.files;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      return { ok: true, count: input.files.length };
+    })()`;
+    const res = await cdpCall(tabId, "Runtime.evaluate", { expression: expr, returnByValue: true });
+    const v = res.result && res.result.value;
+    if (!v || !v.ok) {
+      throw new ToolError("UPLOAD_FAILED", (v && v.error) || "upload failed", false);
+    }
+    return { tabId, filesSet: v.count };
+  },
+
+  // ---- E3. PDF 导出（Page.printToPDF）----
+
+  async print_pdf(args) {
+    const tabId = await resolveTabId(args);
+    await ensureAttached(tabId);
+    const opts = {
+      landscape: !!args.landscape,
+      printBackground: args.print_background !== false,
+      paperFormat: args.format || "A4",
+      marginTop: args.margin_top != null ? args.margin_top : 0.4,
+      marginBottom: args.margin_bottom != null ? args.margin_bottom : 0.4,
+      marginLeft: args.margin_left != null ? args.margin_left : 0.4,
+      marginRight: args.margin_right != null ? args.margin_right : 0.4,
+      preferCSSPageSize: !!args.prefer_css_page_size,
+    };
+    const { data } = await cdpCall(tabId, "Page.printToPDF", opts);
+    return { tabId, format: opts.paperFormat, data, size: data ? data.length : 0 };
+  },
+
+  // ---- E4. iframe / 执行上下文（list_frames + frame 定向 evaluate）----
+
+  async list_frames(args) {
+    const tabId = await resolveTabId(args);
+    await ensureAttached(tabId);
+    try { await cdpCall(tabId, "Runtime.enable"); } catch (e) {}
+    const treeRes = await cdpCall(tabId, "Page.getFrameTree");
+    const ctxs = frameContexts.get(tabId) || [];
+    // frame 树 + 各 frame 的 contextId（若有）
+    const ctxByFrame = new Map(ctxs.map((c) => [c.frameId, c.contextId]));
+    const walk = (frame, depth) => {
+      const f = frame.frame;
+      return {
+        frameId: f.id,
+        url: f.url,
+        name: f.name || "",
+        contextId: ctxByFrame.get(f.id) || null,
+        securityOrigin: f.securityOrigin || "",
+        mimeType: f.mimeType || "",
+        depth,
+        children: (frame.childFrames || []).map((c) => walk(c, depth + 1)),
+      };
+    };
+    return { tabId, main: walk(treeRes.frameTree, 0), contexts: ctxs };
+  },
+
+  // ---- D. 环境模拟：设备/网络/地理/时区/语言/权限/UA（统一 emulate 入口）----
+
+  async emulate(args) {
+    const tabId = await resolveTabId(args);
+    await ensureAttached(tabId);
+    const applied = [];
+    const errs = [];
+    // 设备视口/触摸
+    if (args.device) {
+      const d = args.device;
+      try {
+        await cdpCall(tabId, "Emulation.setDeviceMetricsOverride", {
+          width: d.width || 360, height: d.height || 640,
+          deviceScaleFactor: d.device_scale_factor != null ? d.device_scale_factor : 1,
+          mobile: !!d.mobile, touch: !!d.touch,
+        });
+        emulateApplied(tabId, "device"); applied.push("device");
+      } catch (e) { errs.push("device: " + e.message); }
+    }
+    // 网络节流
+    if (args.network) {
+      const n = args.network;
+      try {
+        await cdpCall(tabId, "Network.emulateNetworkConditions", {
+          offline: !!n.offline,
+          latency: n.latency || 0,
+          downloadThroughput: n.download || -1,
+          uploadThroughput: n.upload || -1,
+        });
+        emulateApplied(tabId, "network"); applied.push("network");
+      } catch (e) { errs.push("network: " + e.message); }
+    }
+    // 地理位置覆盖
+    if (args.geolocation) {
+      try {
+        await cdpCall(tabId, "Emulation.setGeolocationOverride", {
+          latitude: args.geolocation.latitude || 0,
+          longitude: args.geolocation.longitude || 0,
+          accuracy: args.geolocation.accuracy || 100,
+        });
+        emulateApplied(tabId, "geolocation"); applied.push("geolocation");
+      } catch (e) { errs.push("geolocation: " + e.message); }
+    }
+    // 时区
+    if (args.timezone) {
+      try {
+        await cdpCall(tabId, "Emulation.setTimezoneOverride", { timezoneId: args.timezone });
+        emulateApplied(tabId, "timezone"); applied.push("timezone");
+      } catch (e) { errs.push("timezone: " + e.message); }
+    }
+    // 语言
+    if (args.locale) {
+      try {
+        await cdpCall(tabId, "Emulation.setLocaleOverride", { locale: args.locale });
+        emulateApplied(tabId, "locale"); applied.push("locale");
+      } catch (e) { errs.push("locale: " + e.message); }
+    }
+    // 权限授予（notification/geolocation/camera...）
+    if (Array.isArray(args.permissions) && args.permissions.length) {
+      try {
+        await cdpCall(tabId, "Browser.grantPermissions", { permissions: args.permissions });
+        emulateApplied(tabId, "permissions"); applied.push("permissions");
+      } catch (e) { errs.push("permissions: " + e.message); }
+    }
+    // UA 覆盖
+    if (args.user_agent) {
+      try {
+        await cdpCall(tabId, "Emulation.setUserAgentOverride",
+          { userAgent: args.user_agent, acceptLanguage: args.locale || undefined });
+        emulateApplied(tabId, "user_agent"); applied.push("user_agent");
+      } catch (e) { errs.push("user_agent: " + e.message); }
+    }
+    return { tabId, applied, errors: errs.length ? errs : undefined,
+             active: emulateState.get(tabId) ? [...emulateState.get(tabId)] : [] };
+  },
+
+  async emulate_reset(args) {
+    const tabId = await resolveTabId(args);
+    const s = emulateState.get(tabId);
+    if (!s) return { tabId, reset: [] };
+    const reset = [];
+    for (const type of s) {
+      try {
+        if (type === "device") await cdpCall(tabId, "Emulation.clearDeviceMetricsOverride");
+        else if (type === "network") {
+          // Network 重置节流：disable 再 enable（emulateNetworkConditions 无 clear）
+          try { await cdpCall(tabId, "Network.disable"); } catch (e) {}
+          await cdpCall(tabId, "Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+        }
+        else if (type === "geolocation") await cdpCall(tabId, "Emulation.clearGeolocationOverride");
+        else if (type === "timezone") await cdpCall(tabId, "Emulation.setTimezoneOverride", { timezoneId: "" });
+        else if (type === "locale") await cdpCall(tabId, "Emulation.setLocaleOverride", { locale: "" });
+        else if (type === "permissions") await cdpCall(tabId, "Browser.resetPermissions");
+        else if (type === "user_agent") await cdpCall(tabId, "Emulation.setUserAgentOverride", { userAgent: "" });
+        reset.push(type);
+      } catch (e) {}
+    }
+    emulateState.delete(tabId);
+    return { tabId, reset };
   },
 
   async hook_preset(args) {

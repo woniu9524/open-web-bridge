@@ -822,6 +822,24 @@ export class Bridge {
         bodyBytes: data.bodyBytes || 0, tabIds: data.tabIds || null,
       } };
     }
+    // ---- E1 下载编排：扩展 download(save_path=work/downloads 绝对路径) → 返回落盘路径 ----
+    if (name === "download") {
+      const dlDirAbs = this.store._abs("downloads");
+      const callArgs = { save_path: dlDirAbs };
+      if (args.tabId != null) callArgs.tabId = args.tabId;
+      if (args.url) callArgs.url = args.url;
+      if (args.selector) callArgs.selector = args.selector;
+      if (args.timeout_ms != null) callArgs.timeout_ms = args.timeout_ms;
+      const res = await this.call_tool("download", callArgs, 180);
+      if (!res.ok) return res;
+      const data = res.data || {};
+      return { ok: true, data: {
+        filename: data.filename || null,
+        path: data.path || null,
+        receivedBytes: data.receivedBytes != null ? data.receivedBytes : null,
+        dir: `downloads/${data.filename || ""}`,
+      } };
+    }
     // ---- C7: HAR → 重放脚本（python/curl/node）----
     if (name === "har_to_replay") {
       let har = args.har;

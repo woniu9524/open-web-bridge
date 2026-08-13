@@ -2,7 +2,7 @@
  * MCP 接入面冒烟测试：stdio 拉起真 mcp_server + 真 daemon 子进程。
  *
  * 覆盖：
- *   1. initialize + list_tools：69 个工具，daemon_* 命名映射在列
+ *   1. initialize + list_tools：76 个工具，daemon_* 命名映射在列
  *   2. call daemon_status → ok（daemon 本地工具不经浏览器，无需扩展）
  *   3. call 未知工具 → UNKNOWN_TOOL 错误模型
  *   4. call status → 转发到扩展通道（扩展未连时 NO_EXTENSION，连着时 ok；两者都算链路通）
@@ -64,7 +64,7 @@ async function main() {
 
     const tools = (await client.listTools()).tools;
     const names = new Set(tools.map((t) => t.name));
-    check("list_tools 69 个", tools.length === 69, `count=${tools.length}`);
+    check("list_tools 76 个", tools.length === 76, `count=${tools.length}`);
     check("daemon_* 命名映射",
       names.has("daemon_status") && names.has("daemon_replay")
       && names.has("status") && names.has("oracle_call"));
@@ -77,6 +77,10 @@ async function main() {
       && names.has("record_status") && names.has("daemon_har_save")
       && names.has("daemon_har_to_replay") && names.has("daemon_har_diff")
       && names.has("daemon_har_assert"));
+    check("交互盲区与环境模拟工具在列",
+      names.has("download") && names.has("upload") && names.has("print_pdf")
+      && names.has("list_frames") && names.has("emulate") && names.has("emulate_reset")
+      && names.has("daemon_download"));
     check("人机协作与工作流/会话库工具在列",
       names.has("mouse_click") && names.has("handoff") && names.has("wait_user")
       && names.has("daemon_workflow_save") && names.has("daemon_workflow_run")
