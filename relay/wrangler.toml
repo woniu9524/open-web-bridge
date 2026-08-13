@@ -7,10 +7,11 @@ compatibility_date = "2025-09-01"
 name = "RELAY_ROOM"
 class_name = "RelayRoom"
 
-# 声明 DO 类（首次部署需要这条 migration；之后改类结构再加新 tag）
+# 声明 DO 类（首次部署需要这条 migration；之后改类结构再加新 tag）。
+# 用 new_sqlite_classes：Free 计划强制要求 SQLite 后端的 DO（即便本 DO 不用持久存储）。
 [[migrations]]
 tag = "v1"
-new_classes = ["RelayRoom"]
+new_sqlite_classes = ["RelayRoom"]
 
 # 默认 *.workers.dev 子域即用（自带 TLS）。
 # 想用自定义域：CF Dashboard → Workers Routes 绑定自己的域名，TLS 自动签发。
