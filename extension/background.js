@@ -96,6 +96,40 @@ chrome.storage.onChanged.addListener((changes, area) => {
   });
 });
 
+// popup 页：查连接状态 / 触发重连 / 打开设置页
+// （引用的 ws/helloAcked/relayPaired/reconnectTimer 等在下方声明；
+//  onMessage 回调异步触发，此时 SW 已完成顶层初始化，无 TDZ 问题）
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || !msg.cmd) return false;
+  if (msg.cmd === "status") {
+    sendResponse({
+      mode: config.relayMode ? "relay" : "local",
+      connected: wsOpen() && helloAcked,
+      relayPaired,
+      wsState: ws ? ws.readyState : 3, // 0 connecting 1 open 2 closing 3 closed
+      target: config.relayMode ? relayUrlOf(config) : config.wsUrl,
+      tokenMasked: config.relayToken
+        ? config.relayToken.slice(0, 6) + "…" + config.relayToken.slice(-4)
+        : null,
+      reconnectInMs: reconnectTimer ? reconnectDelayMs : 0,
+      version: chrome.runtime.getManifest().version,
+    });
+    return false; // 同步响应
+  }
+  if (msg.cmd === "reconnect") {
+    cleanupWs();
+    connect();
+    sendResponse({ ok: true });
+    return false;
+  }
+  if (msg.cmd === "openOptions") {
+    chrome.runtime.openOptionsPage();
+    sendResponse({ ok: true });
+    return false;
+  }
+  return false;
+});
+
 // ---------------------------------------------------------------------------
 // WS 客户端（含重连）
 // ---------------------------------------------------------------------------

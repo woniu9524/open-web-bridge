@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Open Web Bridge</title>
+<style>
+  body { font: 13px/1.5 system-ui, sans-serif; width: 300px; margin: 0; padding: 14px 14px 12px; color: #222; }
+  .head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .head img { width: 22px; height: 22px; }
+  .head h1 { font-size: 14px; margin: 0; flex: 1; }
+  .ver { color: #888; font-size: 11px; }
+  .card { border: 1px solid #e3e3e3; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #bbb; flex-shrink: 0; }
+  .dot.ok { background: #1e8e3e; }
+  .dot.wait { background: #f29900; animation: pulse 1.1s infinite; }
+  .dot.bad { background: #d93025; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .state { font-weight: 600; flex: 1; }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; font-weight: 600; }
+  .badge.local { background: #e8f0fe; color: #1a73e8; }
+  .badge.relay { background: #fef7e0; color: #b06000; }
+  .label { color: #666; font-size: 11px; margin-right: 4px; }
+  .val { font: 11px monospace; color: #333; word-break: break-all; flex: 1; }
+  .kv { display: flex; gap: 4px; margin: 3px 0; align-items: baseline; }
+  .actions { display: flex; gap: 8px; margin-top: 4px; }
+  button { flex: 1; padding: 7px 0; border: 1px solid #dadce0; border-radius: 6px; background: #fff; color: #1a73e8; cursor: pointer; font: 12px system-ui; }
+  button:hover { background: #f6faff; }
+  button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+  button.primary:hover { background: #1765cc; }
+  .hint { color: #888; font-size: 11px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="head">
+  <img src="icons/icon48.png" alt="">
+  <h1>Open Web Bridge</h1>
+  <span class="ver" id="ver"></span>
+</div>
+
+<div class="card">
+  <div class="row">
+    <span id="dot" class="dot"></span>
+    <span id="state" class="state">查询中…</span>
+    <span id="mode" class="badge local">本地</span>
+  </div>
+  <div class="kv"><span class="label">目标</span><span id="target" class="val">—</span></div>
+  <div class="kv" id="tokenRow" style="display:none"><span class="label">Token</span><span id="token" class="val"></span></div>
+</div>
+
+<div class="actions">
+  <button id="reconnect" class="primary">重新连接</button>
+  <button id="options">打开设置</button>
+</div>
+<div class="hint" id="hint"></div>
+
+<script src="popup.js"></script>
+</body>
+</html>
