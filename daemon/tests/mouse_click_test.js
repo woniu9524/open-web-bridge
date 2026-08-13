@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8");
+  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8")
+  .replace(/\r\n/g, "\n");
 const m = bg.match(/const CURSOR_OVERLAY_EXPR = `([\s\S]*?)`;\n/);
 if (!m) {
   console.error("[FAIL] 无法从 background.js 提取 CURSOR_OVERLAY_EXPR");

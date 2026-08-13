@@ -12,6 +12,9 @@
  *  基础: status / list_tabs / find_tab / navigate / evaluate / close_tab
  *  通用: screenshot / click / fill / send_keys / cdp（任意 CDP 逃生舱）
  *  抓包: network_start / network_stop / network_list / network_detail / get_initiator
+ *  录制(HAR): record_start / record_stop / record_status（独立 recorder，主动收 body
+ *            + timing + WebSocket；附 console 归档 / storage 变更流 / 导航截图；
+ *            url/resource_type 过滤、多 tab 合并、护栏防爆内存）
  *  脚本: script_list / script_source / search_code（含 eval/VM 动态脚本）
  *  Cookie: cookie_get / cookie_set / cookie_delete
  *  Hook: hook_preset(xhr/fetch/crypto) / hook_function / hook_remove / hook_status
@@ -33,6 +36,9 @@
 // ---------------------------------------------------------------------------
 // 配置
 // ---------------------------------------------------------------------------
+
+import { Stats, StatsBuilder } from "./har/stats.js";
+import { HARBuilder } from "./har/builder.js";
 
 const DEFAULT_CONFIG = {
   wsUrl: "ws://127.0.0.1:18086/ws",
@@ -261,6 +267,9 @@ chrome.debugger.onDetach.addListener((source) => {
     fetchPatchTabs.delete(source.tabId);
     pendingFetches.delete(source.tabId);
     scriptWatchers.delete(source.tabId);
+    recorders.delete(source.tabId); // detach 即停录制（数据随 HARBuilder 已可产出）
+    recorderSkipped.delete(source.tabId);
+    recorderOrigins.delete(source.tabId);
     saveHookRegistry();
     pushEvent("debugger", { reason: "detach", tabId: source.tabId });
   }
@@ -276,6 +285,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   readPageNextRef.delete(tabId);
   readPageSnapshots.delete(tabId);
   handoffState.delete(tabId);
+  recorders.delete(tabId);
+  recorderSkipped.delete(tabId);
+  recorderOrigins.delete(tabId);
 });
 
 function cdpCall(tabId, method, params = {}) {
@@ -338,6 +350,245 @@ function bufferPut(tabId, requestId, record) {
   buf.set(requestId, { ...(buf.get(requestId) || {}), ...record });
 }
 
+// ---------------------------------------------------------------------------
+// HAR 录制器（per-tab，独立于 networkBuffers）
+// 与抓包探查缓冲解耦：无淘汰、主动收 body、记 timing/WebSocket、
+// 附带 console/storage/screenshots 增强流。recorders 是 Map<tabId, recorder>，
+// 天然支持多 tab 录制；record_stop 不指定 tabId 时停全部并合并为多 page HAR。
+// ---------------------------------------------------------------------------
+
+/** tabId -> recorder 对象 */
+const recorders = new Map();
+/** tabId -> Set<requestId> 被 url/resource_type 过滤掉的请求（后续事件一并跳过） */
+const recorderSkipped = new Map();
+/** tabId -> securityOrigin（DOMStorage.storageId 用） */
+const recorderOrigins = new Map();
+
+// 是否应把给定请求纳入录制（白/黑名单 + resource_type 过滤）
+function recorderAccepts(rec, url, resourceType) {
+  if (rec.urlFilter && !rec.urlFilter.test(url)) return false;
+  if (rec.excludeFilter && rec.excludeFilter.test(url)) return false;
+  if (rec.resourceTypes && resourceType && !rec.resourceTypes.has(String(resourceType).toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
+// 把一条 Network 域事件喂给该 tab 的活动 recorder（带过滤 + body 主动拉取）
+function feedRecorder(tabId, method, params) {
+  const rec = recorders.get(tabId);
+  if (!rec) return;
+  const stats = rec.stats;
+
+  // 跳过集：被过滤掉的请求，其后续事件也跳过
+  const skipped = recorderSkipped.get(tabId);
+  if (method === "Network.requestWillBeSent") {
+    const url = params.request && params.request.url ? params.request.url : "";
+    if (!recorderAccepts(rec, url, params.type)) {
+      if (skipped) skipped.add(params.requestId);
+      return;
+    }
+  } else if (skipped && skipped.has(params.requestId)) {
+    return;
+  }
+
+  StatsBuilder.processEvent(stats, { method, params });
+
+  // loadingFinished：主动拉 response body（受护栏约束）
+  if (method === "Network.loadingFinished" && rec.includeBodies && !rec.bodyCapped) {
+    const requestId = params.requestId;
+    const entry = stats.entries[requestId];
+    if (entry) {
+      const approxLen = entry.responseLength || 0;
+      if (approxLen > rec.maxBodyBytes) {
+        // 单条超阈值：跳过 body，仍保留元数据
+        entry.responseBody = undefined;
+      } else if (rec.bodyBytes + approxLen > rec.maxTotalBodyBytes) {
+        // 累计超总量：停止后续所有 body 收集
+        rec.bodyCapped = true;
+      } else {
+        // fire-and-forget；recorder 可能在回调前被停掉，故二次校验
+        cdpCall(tabId, "Network.getResponseBody", { requestId })
+          .then((body) => {
+            if (!body || !recorders.has(tabId)) return;
+            const { b64, len } = recordBody(stats, requestId, body);
+            rec.bodyBytes += len;
+            if (rec.bodyBytes >= rec.maxTotalBodyBytes) rec.bodyCapped = true;
+            void b64;
+          })
+          .catch(() => {});
+      }
+    }
+  }
+}
+
+// 把 getResponseBody 结果回填进 stats，返回字节数（base64 折算）
+function recordBody(stats, requestId, body) {
+  StatsBuilder.processEvent(stats, {
+    method: "Network.getResponseBody",
+    params: {
+      requestId,
+      body: body.body,
+      base64Encoded: body.base64Encoded,
+    },
+  });
+  const len = body.body ? body.body.length : 0;
+  return { b64: !!body.base64Encoded, len };
+}
+
+// console 归档：录制时把页面 console/异常按时间戳收进 recorder.consoleLog
+function feedRecorderConsole(tabId, entry) {
+  const rec = recorders.get(tabId);
+  if (!rec || !rec.captureConsole) return;
+  rec.consoleLog.push({ ts: Date.now() / 1000, ...entry });
+}
+
+// storage 变更流：DOMStorage 域事件 → recorder.storageChanges
+function feedRecorderStorage(tabId, isLocalStorage, change) {
+  const rec = recorders.get(tabId);
+  if (!rec || !rec.captureStorage) return;
+  rec.storageChanges.push({ ts: Date.now() / 1000, isLocalStorage, ...change });
+}
+
+// 视觉时间线：主帧导航触发截图（低质量 jpeg，防爆磁盘）
+async function feedRecorderScreenshot(tabId, reason, url) {
+  const rec = recorders.get(tabId);
+  if (!rec || !rec.captureScreenshots) return;
+  try {
+    const { data } = await cdpCall(tabId, "Page.captureScreenshot", {
+      format: "jpeg",
+      quality: 40,
+    });
+    rec.frames.push({ ts: Date.now() / 1000, reason, url, dataUrl: "data:image/jpeg;base64," + data });
+  } catch (e) {}
+}
+
+// 组装单个 recorder 的 HAR page 数据（含增强字段挂到 page._recording）
+function buildRecorderPage(rec, tabId, title) {
+  const har = new HARBuilder().create([rec.stats], title);
+  const page = har.log.pages[0] || {};
+  // 增强产物挂到 page 的扩展字段（HAR 允许下划线前缀自定义字段）
+  page._recording = {
+    tabId,
+    startedAt: rec.startedAt,
+    endedAt: new Date().toISOString(),
+    bodyBytes: rec.bodyBytes,
+    bodyCapped: rec.bodyCapped,
+    filters: {
+      url_pattern: rec.urlFilter ? rec.urlFilter.source : null,
+      exclude_pattern: rec.excludeFilter ? rec.excludeFilter.source : null,
+      resource_types: rec.resourceTypes ? [...rec.resourceTypes] : null,
+    },
+    console: rec.captureConsole ? rec.consoleLog : undefined,
+    storageChanges: rec.captureStorage ? rec.storageChanges : undefined,
+    frames: rec.captureScreenshots ? rec.frames : undefined,
+    cookiesDiff: rec.cookiesDiff || undefined,
+  };
+  return { har, entries: Object.keys(rec.stats.entries).length };
+}
+
+// cookie 快照（含 HttpOnly）
+async function snapshotCookies(tabId, origin) {
+  if (!origin) return [];
+  try {
+    const res = await cdpCall(tabId, "Network.getCookies", { urls: [origin] });
+    return res.cookies || [];
+  } catch (e) { return []; }
+}
+
+// diff 两份 cookie 快照：added/changed/removed
+function diffCookies(start, end) {
+  const mapOf = (list) => {
+    const m = {};
+    for (const c of list) m[c.name + "|" + (c.domain || "")] = c.value || "";
+    return m;
+  };
+  const a = mapOf(start || []), b = mapOf(end || []);
+  const out = { added: [], changed: [], removed: [] };
+  for (const k of Object.keys(b)) {
+    if (!(k in a)) out.added.push(k);
+    else if (a[k] !== b[k]) out.changed.push(k);
+  }
+  for (const k of Object.keys(a)) {
+    if (!(k in b)) out.removed.push(k);
+  }
+  return out;
+}
+
+// 收尾单个 recorder：cookie diff + 构建 HAR
+async function finalizeRecorder(tabId, rec, title) {
+  const origin = recorderOrigins.get(tabId);
+  if (rec.captureStorage && origin) {
+    const endCookies = await snapshotCookies(tabId, origin);
+    rec.cookiesDiff = diffCookies(rec._cookiesStart || [], endCookies);
+  }
+  // 关闭录制专用域（不动 networkEnabledTabs：探查缓冲可能仍要用）
+  if (rec.captureStorage) {
+    try { await cdpCall(tabId, "DOMStorage.disable"); } catch (e) {}
+  }
+  const tabTitle = title || (function () {
+    try { return new URL(rec.url).host; } catch (e) { return rec.url; }
+  })();
+  return buildRecorderPage(rec, tabId, tabTitle);
+}
+
+// 停所有活动 recorder，合并为多 page HAR
+async function stopAllRecorders(title) {
+  const pages = [];
+  let totalEntries = 0, totalBodyBytes = 0;
+  const tabIds = [...recorders.keys()];
+  for (const tabId of tabIds) {
+    const rec = recorders.get(tabId);
+    if (!rec) continue;
+    const page = await finalizeRecorder(tabId, rec, title);
+    totalEntries += page.entries;
+    totalBodyBytes += rec.bodyBytes;
+    // 把单 page har 的 entries/pages 并入合并 har
+    pages.push({ stats: rec.stats, rec, tabId });
+  }
+  // 用 HARBuilder 直接吃多个 stats（create 支持多 page）
+  const statsArr = pages.map((p) => p.stats);
+  const har = new HARBuilder().create(statsArr, title || "multi-tab-recording");
+  // 给每个 page 挂 _recording 增强字段
+  for (let i = 0; i < pages.length; i++) {
+    const { rec, tabId } = pages[i];
+    const page = har.log.pages[i];
+    if (page) {
+      page._recording = {
+        tabId, startedAt: rec.startedAt, endedAt: new Date().toISOString(),
+        bodyBytes: rec.bodyBytes, bodyCapped: rec.bodyCapped,
+        console: rec.captureConsole ? rec.consoleLog : undefined,
+        storageChanges: rec.captureStorage ? rec.storageChanges : undefined,
+        frames: rec.captureScreenshots ? rec.frames : undefined,
+        cookiesDiff: rec.cookiesDiff || undefined,
+      };
+    }
+  }
+  for (let i = 0; i < tabIds.length; i++) {
+    const tabId = tabIds[i];
+    recorders.delete(tabId);
+    recorderSkipped.delete(tabId);
+    recorderOrigins.delete(tabId);
+    pushEvent("record", { tabId, phase: "stop", entries: pages[i] ? pages[i].rec ? Object.keys(pages[i].rec.stats.entries).length : 0 : 0 });
+  }
+  return { tabIds, recording: false, entries: totalEntries, bodyBytes: totalBodyBytes, har };
+}
+
+function statusOf(tabId, rec) {
+  return {
+    tabId,
+    recording: true,
+    url: rec.url,
+    entries: Object.keys(rec.stats.entries).length,
+    bodyBytes: rec.bodyBytes,
+    bodyCapped: rec.bodyCapped,
+    consoleEvents: rec.consoleLog.length,
+    storageChanges: rec.storageChanges.length,
+    frames: rec.frames.length,
+    startedAt: rec.startedAt,
+  };
+}
+
 // ---- onEvent 分域处理（主干只做路由）----
 
 // Hook 回传通道（Runtime.addBinding）
@@ -397,28 +648,35 @@ function onScriptParsed(tabId, params) {
 
 // 控制台流（页面报错与警告事件流）
 function onConsoleEvent(tabId, method, params) {
-  if (!consoleStreamTabs.has(tabId)) return;
+  let entry = null;
   if (method === "Runtime.consoleAPICalled") {
-    pushEvent("console", {
+    entry = {
       tabId,
       type: params.type,
       args: (params.args || [])
         .slice(0, 10)
         .map((a) => (a.value !== undefined ? a.value : a.description || a.type)),
-    });
-    return;
+    };
+  } else {
+    const e = params.entry || {}; // Log.entryAdded
+    entry = {
+      tabId,
+      type: e.level,
+      args: [e.text],
+      url: e.url,
+      lineNumber: e.lineNumber,
+    };
   }
-  const e = params.entry || {}; // Log.entryAdded
-  pushEvent("console", {
-    tabId,
-    type: e.level,
-    args: [e.text],
-    url: e.url,
-    lineNumber: e.lineNumber,
-  });
+  // 录制归档：不受 stream 订阅约束（recorder 自己 enable 了 Runtime/Log）
+  feedRecorderConsole(tabId, entry);
+  if (consoleStreamTabs.has(tabId)) {
+    pushEvent("console", entry);
+  }
 }
 
 // Network 域：抓包 buffer + 事件推流 + watch_script 命中通知
+// 注意：录制器（feedRecorder）在 onEvent 主干里先于本函数调用，
+// 这里只管探查缓冲，二者互不干扰。
 function onNetworkEvent(tabId, method, params) {
   if (!networkEnabledTabs.has(tabId)) return;
 
@@ -486,13 +744,48 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   if (method === "Runtime.consoleAPICalled" || method === "Log.entryAdded") {
     return onConsoleEvent(tabId, method, params);
   }
+  // 录制：DOMStorage 域 → storage 变更流
+  if (method.startsWith("DOMStorage.")) {
+    onDomStorageEvent(tabId, method, params);
+    return;
+  }
+  // 录制：主帧导航 → 视觉时间线截图
+  if (method === "Page.frameNavigated" && params.frame && params.frame.parentId === "0") {
+    feedRecorderScreenshot(tabId, "navigation", params.frame.url || null);
+    return;
+  }
   // Fetch 域脚本改写（async fire-and-forget，内部异常自吞并放行）
   if (method === "Fetch.requestPaused") {
     handleFetchPaused(tabId, params);
     return;
   }
-  if (method.startsWith("Network.")) return onNetworkEvent(tabId, method, params);
+  if (method.startsWith("Network.")) {
+    // 录制器先吃（全 Network 事件，含 dataReceived/WS 等探查缓冲忽略的），
+    // 再走探查缓冲；两者独立，互不影响
+    feedRecorder(tabId, method, params);
+    return onNetworkEvent(tabId, method, params);
+  }
 });
+
+// DOMStorage 事件 → recorder.storageChanges（localStorage/sessionStorage 变更）
+function onDomStorageEvent(tabId, method, params) {
+  const rec = recorders.get(tabId);
+  if (!rec || !rec.captureStorage) return;
+  const origin = recorderOrigins.get(tabId);
+  // 只关心本 tab origin 的 storage（避免 iframe/其他 origin 噪音）
+  const sid = params.storageId || {};
+  if (origin && sid.securityOrigin && sid.securityOrigin !== origin) return;
+  const isLocalStorage = !!sid.isLocalStorage;
+  if (method === "DOMStorage.domStorageItemAdded") {
+    feedRecorderStorage(tabId, isLocalStorage, { op: "add", key: params.key, value: params.newValue });
+  } else if (method === "DOMStorage.domStorageItemUpdated") {
+    feedRecorderStorage(tabId, isLocalStorage, { op: "update", key: params.key, oldValue: params.oldValue, value: params.newValue });
+  } else if (method === "DOMStorage.domStorageItemRemoved") {
+    feedRecorderStorage(tabId, isLocalStorage, { op: "remove", key: params.key, oldValue: params.oldValue });
+  } else if (method === "DOMStorage.domStorageItemsCleared") {
+    feedRecorderStorage(tabId, isLocalStorage, { op: "clear" });
+  }
+}
 
 function truncateForEvent(rec) {
   const out = { ...rec };
@@ -1628,6 +1921,112 @@ const tools = {
     const rec = getBuffer(tabId).get(args.request_id);
     if (!rec) throw new ToolError("NOT_FOUND", `request not in buffer: ${args.request_id}`);
     return { requestId: rec.requestId, url: rec.url, initiator: rec.initiator };
+  },
+
+  // ---- HAR 录制（独立于 networkBuffers 的探查缓冲）----
+
+  async record_start(args) {
+    const tabId = await resolveTabId(args);
+    await ensureNetwork(tabId); // 复用 attach + Network.enable
+    const tab = await chrome.tabs.get(tabId);
+    let origin = null;
+    try { origin = new URL(tab.url).origin; } catch (e) {}
+    const rec = {
+      stats: new Stats(tab.url),
+      tabId,
+      url: tab.url,
+      startedAt: new Date().toISOString(),
+      includeBodies: args.include_bodies !== false,
+      bodyBytes: 0,
+      maxBodyBytes: Math.max(0, args.max_body_bytes != null ? args.max_body_bytes : 5 * 1024 * 1024),
+      maxTotalBodyBytes: Math.max(0, args.max_total_body_bytes != null ? args.max_total_body_bytes : 100 * 1024 * 1024),
+      bodyCapped: false,
+      // 过滤（白/黑名单 + resource_type）
+      urlFilter: args.url_pattern ? toRegExp(args.url_pattern) : null,
+      excludeFilter: args.exclude_pattern ? toRegExp(args.exclude_pattern) : null,
+      resourceTypes: Array.isArray(args.resource_types) && args.resource_types.length
+        ? new Set(args.resource_types.map((t) => String(t).toLowerCase())) : null,
+      // 增强流
+      captureConsole: args.capture_console !== false,
+      captureScreenshots: !!args.capture_screenshots,
+      captureStorage: args.capture_storage !== false,
+      consoleLog: [],
+      frames: [],
+      storageChanges: [],
+      cookiesDiff: null, // record_stop 时填
+      // 多 tab 关联
+      openerTabId: tab.openerTabId != null ? tab.openerTabId : null,
+    };
+    rec.stats.openerTabId = rec.openerTabId;
+    // 已在录：覆盖（旧录制数据丢弃，避免混淆）
+    recorders.set(tabId, rec);
+    recorderSkipped.set(tabId, new Set());
+    recorderOrigins.set(tabId, origin);
+    // 启用增强域：Page.enable（导航截图）+ DOMStorage.enable（storage 流）+
+    // Runtime/Log.enable（console 归档）。已启用过的重复调用无副作用。
+    try { await cdpCall(tabId, "Page.enable"); } catch (e) {}
+    if (rec.captureStorage) {
+      try { await cdpCall(tabId, "DOMStorage.enable"); } catch (e) {}
+    }
+    if (rec.captureConsole) {
+      try { await cdpCall(tabId, "Runtime.enable"); } catch (e) {}
+      try { await cdpCall(tabId, "Log.enable"); } catch (e) {}
+    }
+    // cookie 起始快照（stop 时 diff）
+    rec._cookiesStart = await snapshotCookies(tabId, origin);
+    pushEvent("record", { tabId, phase: "start", url: tab.url });
+    return { tabId, recording: true, url: tab.url, filters: {
+      url_pattern: rec.urlFilter ? rec.urlFilter.source : null,
+      exclude_pattern: rec.excludeFilter ? rec.excludeFilter.source : null,
+      resource_types: rec.resourceTypes ? [...rec.resourceTypes] : null,
+    } };
+  },
+
+  async record_stop(args) {
+    // 不指定 tabId：
+    //   多个 recorder 在录 → 停全部合并为多 page HAR
+    //   恰好一个 recorder 在录 → 停那个（不管是否当前活动 tab）
+    //   无 recorder → NOT_RECORDING
+    if (args.tabId == null) {
+      if (!recorders.size) {
+        throw new ToolError("NOT_RECORDING", "no active recorder", false);
+      }
+      if (recorders.size > 1) return stopAllRecorders(args.title);
+      // 单 recorder：直接取它的 tabId
+      const onlyTabId = recorders.keys().next().value;
+      const rec = recorders.get(onlyTabId);
+      const { har, entries } = await finalizeRecorder(onlyTabId, rec, args.title);
+      recorders.delete(onlyTabId);
+      recorderSkipped.delete(onlyTabId);
+      recorderOrigins.delete(onlyTabId);
+      pushEvent("record", { tabId: onlyTabId, phase: "stop", entries, bodyBytes: rec.bodyBytes });
+      return { tabId: onlyTabId, recording: false, entries, bodyBytes: rec.bodyBytes, har };
+    }
+    const tabId = await resolveTabId(args);
+    const rec = recorders.get(tabId);
+    if (!rec) throw new ToolError("NOT_RECORDING", `tab ${tabId} is not recording`, false);
+    const { har, entries } = await finalizeRecorder(tabId, rec, args.title);
+    recorders.delete(tabId);
+    recorderSkipped.delete(tabId);
+    recorderOrigins.delete(tabId);
+    pushEvent("record", { tabId, phase: "stop", entries, bodyBytes: rec.bodyBytes });
+    return { tabId, recording: false, entries, bodyBytes: rec.bodyBytes, har };
+  },
+
+  async record_status(args) {
+    // 不指定 tabId：汇总所有活动 recorder
+    if (args.tabId == null) {
+      if (!recorders.size) return { recording: false, recorders: [] };
+      const out = [];
+      for (const [tabId, rec] of recorders) {
+        out.push(statusOf(tabId, rec));
+      }
+      return { recording: true, recorders: out };
+    }
+    const tabId = await resolveTabId(args);
+    const rec = recorders.get(tabId);
+    if (!rec) return { tabId, recording: false };
+    return statusOf(tabId, rec);
   },
 
   async hook_preset(args) {

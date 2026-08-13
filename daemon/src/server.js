@@ -23,6 +23,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { EvidenceStore } from "./evidence.js";
 import { verify_signer } from "./verify.js";
 import { replay } from "./replay.js";
+import { harToReplay, harDiff, harAssert } from "./harexport.js";
 
 export const HOST = "127.0.0.1";
 export const PORT = parseInt(process.env.OWB_PORT || "18086", 10);
@@ -103,6 +104,10 @@ export class Bridge {
     this.current_task = null;
     this.events_log = this.store.open_jsonl("events/events.jsonl");
     this.session_log = this.store.open_jsonl(`sessions/${ymd()}.jsonl`);
+    // 落盘流出错（磁盘满/work 目录丢失）不应崩进程：记日志即可，
+    // 事件仍在内存 ring buffer 里，调用方可经 events 接口补拉
+    this.events_log.on("error", (e) => console.error("[owb-daemon] events_log error:", e));
+    this.session_log.on("error", (e) => console.error("[owb-daemon] session_log error:", e));
   }
 
   // ---- 安全校验（Host + Origin 防 DNS rebinding / CSRF）----
@@ -560,6 +565,19 @@ export class Bridge {
       const relDir = this.current_task.rel_dir;
       const meta = JSON.parse(fs.readFileSync(
         this.store._abs(`${relDir}/task.json`), "utf8"));
+      // 自动收尾：停所有活动 recorder，HAR 落到 task 目录
+      // （防忘关录制；task 成为完整会话容器，含 HAR + workflow）
+      const harFiles = [];
+      try {
+        const stopRes = await this.call_tool("record_stop",
+          { title: this.current_task.title || this.current_task.id }, 30);
+        if (stopRes.ok && stopRes.data && stopRes.data.har) {
+          const harPath = `${relDir}/recording.har`;
+          this.store.write_json(harPath, stopRes.data.har);
+          harFiles.push({ path: harPath, entries: stopRes.data.entries || 0,
+                          bodyBytes: stopRes.data.bodyBytes || 0 });
+        }
+      } catch (e) { /* 无录制或扩展离线，忽略 */ }
       // 拿扩展侧分组统计（action:clear 顺带清分组）；失败容忍，group=null
       const ext = await this.call_tool("task_context", { action: "clear" }, 10);
       const group = ext.ok ? (ext.data ?? null) : null;
@@ -569,6 +587,7 @@ export class Bridge {
         end_event_seq: this.event_seq,
         event_count: this.event_seq - meta.begin_event_seq,
         group,
+        har_files: harFiles.length ? harFiles : undefined,
       });
       this.store.write_json(`${relDir}/task.json`, meta);
       this.current_task = null;
@@ -774,6 +793,121 @@ export class Bridge {
                    exportedAt: st.exportedAt ?? null });
       }
       return { ok: true, data: { states: out } };
+    }
+    // ---- HAR 录制落盘（编排：扩展 record_stop → EvidenceStore 写盘）----
+    if (name === "har_save") {
+      const callArgs = {};
+      if (args.tabId != null) callArgs.tabId = args.tabId;
+      if (args.title) callArgs.title = args.title;
+      const stopRes = await this.call_tool("record_stop", callArgs, 60);
+      if (!stopRes.ok) return stopRes;
+      const data = stopRes.data || {};
+      const har = data.har;
+      if (!har) {
+        return { ok: false, error: {
+          code: "NO_HAR", message: "record_stop returned no har data",
+          retryable: false } };
+      }
+      // 落盘路径：有活动 task 则进 task 目录（与 workflow 同处）；否则 har/<名>.har
+      let rel;
+      if (this.current_task) {
+        rel = `${this.current_task.rel_dir}/recording.har`;
+      } else {
+        const slug = _slug(args.filename || args.title || `rec-${tsId()}`);
+        rel = `har/${slug}.har`;
+      }
+      const p = this.store.write_json(rel, har);
+      return { ok: true, data: {
+        path: p, entries: data.entries || 0,
+        bodyBytes: data.bodyBytes || 0, tabIds: data.tabIds || null,
+      } };
+    }
+    // ---- C7: HAR → 重放脚本（python/curl/node）----
+    if (name === "har_to_replay") {
+      let har = args.har;
+      if (!har && args.path) {
+        const abs = this.store._abs(args.path);
+        if (!fs.existsSync(abs)) {
+          return { ok: false, error: {
+            code: "NOT_FOUND", message: `har not found: ${args.path}`,
+            retryable: false } };
+        }
+        try { har = JSON.parse(fs.readFileSync(abs, "utf8")); }
+        catch (e) {
+          return { ok: false, error: {
+            code: "BAD_HAR", message: `parse failed: ${e.message}`,
+            retryable: false } };
+        }
+      }
+      if (!har) {
+        return { ok: false, error: {
+          code: "BAD_ARGS", message: "har_to_replay: har or path is required",
+          retryable: false } };
+      }
+      const format = ["python", "curl", "node"].includes(args.format) ? args.format : "python";
+      const out = harToReplay(har, format);
+      // 落盘（可选）：replay/<名>.<ext>
+      if (args.save) {
+        const ext = format === "python" ? "py" : format === "node" ? "mjs" : "sh";
+        const slug = _slug(args.save === true ? `replay-${tsId()}` : args.save);
+        const rel = `replay/${slug}.${ext}`;
+        const p = this.store.write_text(rel, out.code);
+        out.path = p;
+      }
+      return { ok: true, data: out };
+    }
+    // ---- C8: 录制对比（两份 HAR）----
+    if (name === "har_diff") {
+      const loadHar = (src, label) => {
+        if (src && typeof src === "object") return src;
+        if (typeof src === "string") {
+          const abs = this.store._abs(src);
+          if (!fs.existsSync(abs)) {
+            throw new Error(`${label} not found: ${src}`);
+          }
+          return JSON.parse(fs.readFileSync(abs, "utf8"));
+        }
+        throw new Error(`${label}: provide har object or path`);
+      };
+      try {
+        const baseline = loadHar(args.baseline, "baseline");
+        const current = loadHar(args.current, "current");
+        const result = harDiff(baseline, current);
+        if (args.save) {
+          const slug = _slug(args.save === true ? `diff-${tsId()}` : args.save);
+          const p = this.store.write_json(`diff/${slug}.json`, result);
+          result.path = p;
+        }
+        return { ok: true, data: result };
+      } catch (e) {
+        return { ok: false, error: {
+          code: "DIFF_FAILED", message: e.message, retryable: false } };
+      }
+    }
+    // ---- C9: 断言校验（一份 HAR vs 断言集）----
+    if (name === "har_assert") {
+      let har = args.har;
+      if (!har && args.path) {
+        const abs = this.store._abs(args.path);
+        if (!fs.existsSync(abs)) {
+          return { ok: false, error: {
+            code: "NOT_FOUND", message: `har not found: ${args.path}`,
+            retryable: false } };
+        }
+        try { har = JSON.parse(fs.readFileSync(abs, "utf8")); }
+        catch (e) {
+          return { ok: false, error: {
+            code: "BAD_HAR", message: `parse failed: ${e.message}`,
+            retryable: false } };
+        }
+      }
+      if (!har) {
+        return { ok: false, error: {
+          code: "BAD_ARGS", message: "har_assert: har or path is required",
+          retryable: false } };
+      }
+      const result = harAssert(har, Array.isArray(args.assertions) ? args.assertions : []);
+      return { ok: true, data: result };
     }
     return { ok: false, error: {
       code: "UNKNOWN_TOOL", message: `unknown daemon tool: ${name}`,

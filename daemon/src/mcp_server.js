@@ -55,6 +55,9 @@ const _EXT_TOOLS = [
   ["network_list", "列出已抓请求（id/method/url/status/类型），按 url_pattern 过滤。参数: url_pattern?, limit?, tabId?"],
   ["network_detail", "单请求全量：headers/postData/响应 body（base64 解码，max_body 可调）。参数: request_id, max_body?, tabId?"],
   ["get_initiator", "拿请求调用栈（哪个 JS 函数发的）——定位请求来源第一利器。参数: request_id, tabId?"],
+  ["record_start", "HAR 录制开：独立于探查缓冲，无淘汰、主动收 body、记 timing/WebSocket；附 console/storage/截图增强流。参数: tabId?, include_bodies?(默认true), url_pattern?(白名单), exclude_pattern?(黑名单), resource_types?(如['xhr','fetch']), capture_console?(默认true), capture_screenshots?(默认false), capture_storage?(默认true), max_body_bytes?, max_total_body_bytes?"],
+  ["record_stop", "停录制，产出 HAR 1.2 对象返回；不指定 tabId 时停所有活动 recorder 合并为多 page HAR。参数: tabId?, title?"],
+  ["record_status", "查录制状态（是否在录、entry 数、body 字节、增强流计数）。参数: tabId?(缺省汇总全部)"],
   ["capture_request", "宏工具·一键证据包：触发动作 → 抓目标请求全量 + initiator 栈 + 同期新请求清单。参数: url_pattern, trigger?{expression}, timeout_ms?, tabId?"],
   ["script_list", "枚举页面全部 JS（含 eval/VM 动态脚本）。⚠️ 启用 Debugger 关 JIT，用完 break_remove 顺手 disable。参数: url_pattern?, tabId?"],
   ["script_source", "按 script_id 取源码（大文件配 daemon_evidence_write 落盘）。参数: script_id, max_chars?, tabId?"],
@@ -105,6 +108,10 @@ const _DAEMON_TOOLS = [
   ["state_save", "把当前 tab 登录态（cookie/storage/IndexedDB）按名字存进会话库，不经过 agent 上下文。参数: name, tabId?"],
   ["state_load", "按名字恢复登录态到 tab。参数: name, tabId?"],
   ["state_list", "列出会话库。参数: 无"],
+  ["har_save", "停录制并把 HAR 落盘到 work/（有活动 task 进 task 目录，否则 har/<名>.har）。参数: tabId?, filename?, title?"],
+  ["har_to_replay", "C7：HAR → 可重放脚本（python/curl/node），动态签名头标 <DYNAMIC> 占位。参数: har?|path?, format?(python|curl|node), save?(落盘到 replay/)"],
+  ["har_diff", "C8：两份 HAR 按 method+urlPath 对比（请求增删/状态码/响应体/header 漂移）。参数: baseline(har|path), current(har|path), save?"],
+  ["har_assert", "C9：校验 HAR 是否满足断言集（request_exists/absent、response_status、response_contains、min_requests）。参数: har?|path?, assertions[]"],
 ];
 
 export const _TOOLS = new Map(); // mcp 名 -> [ctl 名, 描述]

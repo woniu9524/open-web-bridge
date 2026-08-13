@@ -14,7 +14,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8");
+  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8")
+  .replace(/\r\n/g, "\n");
 const exportMatch = bg.match(/const STATE_EXPORT_EXPR = `([\s\S]*?)`;\n/);
 const importMatch = bg.match(/const STATE_IMPORT_EXPR = `([\s\S]*?)`;\n/);
 if (!exportMatch || !importMatch) {

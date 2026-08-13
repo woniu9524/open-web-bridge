@@ -1,0 +1,107 @@
+import { harToReplay, harDiff, harAssert } from "../src/harexport.js";
+
+const { check, summarize } = (function () {
+  let pass = 0, fail = 0;
+  const fails = [];
+  return {
+    check(name, cond) {
+      if (cond) { pass++; }
+      else { fail++; fails.push(name); console.log("  FAIL:", name); }
+    },
+    summarize() {
+      console.log(`\n${pass} passed, ${fail} failed`);
+      if (fail) process.exitCode = 1;
+    },
+  };
+})();
+
+function makeHar(entries) {
+  return { log: { version: "1.2", creator: { name: "test" }, pages: [], entries } };
+}
+
+const sampleEntry = (overrides = {}) => ({
+  request: {
+    method: "GET", url: "https://api.example.com/data?id=1",
+    headers: [{ name: "User-Agent", value: "test" }, { name: "X-Sign", value: "abc" }],
+    queryString: [], headersSize: -1, bodySize: 0,
+    ...overrides.request,
+  },
+  response: {
+    status: 200, statusText: "OK", httpVersion: "http/1.1",
+    headers: [{ name: "Content-Type", value: "application/json" }],
+    content: { text: '{"ok":1}', size: 8, mimeType: "application/json" },
+    headersSize: -1, bodySize: 8,
+    ...overrides.response,
+  },
+  startedDateTime: "2024-01-01T00:00:00.000Z", time: 100, timings: {},
+});
+
+// ---- C7: harToReplay ----
+const har1 = makeHar([sampleEntry()]);
+const py = harToReplay(har1, "python");
+check("replay python count", py.count === 1);
+check("replay python has requests import", py.code.includes("import requests"));
+check("replay python marks dynamic header", py.code.includes("<DYNAMIC>") && py.code.includes("X-Sign"));
+check("replay python skips content-length mgmt", !py.code.includes("Content-Length"));
+
+const curl = harToReplay(har1, "curl");
+check("replay curl has curl cmd", curl.code.includes("curl") && curl.code.includes("-X"));
+check("replay curl dynamic placeholder", curl.code.includes("<DYNAMIC>"));
+
+const node = harToReplay(har1, "node");
+check("replay node has fetch", node.code.includes("fetch"));
+
+const postHar = makeHar([sampleEntry({
+  request: { method: "POST", url: "https://api.example.com/submit",
+    headers: [{ name: "Content-Type", value: "application/json" }], postData: { text: '{"a":1}' } },
+})]);
+const postPy = harToReplay(postHar, "python");
+check("replay POST includes data", postPy.code.includes('"data"') || postPy.code.includes("data="));
+
+const empty = harToReplay(makeHar([]), "python");
+check("replay empty count 0", empty.count === 0);
+
+// ---- C8: harDiff ----
+const baseHar = makeHar([
+  sampleEntry(),
+  sampleEntry({ request: { method: "GET", url: "https://api.example.com/removed" } }),
+]);
+const curHar = makeHar([
+  sampleEntry({ response: { status: 500, content: { text: '{"err":1}', size: 9 } } }),
+  sampleEntry({ request: { method: "GET", url: "https://api.example.com/added" } }),
+]);
+const d = harDiff(baseHar, curHar);
+check("diff baseline count", d.baseline_entries === 2);
+check("diff current count", d.current_entries === 2);
+check("diff only_in_baseline has /removed", d.only_in_baseline.some((k) => k.includes("/removed")));
+check("diff only_in_current has /added", d.only_in_current.some((k) => k.includes("/added")));
+check("diff status changed 200->500", d.status_changed.length === 1 && d.status_changed[0].baseline === 200 && d.status_changed[0].current === 500);
+check("diff body changed counted", d.body_changed >= 1);
+check("diff not identical", d.identical === false);
+
+const sameHar = makeHar([sampleEntry()]);
+const dSame = harDiff(sameHar, sameHar);
+check("diff identical true", dSame.identical === true);
+
+// ---- C9: harAssert ----
+const aHar = makeHar([
+  sampleEntry(),
+  sampleEntry({ request: { method: "GET", url: "https://api.example.com/other" } }),
+]);
+const assertions = [
+  { type: "request_exists", url_pattern: "/data" },
+  { type: "request_absent", url_pattern: "/nonexistent" },
+  { type: "request_exists", url_pattern: "/nonexistent" }, // should fail
+  { type: "response_status", url_pattern: "/data", status: 200 },
+  { type: "response_status", url_pattern: "/data", status: 404 }, // should fail
+  { type: "response_contains", url_pattern: "/data", value: '"ok":1' },
+  { type: "min_requests", count: 2 },
+  { type: "min_requests", count: 10 }, // should fail
+];
+const r = harAssert(aHar, assertions);
+check("assert total counted", r.passed + r.failed === 8);
+check("assert passed count", r.passed === 5);
+check("assert failed count", r.failed === 3);
+check("assert pass_rate", r.pass_rate === 5 / 8);
+
+summarize();

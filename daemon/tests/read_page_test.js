@@ -15,7 +15,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8");
+  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8")
+  .replace(/\r\n/g, "\n");
 const snapMatch = bg.match(
   /const READ_PAGE_SNAPSHOT_EXPR = \(nextRef, maxNodes\) => `([\s\S]*?)`;\n/);
 if (!snapMatch) {

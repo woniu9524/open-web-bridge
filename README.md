@@ -4,7 +4,7 @@
 
 两种部署形态：
 
-- **本地模式**（默认）：三层架构 AI agent → 本地 daemon（Node.js，`127.0.0.1:18086`）→ MV3 Chrome 扩展 → 经 CDP 操作页面。通过 **MCP** 接入，Kimi Code / Claude Code 等工具零适配使用，62 个工具。
+- **本地模式**（默认）：三层架构 AI agent → 本地 daemon（Node.js，`127.0.0.1:18086`）→ MV3 Chrome 扩展 → 经 CDP 操作页面。通过 **MCP** 接入，Kimi Code / Claude Code 等工具零适配使用，69 个工具。
 - **中转模式**（可选）：daemon 与扩展都拨出到一个公网中转（Cloudflare Workers + Durable Objects，按 token 配对），让**远程** AI agent 经公网控制你的浏览器，不暴露本机端口。默认关闭，不影响本地模式。
 
 ## 能干什么
@@ -14,6 +14,8 @@
 - **真实鼠标 + AI 光标**：`mouse_click` 走 CDP Input 域真实鼠标事件（isTrusted），页面内光标贝塞尔动画，用户在旁可见
 - **人机交接**：`handoff` / `wait_user`——撞验证码、要扫码登录时把 tab 交还你，你操作完 agent 自动接管继续
 - **网络抓包**：请求/响应全量（含头与 body）+ `get_initiator` 调用栈定位
+- **会话录制（HAR）**：`record_start/stop` 录全量网络成标准 HAR 1.2（含 timing/WebSocket/主动收 body，支持 url/resource_type 过滤、多 tab 合并）；附 console 归档、storage 变更流、导航截图时间线；`daemon_task_end` 自动收尾 HAR 入档
+- **HAR 产物加工**：`daemon_har_to_replay`（→ python/curl/node 重放脚本，动态签名头标占位）、`daemon_har_diff`（两份 HAR 对比漂移）、`daemon_har_assert`（断言校验）
 - **任务与工作流**：`daemon_task_begin/end` 归档 + 标签分组；`daemon_workflow_save/run` 把跑通的流程固化成确定性回放
 - **站点会话库**：`daemon_state_save/load zhihu` 一键保存/恢复登录态（cookie + localStorage + IndexedDB）
 - **页面调试与分析**（按需）：hook 预设（xhr/fetch/crypto）、断点与调用帧读取、脚本改写、函数离线验证、TLS 指纹重放
@@ -45,7 +47,7 @@ command = "node"
 args = ["<仓库绝对路径>/daemon/src/mcp_server.js"]
 ```
 
-重连 MCP 后即可使用全部 62 个工具。对 agent 说一句「打开知乎搜一下 XXX」就能看到它干活。
+重连 MCP 后即可使用全部 69 个工具。对 agent 说一句「打开知乎搜一下 XXX」就能看到它干活。
 
 ## 中转模式（远程控制，可选）
 
