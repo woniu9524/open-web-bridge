@@ -1,0 +1,16 @@
+{
+  "name": "owb-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open Web Bridge relay — Cloudflare Workers + Durable Objects 按 token 配对的中转服务",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "node test/relay_test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}

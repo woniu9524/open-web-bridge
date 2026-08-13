@@ -38,6 +38,11 @@ const EXTENSION_CLIENT = "open-web-bridge-extension";
 // 大 tool_result（响应体/截图 base64）走 JSON 文本帧，默认 1MiB 会掐断连接
 const MAX_PAYLOAD = 64 * 1024 * 1024;
 
+// 中转模式（默认关闭）：OWB_RELAY_URL + OWB_RELAY_TOKEN 两者齐备即启用。
+// daemon 拨出到中转，与扩展按 token 配对；不设则本地模式（127.0.0.1 无 token）。
+export const OWB_RELAY_URL = process.env.OWB_RELAY_URL || "";
+export const OWB_RELAY_TOKEN = process.env.OWB_RELAY_TOKEN || "";
+
 // ---- 安全（Host + Origin 校验防 DNS rebinding / CSRF）----
 // 本地信任模型：仅绑定 127.0.0.1，不做 token 认证（同机任意进程可连）。
 // Host/Origin 是两层防线中的第二层：防网页经 DNS rebinding 打本机 daemon。
@@ -365,11 +370,95 @@ export class Bridge {
     this.pending.clear();
   }
 
+  // ---- relay 客户端（中转模式）----
+  //
+  // daemon 拨 wss://<OWB_RELAY_URL>/<token>?role=controller → 等 {type:"relay_paired"}
+  // → 同 tick 原子交接给 handleExtension(ws)（防 relay_paired 与扩展 hello 之间丢帧）。
+  // 之后 tool_call/tool_result/event/ping 全部经中转透明转发，内部路由逻辑零改动。
+  // /ctl 本地服务不受影响（mcp_server 仍连本地）。本地模式（env 不设）完全不执行此路径。
+
+  static buildRelayUrl() {
+    if (!OWB_RELAY_URL || !OWB_RELAY_TOKEN) return null;
+    const base = OWB_RELAY_URL.replace(/\/+$/, "");
+    const tok = encodeURIComponent(OWB_RELAY_TOKEN);
+    return `${base}/${tok}?role=controller`;
+  }
+
+  startRelayClient() {
+    if (this._relayStopping) return;
+    const url = Bridge.buildRelayUrl();
+    if (!url) return;
+
+    let reconnectTimer = null;
+    let delayMs = 1000;
+    const RECONNECT_MAX_MS = 15000;
+    const resetBackoff = () => { delayMs = 1000; };
+    const scheduleReconnect = () => {
+      if (this._relayStopping) return;
+      if (reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        dial();
+      }, delayMs);
+      delayMs = Math.min(delayMs * 2, RECONNECT_MAX_MS);
+    };
+
+    const dial = () => {
+      if (this._relayStopping) return;
+      console.log("[owb-daemon] relay connecting", OWB_RELAY_URL);
+      let ws;
+      try {
+        ws = new WebSocket(url, { maxPayload: MAX_PAYLOAD });
+      } catch (e) {
+        scheduleReconnect();
+        return;
+      }
+      ws.on("error", () => {}); // 兜底防未捕获 error；close 会触发重连
+
+      let handedOff = false;
+      // 配对前最多等 30s（中转两端谁先到都行，对端是扩展）
+      const pairTimer = setTimeout(() => {
+        if (!handedOff) {
+          try { ws.close(4400, "relay pair timeout"); } catch (e) {}
+        }
+      }, 30000);
+
+      // 临时收 relay_paired；收到即原子交接（同 tick：off 临时 handler → handleExtension 挂自己的）
+      const tempMsg = (data) => {
+        let msg;
+        try { msg = JSON.parse(data.toString()); } catch (e) { return; }
+        if (!msg || msg.type !== "relay_paired") return;
+        clearTimeout(pairTimer);
+        ws.off("message", tempMsg);
+        handedOff = true;
+        resetBackoff();
+        console.log("[owb-daemon] relay paired, handing off to extension channel");
+        // 复用扩展通道：之后扩展的 hello/hello_ack/tool_result/event 全部原样走
+        this.handleExtension(ws);
+      };
+      ws.on("message", tempMsg);
+
+      ws.on("close", () => {
+        clearTimeout(pairTimer);
+        // 已交接时 handleExtension 的 close 负责 this.extension/fail pending；
+        // 这里只管重连调度。
+        if (!handedOff) console.log("[owb-daemon] relay closed before pair");
+        scheduleReconnect();
+      });
+    };
+
+    this._relayStop = () => { this._relayStopping = true; };
+    dial();
+  }
+
   // ---- daemon 本地工具（不经过浏览器）----
 
   async call_local(name, args) {
     if (name === "status") {
+      const relayMode = !!(OWB_RELAY_URL && OWB_RELAY_TOKEN);
       return { ok: true, data: {
+        mode: relayMode ? "relay" : "local",
+        relay_url: relayMode ? OWB_RELAY_URL : null,
         extension_connected: this.extension !== null,
         extension_info: this.extension_info,
         event_seq: this.event_seq,
@@ -723,7 +812,11 @@ export class Bridge {
 
 export async function serve(workDir = WORK_DIR) {
   const bridge = new Bridge(workDir);
-  console.log(`[owb-daemon] ws://${HOST}:${PORT}（本地信任模型，无 token 认证）`);
+  const relayMode = !!(OWB_RELAY_URL && OWB_RELAY_TOKEN);
+  console.log(`[owb-daemon] ws://${HOST}:${PORT}` +
+              (relayMode
+                ? `（中转模式：${OWB_RELAY_URL}）`
+                : `（本地信任模型，无 token 认证）`));
   const wss = new WebSocketServer({ host: HOST, port: PORT, maxPayload: MAX_PAYLOAD });
   wss.on("connection", (ws, req) => bridge.onConnection(ws, req));
   await new Promise((resolve, reject) => {
@@ -732,6 +825,7 @@ export async function serve(workDir = WORK_DIR) {
   });
   wss.on("error", () => {});
   bridge.wss = wss;
+  if (relayMode) bridge.startRelayClient();
   return bridge;
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "open-web-bridge",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Open Web Bridge daemon — 本地桥：AI agent ↔ WS ↔ MV3 Chrome 扩展 ↔ 真实浏览器",
   "type": "module",
   "engines": {

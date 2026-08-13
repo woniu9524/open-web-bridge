@@ -1,0 +1,16 @@
+name = "owb-relay"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+# Durable Object 绑定：Worker 经 env.RELAY_ROOM 寻址 RelayRoom 实例
+[[durable_objects.bindings]]
+name = "RELAY_ROOM"
+class_name = "RelayRoom"
+
+# 声明 DO 类（首次部署需要这条 migration；之后改类结构再加新 tag）
+[[migrations]]
+tag = "v1"
+new_classes = ["RelayRoom"]
+
+# 默认 *.workers.dev 子域即用（自带 TLS）。
+# 想用自定义域：CF Dashboard → Workers Routes 绑定自己的域名，TLS 自动签发。

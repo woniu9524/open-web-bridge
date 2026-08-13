@@ -36,21 +36,35 @@
 
 const DEFAULT_CONFIG = {
   wsUrl: "ws://127.0.0.1:18086/ws",
+  relayUrl: "",
+  relayToken: "",
 };
 
-let config = { ...DEFAULT_CONFIG };
+let config = { ...DEFAULT_CONFIG, relayMode: false };
+
+// 中转 URL：relayUrl + relayToken 齐备时拼成 wss://<relay>/<token>?role=extension
+function relayUrlOf(cfg) {
+  if (!cfg.relayUrl || !cfg.relayToken) return null;
+  return `${cfg.relayUrl.replace(/\/+$/, "")}/${encodeURIComponent(cfg.relayToken)}?role=extension`;
+}
 
 async function loadConfig() {
-  const stored = await chrome.storage.local.get(["wsUrl"]);
+  const stored = await chrome.storage.local.get(["wsUrl", "relayUrl", "relayToken"]);
   config.wsUrl = stored.wsUrl || DEFAULT_CONFIG.wsUrl;
-  // ws.json（扩展目录内可选文件，e2e 隔离/多实例调试用）：覆盖 wsUrl。
+  config.relayUrl = stored.relayUrl || "";
+  config.relayToken = stored.relayToken || "";
+  config.relayMode = !!(config.relayUrl && config.relayToken);
+  // ws.json（扩展目录内可选文件，e2e 隔离/多实例调试用）：覆盖以上任一字段。
   // 文件优先于 storage——它是开发者显式放置的配置。
   try {
     const res = await fetch(chrome.runtime.getURL("ws.json"));
     if (res.ok) {
       const j = await res.json();
       if (j.wsUrl) config.wsUrl = j.wsUrl;
-      log("ws.json override", config.wsUrl);
+      if (j.relayUrl) config.relayUrl = j.relayUrl;
+      if (j.relayToken) config.relayToken = j.relayToken;
+      config.relayMode = !!(config.relayUrl && config.relayToken);
+      log("ws.json override", config.relayMode ? "relay" : config.wsUrl);
     }
   } catch (e) {}
 }
@@ -62,12 +76,12 @@ async function boot() {
   connect();
 }
 
-// options 页保存即时生效：wsUrl 变化 → 重读配置并立即重连
+// options 页保存即时生效：任一连接字段变化 → 重读配置并立即重连
 // （不等自然断连/4401 轮询）。cleanupWs 会把旧 ws 的回调置 null，
 // close 不会触发 scheduleReconnect，直接 connect 即可。
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (!changes.wsUrl) return;
+  if (!changes.wsUrl && !changes.relayUrl && !changes.relayToken) return;
   loadConfig().then(() => {
     cleanupWs();
     connect();
@@ -80,6 +94,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 let ws = null;
 let helloAcked = false;
+let relayPaired = false; // 中转模式：收到 relay_paired 后置 true，之前不发 hello
 let reconnectTimer = null;
 let reconnectDelayMs = 1000;
 const RECONNECT_MAX_MS = 15000;
@@ -94,12 +109,23 @@ function send(msg) {
   return true;
 }
 
+function sendHello() {
+  send({
+    type: "hello",
+    payload: {
+      client: "open-web-bridge-extension",
+      version: chrome.runtime.getManifest().version,
+    },
+  });
+}
+
 function connect() {
   if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
   cleanupWs();
-  log("ws connecting", config.wsUrl);
+  const url = config.relayMode ? relayUrlOf(config) : config.wsUrl;
+  log("ws connecting", config.relayMode ? "relay" : "local", url);
   try {
-    ws = new WebSocket(config.wsUrl);
+    ws = new WebSocket(url);
   } catch (e) {
     scheduleReconnect();
     return;
@@ -107,13 +133,10 @@ function connect() {
   ws.onopen = () => {
     reconnectDelayMs = 1000;
     helloAcked = false;
-    send({
-      type: "hello",
-      payload: {
-        client: "open-web-bridge-extension",
-        version: chrome.runtime.getManifest().version,
-      },
-    });
+    relayPaired = false;
+    // 中转模式：等中转的 relay_paired 再发 hello（onmessage 里处理）；
+    // 本地模式：连上即发 hello。
+    if (!config.relayMode) sendHello();
   };
   ws.onmessage = (ev) => {
     let msg;
@@ -122,10 +145,21 @@ function connect() {
     } catch {
       return;
     }
+    // 中转模式：配对前只认 relay_paired；收到后发 hello，之后切正常 onMessage。
+    // 其余早到帧一律忽略（中转协议保证 relay_paired 先于 daemon 的 hello_ack）。
+    if (config.relayMode && !relayPaired) {
+      if (msg.type === "relay_paired") {
+        relayPaired = true;
+        log("relay paired, sending hello");
+        sendHello();
+      }
+      return;
+    }
     onMessage(msg);
   };
   ws.onclose = (ev) => {
     helloAcked = false;
+    relayPaired = false;
     failSafeFetchAll(); // 红线级：防 Fetch 拦截卡死用户页面
     scheduleDeadman();  // 死开关：daemon 长时间不可达则全面 detach
     scheduleReconnect();
