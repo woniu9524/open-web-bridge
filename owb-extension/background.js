@@ -2113,6 +2113,14 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
   // 于是可见性过滤把整页元素丢光，快照静默返回空。记下被过滤数，
   // 让扩展侧能区分"页面真没东西"和"页面没渲染"。
   let skippedNoRect = 0;
+  // BUG-92: 关闭状态的下拉菜单/面板常用 visibility:hidden（而不是 display:none）
+  // 隐藏——祖先 visibility:hidden 的元素仍然占布局盒，getBoundingClientRect()
+  // 照样返回非零尺寸，rect 过滤器抓不住。实测 GitHub 顶栏一个未展开的导航
+  // 下拉菜单贡献了 30+ 条这样的"幽灵"候选，混进快照挤占正文位置，AI 还可能
+  // 去点一个用户压根看不见、点了也没反应的链接。checkVisibility() 会顺着
+  // 祖先链检查 visibility/display/content-visibility（选了 checkOpacity 顺带
+  // 也管上 opacity:0），做同样的事不用手写祖先遍历。
+  let skippedHidden = 0;
   // BUG-79: 用户装的其他扩展会往页面注入悬浮工具栏（翻译、收藏、划词……），
   // 这些元素混进快照后 AI 会当成页面功能去点。实测澎湃 403 页上「页面元素」
   // 全是某翻译扩展的按钮（图片翻译/语音翻译/快捷设置）。按注入宿主容器识别
@@ -2130,6 +2138,10 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     if (nodes.length >= ${maxNodes}) { truncated = true; break; }
     const rect = el.getBoundingClientRect(); // 无布局盒 = 不可见，跳过
     if (!rect || !(rect.width > 0 && rect.height > 0)) { skippedNoRect++; continue; }
+    if (typeof el.checkVisibility === "function" &&
+        !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+      skippedHidden++; continue;
+    }
     if (isExtensionInjected(el)) { extensionUi++; continue; }
     const role = roleOf(el);
     const name = nameOf(el);
@@ -2177,7 +2189,7 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     .filter((f) => f.src || f.name).slice(0, 20);
   return { url: location.href, title: document.title, nodes,
     nextRef: next, refsAssigned: assigned, truncated,
-    shadowRoots, iframes, skippedNoRect, extensionUi, candidates: els.length };
+    shadowRoots, iframes, skippedNoRect, skippedHidden, extensionUi, candidates: els.length };
 })()`;
 
 // article 的页面内提取器：简化 readability——候选根按 <p> 文本总长评分取最优，

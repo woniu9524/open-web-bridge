@@ -125,6 +125,20 @@ owb page --mode article
 
 多页收集：`owb page` 找到"下一页"的编号 → `owb click @eN` → `owb wait` → 再读。
 
+### 读评论区 / 论坛讨论串
+
+评论、回帖这类内容**不是文章正文**——`--mode article` 认不出来，只会返回 0 字
+（这是正确行为，见上表警告）；默认 `snapshot` 只画结构（谁在几分钟前发的、
+点赞/回复链接），同样看不到说了什么。两个都试了才想到用 `text` 模式就晚了，
+**评论串直接跳过 snapshot/article，一步到位用 text**：
+
+```bash
+owb open https://news.ycombinator.com/item?id=<id>
+owb page --mode text        # 实测：整串评论正文都在，snapshot/article 都是空的
+```
+
+同样适用于 Reddit 帖子、V2EX 回复、知乎问题下的答案列表。
+
 ### 跨站汇总 / 交叉验证
 
 真正有价值的用法。例：查一篇论文有没有可用的开源实现——

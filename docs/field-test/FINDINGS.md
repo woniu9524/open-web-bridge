@@ -508,3 +508,24 @@ AI 会继续加码重试，白白消耗。
 **修复**：错误信息带上实际等待时长与判断依据——
 「已等 Ns（daemon 侧）；提高一次超时再试，若在更高值下仍超时，
 问题在站点而不在超时设置」。
+
+### BUG-92 · 关闭状态的下拉菜单用 visibility:hidden，rect 过滤器抓不住 🟠 中影响
+
+**现象**：GitHub 仓库首页快照里，未展开的顶栏导航下拉菜单（Copilot/Solutions/
+Resources 等）贡献了 30+ 条链接，混在真正的仓库内容（文件树、commit 历史）
+前面。这些链接用户肉眼完全看不到，点了也没反应。
+
+**根因**：`visibility:hidden` 的元素仍然占布局盒——`getBoundingClientRect()`
+照样返回非零宽高，原来的过滤器（只看 rect 是否为零）抓不住这类"有盒子但不可见"
+的元素。这跟 BUG-72（rect 全零 = 后台 tab 没渲染）正好相反：这里是**有 rect、
+但祖先链上某层 visibility:hidden/display:none**。
+
+**实测影响**：该页快照从 11.3KB/147 refs 降到 4.5KB/60 refs（去除后台 tab
+渲染差异后仍下降约 60%），去噪后仓库内容排到最前面，不用再刷屏 40 条打不开的
+导航项才能看到真正数据。
+
+**修复**：加一道 `Element.checkVisibility({ checkOpacity: true,
+checkVisibilityCSS: true })` 检查（Chrome 105+ 原生 API，顺着祖先链判断
+visibility/display/content-visibility/opacity，不用手写祖先遍历）。命中的
+计入新计数器 `skippedHidden`，**不**并进 `skippedNoRect`——后者会触发"后台
+tab 未渲染，前台化重试"的逻辑，混进去会导致误判重试。
