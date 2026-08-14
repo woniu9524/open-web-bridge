@@ -12,6 +12,14 @@
     "playwright-alternative"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/woniu9524/open-web-bridge.git"
+  },
+  "homepage": "https://github.com/woniu9524/open-web-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/woniu9524/open-web-bridge/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=18"
@@ -28,6 +36,10 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "scripts": {
     "start": "node owb-daemon/src/server.js",
     "test": "node owb-daemon/tests/smoke_test.js && node owb-daemon/tests/cli_test.js"
