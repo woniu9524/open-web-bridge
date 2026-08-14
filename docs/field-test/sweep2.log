@@ -1,0 +1,12 @@
+[1/100] ok       Stack Exchange   nav=5312ms snap=174refs/20000B art=0c 
+[2/100] ok       Ask Ubuntu       nav=3327ms snap=166refs/20000B art=0c 
+[3/100] ok       Coursera         nav=6678ms snap=137refs/18655B art=0c 
+[4/100] ok       edX              nav=4224ms snap=130refs/18569B art=0c 
+[5/100] ok       Khan Academy     nav=4134ms snap=85refs/7007B art=0c 
+[6/100] ok       MIT OCW          nav=4572ms snap=131refs/12400B art=0c 
+[7/100] ok       中国大学MOOC         nav=30212ms snap=151refs/11639B art=0c 
+[8/100] ok       Mayo Clinic      nav=5201ms snap=123refs/15167B art=0c 
+[9/100] ok       NHS              nav=4042ms snap=60refs/5449B art=0c 
+[10/100] ok       丁香医生             nav=3182ms snap=6refs/152B art=0c 
+[11/100] ok       Yahoo Finance    nav=4679ms snap=238refs/12595B art=0c 
+[12/100] ok       Investing.com    nav=6183ms snap=180refs/20000B art=0c 

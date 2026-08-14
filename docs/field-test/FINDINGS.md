@@ -265,3 +265,19 @@ BUG-78 的 `httpErrorHint` 即为此。
 
 **教训**：给 AI 做的"保护"如果不分主次，会精准地毁掉最有价值的那部分。
 护栏必须知道哪个字段是主payload。
+
+### BUG-81 · 正文提取混入站点公告/募捐横幅 🟠 中影响
+
+**现象**：英文维基条目 `Model Context Protocol` 用 `--mode article` 提取，
+返回 11318 字符，但**开头 1817 字符全是募捐横幅**（"Nearly half of our budget
+goes toward supporting the technology…"），真正条目正文从 1817 字符处才开始。
+
+**根因**：正文提取选中 `main.mw-body` 作为根，去噪列表 `BOILER` 覆盖了
+nav/header/footer/aside/广告，但漏掉「正文容器**内部**的公告块」——
+募捐条、Cookie 提示、订阅浮层、付费墙提示都属这一类。
+
+**影响**：AI 逐篇读文章时，每篇白付 1~2K token，且有把横幅误当正文摘要的风险。
+
+**修复**：`BOILER` 增补语义类名/角色——`[class*=sitenotice]`、`[class*=dismissable]`、
+`[class*=cookie]`、`[class*=consent]`、`[class*=newsletter]`、`[class*=subscribe]`、
+`[class*=paywall]`、`[role=alert]`、`[role=dialog]` 等。

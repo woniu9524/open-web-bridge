@@ -2150,10 +2150,19 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
 //   3. 提取时跳过样板容器和 aria-hidden 的后代；
 //   4. 提不出正文就明说（reason），不再返回一段导航冒充正文。
 const READ_PAGE_ARTICLE_EXPR = `(() => {
+  // BUG-81: 站点通知/募捐条/Cookie 提示这一类「正文容器内部的公告块」原来没被
+  // 剔除。实测英文维基条目：main.mw-body 前 1817 字符全是募捐横幅，AI 逐篇读
+  // 文章时既浪费 token 又可能把横幅当成正文摘要。这类块的共同特征是带
+  // notice/banner/dismissable/cookie/consent/subscribe/paywall 语义类名或角色。
   const BOILER = "nav, header, footer, aside, form, [role='navigation'], " +
     "[role='banner'], [role='contentinfo'], [role='search'], [role='complementary'], " +
-    "[aria-hidden='true'], .nav, .navbar, .menu, .sidebar, .footer, .header, " +
-    ".breadcrumb, .toc, .comment, .comments, .advert, .ads";
+    "[role='alert'], [role='dialog'], [aria-hidden='true'], " +
+    ".nav, .navbar, .menu, .sidebar, .footer, .header, " +
+    ".breadcrumb, .toc, .comment, .comments, .advert, .ads, " +
+    "[class*='sitenotice'], [class*='site-notice'], [class*='dismissable'], " +
+    "[class*='dismissible'], [class*='cookie'], [class*='consent'], " +
+    "[class*='newsletter'], [class*='subscribe'], [class*='paywall'], " +
+    "[id*='sitenotice'], [id*='cookie-banner'], [class*='promo-banner']";
   const inBoiler = (el) => !!(el.closest && el.closest(BOILER));
   const textLen = (root) => {
     let n = 0;
