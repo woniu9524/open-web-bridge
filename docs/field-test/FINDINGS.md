@@ -471,3 +471,16 @@ AI 会对着一个**已经不存在**的标签页反复重试。
 **修复**：正则改为 `no tab with (given )?id` 覆盖两种措辞，并把成因
 （可能被标签管理扩展关掉了）与动作（`list_tabs` 查存活 tab，或新标签页重开）
 写进错误信息。
+
+### BUG-90 · 非法 tabId 报出 Chrome 内部错误且标为可重试 🟠 中影响
+
+**现象**：`--tab notanumber` 报
+`INTERNAL: Error in invocation of debugger.attach(...): Error at property 'tabId':
+Invalid type: expected integer, found string.（可重试）`
+——Chrome 内部措辞，且被兜底标记成**可重试**，AI 会拿同一个坏参数反复重试。
+
+**触发场景**：脚本里 tabId 提取失败拿到字面量（实测拿到 `"X"`），或 AI
+从上文误抄了非数字的值。
+
+**修复**：`resolveTabId` 前置校验——非整数直接 `BAD_ARGS`（不可重试）并指路
+`list_tabs`。校验放在最前面，所有工具共享。

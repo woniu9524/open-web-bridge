@@ -1639,7 +1639,22 @@ function toToolError(e) {
 }
 
 async function resolveTabId(args) {
-  if (args.tabId != null) return args.tabId;
+  if (args.tabId != null) {
+    // BUG-90: tabId 传成字符串/NaN 时，错误一路漏到 chrome.debugger.attach，
+    // 报出 "Error at property 'tabId': Invalid type: expected integer, found
+    // string" 这种 Chrome 内部措辞，还被兜底标成「可重试」——AI 会拿同一个
+    // 坏参数反复重试。实测：脚本里 tabId 提取失败拿到字面量 "X" 即触发。
+    const n = typeof args.tabId === "number" ? args.tabId : Number(args.tabId);
+    if (!Number.isInteger(n)) {
+      throw new ToolError(
+        "BAD_ARGS",
+        `tabId must be an integer, got ${JSON.stringify(args.tabId)} — ` +
+          "call list_tabs to get live tabIds",
+        false,
+      );
+    }
+    return n;
+  }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || tab.id == null) {
     throw new ToolError(
