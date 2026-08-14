@@ -4,7 +4,7 @@
 
 两种部署形态：
 
-- **本地模式**（默认）：三层架构 AI agent → 本地 daemon（Node.js，`127.0.0.1:43917`）→ MV3 Chrome 扩展 → 经 CDP 操作页面。通过 **MCP** 接入，Kimi Code / Claude Code 等工具零适配使用，76 个工具。
+- **本地模式**（默认）：三层架构 AI agent → 本地 daemon（Node.js，`127.0.0.1:43917`）→ MV3 Chrome 扩展 → 经 CDP 操作页面。agent 通过 **`owb` CLI** 接入（Kimi Code / Claude Code / Codex 等任何能跑 shell 的工具零配置直用），配套 skill 教典型流程。
 - **中转模式**（可选）：daemon 与扩展都拨出到一个公网中转（Cloudflare Workers + Durable Objects，按 token 配对），让**远程** AI agent 经公网控制你的浏览器，不暴露本机端口。默认关闭，不影响本地模式。
 
 ## 能干什么
@@ -30,7 +30,6 @@
 git clone <仓库地址>          # 或下载 zip 解压
 cd open-web-bridge/daemon
 npm install
-node src/server.js            # 启动 daemon，监听 127.0.0.1:43917
 ```
 
 装扩展（一次性）：
@@ -41,15 +40,19 @@ node src/server.js            # 启动 daemon，监听 127.0.0.1:43917
 4. 扩展默认连本地 daemon（`ws://127.0.0.1:43917/ws`），无需配对；点工具栏图标
    可看实时连接状态，改地址在弹窗「本地」页填写后保存。
 
-接入 AI 工具（以 Kimi Code 的 `config.toml` 为例，其他 MCP 客户端同构）：
+接入 AI 工具——不需要任何客户端配置。agent 直接用 shell 调 `owb` CLI 即可
+（daemon 未运行时 CLI 会**自动拉起**，无需先手动 `npm start`）：
 
-```toml
-[mcp_servers.owb]
-command = "node"
-args = ["<仓库绝对路径>/daemon/src/mcp_server.js"]
+```bash
+node daemon/src/cli.js                       # 自检：daemon/扩展连接状态
+node daemon/src/cli.js open https://www.zhihu.com
+node daemon/src/cli.js page                  # 语义快照，得到 @eN ref
+node daemon/src/cli.js click @e5             # 引用 ref 操作
+node daemon/src/cli.js help                  # 12 个命令组，79 个工具
 ```
 
-重连 MCP 后即可使用全部 76 个工具。对 agent 说一句「打开知乎搜一下 XXX」就能看到它干活。
+`npm link`（或全局装）后可直接 `owb <命令>`。仓库自带 skill（`.claude/skills/owb/`）
+教 Claude Code 典型流程；对 agent 说一句「打开知乎搜一下 XXX」就能看到它干活。
 
 ## 中转模式（远程控制，可选）
 
@@ -78,7 +81,7 @@ export OWB_RELAY_TOKEN="<与扩展端相同的 Token>"
 node src/server.js            # 日志会标注「中转模式」
 ```
 
-两者配对后，`daemon_status` 的 `mode` 字段为 `relay`，远程 agent 即可像本地一样驱动浏览器。MCP 接入面配置不变（`mcp_server.js` 仍连本地 `/ctl`）。
+两者配对后，`owb daemon-status` 的 `mode` 字段为 `relay`，远程 agent 即可像本地一样驱动浏览器。CLI 接入面不变（仍连本地 `/ctl`）。
 
 ## 可选：TLS 指纹重放
 
@@ -102,15 +105,15 @@ node src/server.js            # 日志会标注「中转模式」
 - **token 是线上唯一秘密**，必须走 wss（Cloudflare 边缘内置 TLS）。连接到某中转房间即证明持有 token（房间按 `sha256(token)` 寻址，哈希泄露也无法逆推构造 URL）。
 - **中转是可信 broker**。MVP **无端到端加密**——中转能看到全部明文流量（含登录 cookie/storage）。只用你自己控制的 Cloudflare 账号部署中转，或接受此风险。E2EE（token 派生密钥逐帧加密）为后续硬化项。
 - token 在扩展端生成、手动同步到 daemon 环境变量，**勿提交入库**。
-- 开启中转模式不改变本地 `/ctl` 的本地信任模型（mcp_server 仍连本机 daemon）。
+- 开启中转模式不改变本地 `/ctl` 的本地信任模型（CLI 仍连本机 daemon）。
 
 ## 测试
 
 ```bash
 cd daemon
-node tests/smoke_test.js        # 43 项：协议/守护/编排（自起子进程，无需停 daemon）
+node tests/smoke_test.js        # 60 项：协议/守护/编排（自起子进程，无需停 daemon）
 node tests/relay_test.js        # 10 项：中转模式集成（mock 中转 + 真 daemon）
-node tests/mcp_test.js          # 8 项：MCP 接入面
+node tests/cli_test.js          # 13 项：owb CLI 接入面（命令映射/转发/错误模型）
 node tests/verify_replay_test.js # 11 项：离线验证 + 重放
 node tests/e2e_browser_test.js  # 68 项：真机端到端（headless Chromium + 真扩展）
 node tests/read_page_test.js    # 页面表达式单测（另有 7 个同类文件，共 101 项）

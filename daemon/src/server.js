@@ -13,8 +13,8 @@
  * 端口可用环境变量 OWB_PORT 覆盖（e2e 与日常浏览器隔离用；
  * 单扩展模型下两个浏览器实例会在同一端口上互相顶替）。
  *
- * MCP(stdio) 接入面由 mcp_server.js 提供（薄转发到 ctl），
- * client.js CLI 保留作调试。
+ * agent/人的接入面是 cli.js（owb 命令，薄转发到 ctl）；
+ * client.js 是更底层的 ctl/事件流调试 CLI。
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -438,7 +438,7 @@ export class Bridge {
   // daemon 拨 wss://<OWB_RELAY_URL>/<token>?role=controller → 等 {type:"relay_paired"}
   // → 同 tick 原子交接给 handleExtension(ws)（防 relay_paired 与扩展 hello 之间丢帧）。
   // 之后 tool_call/tool_result/event/ping 全部经中转透明转发，内部路由逻辑零改动。
-  // /ctl 本地服务不受影响（mcp_server 仍连本地）。本地模式（env 不设）完全不执行此路径。
+  // /ctl 本地服务不受影响（CLI 仍连本地）。本地模式（env 不设）完全不执行此路径。
 
   static buildRelayUrl() {
     if (!OWB_RELAY_URL || !OWB_RELAY_TOKEN) return null;
