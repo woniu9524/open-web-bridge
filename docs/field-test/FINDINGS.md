@@ -9,7 +9,7 @@
 
 ## 已修复
 
-### BUG-60 · `innerText` 空导致 43% 的 ref 变成哑元素 🔴 高影响
+### BUG-70 · `innerText` 空导致 43% 的 ref 变成哑元素 🔴 高影响
 
 **现象**：界面新闻首页快照里 260 个 ref 中 112 个（43%）形如
 `@e17 link "" href=https://www.jiemian.com/lists/65.html`——没有任何文字，
@@ -38,7 +38,7 @@ owb page      # 数 @eN xxx "" 的行
 
 ---
 
-### BUG-62 · 后台标签页快照静默全空 🔴 高影响
+### BUG-72 · 后台标签页快照静默全空 🔴 高影响
 
 **现象**：中国政府网快照 `count:0 / lines:""`，而同一页 article 模式能提到 2231 字。
 页面 DOM 里有 198 个 `<a href>`。
@@ -67,7 +67,7 @@ owb page --tab <gov.cn 的 tabId>               # → count:0
 **关联**：`send_keys` 早有同类修复（BUG-58：后台 tab 收不到 Input 事件），
 说明「tab 未前台化」是这套架构的系统性陷阱面，值得在 skill 里专门提示。
 
-### BUG-63 · `owb shot` 把 473KB base64 直接打进 AI 上下文 🔴 高影响
+### BUG-76 · `owb shot` 把 473KB base64 直接打进 AI 上下文 🔴 高影响
 
 **现象**：`owb shot` 返回体含完整 base64 图像数据（实测 473,796 字符）。AI 在 shell
 里跑一次截图，**一条命令就吃掉整个上下文窗口**，而 base64 对它毫无可读价值。
@@ -85,7 +85,7 @@ CLI 的读者是 AI 的上下文窗口，不是磁盘——这层没做区分。
 **验证**：修复后输出
 `{"tabId":...,"format":"png","savedTo":"/tmp/owb-shot-....png","bytes":355347}`
 
-### BUG-64 · 改扩展代码必须手点 chrome://extensions 重载 🟡 开发体验
+### BUG-77 · 改扩展代码必须手点 chrome://extensions 重载 🟡 开发体验
 
 扩展管理页禁止被 debugger 附着，AI 无法代劳，每次改 `background.js` 都要人工介入，
 在长周期迭代里是硬阻塞。
@@ -93,7 +93,7 @@ CLI 的读者是 AI 的上下文窗口，不是磁盘——这层没做区分。
 **修复**：新增 `reload_extension` 工具（扩展调用 `chrome.runtime.reload()` 自重启，
 先回包再重载）+ CLI `owb reload-ext`。**注意**：该能力本身需要先手工重载一次才生效。
 
-### BUG-65 · 抓包列表混入「无身份」孤儿记录 🟠 中影响
+### BUG-73 · 抓包列表混入「无身份」孤儿记录 🟠 中影响
 
 **现象**：USGS 地震地图上 `owb net list` 返回 45 条请求，每条只有
 `{status:200, finished:true, failed:false}`——**没有 URL、没有 method、
@@ -111,6 +111,41 @@ BBC 同样操作下 1/60，USGS 下 45/45——比例取决于站点请求模式
 
 **沉淀进 skill**：抓包的正确顺序是 `net start` → `open`，不是 `open` → `net start`
 → `reload`。
+
+### BUG-74 · 抓包丢弃 CDP 已给的耗时与体积 🟠 中影响
+
+`Network.loadingFinished` 事件本就带 `encodedDataLength` 和结束时刻、
+`responseReceived` 带完整 `timing` 分解，但缓冲只记了 `{finished:true}` 与
+status/headers/mimeType，其余全丢。后果：**「哪个请求最慢/最重」——性能排查的
+第一个问题——在列表里无从回答**，只能对每条单独 `network_detail`（几百条时不可行）。
+
+**修复**：缓冲补记 `finishedAt`/`encodedDataLength`/`timing`/`fromCache`/
+`remoteAddress`；`network_list` 输出 `durationMs`/`size`；新增
+`sort_by=duration|size`。`sort_by` 与 `newest` 语义冲突（排序后从尾部取会拿到
+最快的几条），排序优先且 `order` 字段如实反映。
+
+### BUG-75 · 导航到不可达域名返回「假成功」🔴 高影响
+
+**现象**：
+```bash
+owb open https://this-domain-truly-does-not-exist.invalid/
+# → {"url":"...","title":"...","loadCompleted":true}   退出码 0
+```
+DNS 必然失败的域名，却报告加载完成。AI 据此继续操作，面对空快照无从判断
+「是页面没内容」还是「压根没打开」。
+
+**根因**：代码里**已有**错误页检测（查 `location.href` 是否 `chrome-error://`），
+但 `navigate` 全流程从未调用 `ensureAttached`——未附着时 `Runtime.evaluate` 必抛，
+异常又被 `catch (e) {}` 吞掉，检测形同虚设。
+实测确认：`tab.url` 保留请求 URL，只有**页内** `location.href` 才是
+`chrome-error://chromewebdata/`，所以这条页内探测不可省。
+
+**修复**：探测前先 `ensureAttached`；同时读取 Chrome 错误页的 `#main-frame-error`
+与 `.error-code`，把 `ERR_NAME_NOT_RESOLVED` / `ERR_CONNECTION_CLOSED` 等
+**错误码带回**——AI 才能区分「域名写错了」和「网络不通」这两种完全不同的处置。
+
+**教训**：`catch (e) {}` 静默吞异常，会让一条本来正确的检测逻辑长期处于失效状态
+而无人察觉。
 
 ---
 

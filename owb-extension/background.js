@@ -798,7 +798,7 @@ function onNetworkEvent(tabId, method, params) {
       status: params.response.status,
       responseHeaders: params.response.headers,
       mimeType: params.response.mimeType,
-      // BUG-66: 细粒度阶段耗时（DNS/连接/TLS/TTFB），排查慢请求的关键
+      // BUG-74: 细粒度阶段耗时（DNS/连接/TLS/TTFB），排查慢请求的关键
       timing: params.response.timing || undefined,
       fromCache: !!params.response.fromDiskCache,
       remoteAddress: params.response.remoteIPAddress || undefined,
@@ -823,7 +823,7 @@ function onNetworkEvent(tabId, method, params) {
     return;
   }
   if (method === "Network.loadingFinished") {
-    // BUG-66: CDP 在这里就给了传输体积与结束时刻，原来只记了 finished 布尔，
+    // BUG-74: CDP 在这里就给了传输体积与结束时刻，原来只记了 finished 布尔，
     // 于是「哪个请求最慢/最重」——性能排查的头号问题——在列表里无从回答，
     // 只能对每条请求单独 network_detail（几百条时不可行）。
     bufferPut(tabId, params.requestId, {
@@ -2031,12 +2031,12 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     }
     if (!v) v = el.getAttribute("name") || el.getAttribute("title") || "";
     if (!v) v = el.value || el.innerText || "";
-    // BUG-60: innerText 遵循 CSS 可见性——元素在 visibility:hidden 的容器里
+    // BUG-70: innerText 遵循 CSS 可见性——元素在 visibility:hidden 的容器里
     // （悬停菜单、折叠导航很常见）时返回空串，但它仍有布局盒、仍会进快照。
     // 实测界面新闻首页 43% 的 ref 因此变成 @eN link ""，AI 只能靠 href 猜。
     // textContent 不依赖渲染，是这类元素唯一能拿到的文字。
     if (!v) v = el.textContent || "";
-    // BUG-61: 纯图片链接/按钮（<a><img alt="..."></a>）自身没有任何文字，
+    // BUG-71: 纯图片链接/按钮（<a><img alt="..."></a>）自身没有任何文字，
     // alt 挂在子元素上，取不到就完全无名。
     if (!v && el.querySelector) {
       const im = el.querySelector("img[alt], img[title], [aria-label]");
@@ -2064,7 +2064,7 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     return acc;
   };
   const els = collect(document, []);
-  // BUG-62: 后台/未绘制的 tab 里所有元素 getBoundingClientRect() 全为 0，
+  // BUG-72: 后台/未绘制的 tab 里所有元素 getBoundingClientRect() 全为 0，
   // 于是可见性过滤把整页元素丢光，快照静默返回空。记下被过滤数，
   // 让扩展侧能区分"页面真没东西"和"页面没渲染"。
   let skippedNoRect = 0;
@@ -2416,15 +2416,29 @@ const tools = {
     // false success on unreachable pages. chrome.tabs.get().url may still
     // show the requested URL, so also check location.href in-page.
     let isChromeError = tab.url && tab.url.startsWith("chrome-error://");
-    if (!isChromeError && completed) {
+    let errorCode = null;
+    if (!isChromeError) {
+      // BUG-75: 这段探测原来直接 cdpCall，而 navigate 全程没 ensureAttached ——
+      // 未附着时 Runtime.evaluate 必抛，异常又被 catch 吞掉，于是错误页检测
+      // 形同虚设：对 DNS 失败的域名照样返回 loadCompleted:true（假成功）。
+      // 实测 .invalid 域名：tab.url 保留请求 URL，只有页内 location.href
+      // 才是 chrome-error://chromewebdata/，所以这条页内探测是必需的。
       try {
+        await ensureAttached(tabId);
         const evRes = await cdpCall(tabId, "Runtime.evaluate", {
-          expression: "location.href",
+          expression:
+            '(()=>{const e=document.querySelector("#main-frame-error");' +
+            'return JSON.stringify({h:location.href,err:e?' +
+            '((document.querySelector(".error-code")||{}).textContent||"").trim():null})})()',
           returnByValue: true,
         });
-        const actualUrl = evRes.result && evRes.result.value;
-        if (actualUrl && actualUrl.startsWith("chrome-error://")) {
+        const probe = JSON.parse((evRes.result && evRes.result.value) || "{}");
+        if (
+          (probe.h && probe.h.startsWith("chrome-error://")) ||
+          probe.err
+        ) {
           isChromeError = true;
+          errorCode = probe.err || null;
         }
       } catch (e) {}
     }
@@ -2434,8 +2448,14 @@ const tools = {
         url: args.url,
         title: "",
         loadCompleted: false,
+        // BUG-75: 带上 Chrome 的错误码（ERR_NAME_NOT_RESOLVED /
+        // ERR_CONNECTION_CLOSED / ERR_CONNECTION_TIMED_OUT …），
+        // AI 才能区分「域名写错了」和「网络不通」这两种完全不同的处置。
+        errorCode: errorCode || undefined,
         navigationError:
-          "page failed to load (chrome-error) — check URL validity and network",
+          "page failed to load" +
+          (errorCode ? ` (${errorCode})` : " (chrome-error)") +
+          " — check URL validity and network",
         groupId,
       };
     }
@@ -2693,7 +2713,7 @@ const tools = {
     let extensionRequests = 0;
     let orphanRecords = 0;
     for (const rec of getBuffer(tabId).values()) {
-      // BUG-65: 抓包在页面已加载后才启动、或跨 reload 时，会收到只有响应事件
+      // BUG-73: 抓包在页面已加载后才启动、或跨 reload 时，会收到只有响应事件
       // 而没有 requestWillBeSent 的记录 —— 它们没有 url/method/requestId，
       // 在列表里就是一行 {status,finished,failed}，AI 既认不出是谁也没法
       // network_detail 它。实测 USGS 上 45 条全是这种，整个抓包结果等于废掉。
@@ -2719,7 +2739,7 @@ const tools = {
         type: rec.type,
         finished: !!rec.finished,
         failed: !!rec.failed,
-        // BUG-66: 耗时与体积直接进列表——性能排查不必对每条再 network_detail
+        // BUG-74: 耗时与体积直接进列表——性能排查不必对每条再 network_detail
         durationMs:
           rec.finishedAt && rec.startedAt
             ? rec.finishedAt - rec.startedAt
@@ -2728,7 +2748,7 @@ const tools = {
         fromCache: rec.fromCache || undefined,
       });
     }
-    // BUG-66: 按耗时/体积排序，一条命令回答「最慢的是谁」「谁最占带宽」
+    // BUG-74: 按耗时/体积排序，一条命令回答「最慢的是谁」「谁最占带宽」
     const sortKey = args.sort_by === "duration" ? "durationMs"
       : args.sort_by === "size" ? "size" : null;
     if (sortKey) all.sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
@@ -2751,7 +2771,7 @@ const tools = {
         ? `${args.sort_by}-desc`
         : newest ? "newest-first" : "oldest-first",
       extensionRequestsHidden: extensionRequests || undefined,
-      // BUG-65: 剔除了多少条无身份记录（抓包起晚了/跨了 reload）。
+      // BUG-73: 剔除了多少条无身份记录（抓包起晚了/跨了 reload）。
       // 数量大说明该在导航前就 network_start，否则前半段请求已经错过。
       orphanRecordsHidden: orphanRecords || undefined,
     };
@@ -4270,7 +4290,7 @@ const tools = {
       tabId,
       READ_PAGE_SNAPSHOT_EXPR(nextRef, maxNodes),
     )) || { nodes: [], nextRef };
-    // BUG-62: 页面有候选元素、却因全部零尺寸被过滤光 —— 这是「tab 在后台没绘制」
+    // BUG-72: 页面有候选元素、却因全部零尺寸被过滤光 —— 这是「tab 在后台没绘制」
     // 的特征（Chrome 不给后台 tab 做布局），不是「页面真的空」。静默返回空快照
     // 会让 AI 以为页面没内容而走错路。前台化一次重试，并在结果里说明发生了什么。
     let renderNote = null;
@@ -4351,7 +4371,7 @@ const tools = {
           ? "raise max_nodes (default 400, max 2000) or narrow with since_last"
           : undefined,
       refsAssigned: v.refsAssigned,
-      // BUG-62: 空快照/渲染异常时说明原因，不让 AI 面对无解释的空结果
+      // BUG-72: 空快照/渲染异常时说明原因，不让 AI 面对无解释的空结果
       renderNote: renderNote || undefined,
       // UX-214: 快照里有多少内容来自 shadow DOM（0 = 该页没用 Web Component）
       shadowRoots: v.shadowRoots || undefined,
