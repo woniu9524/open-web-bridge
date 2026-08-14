@@ -366,6 +366,14 @@ Chrome 为省资源对隐藏窗口做的媒体缓冲节流，不是 OWB 的故�
 占满（尤其还在加载时）。先 `owb wait --network-idle true` 再重试，别去找
 根本不存在的断点。
 
+**直接打开 PDF 网址，`page` 三种模式都读不出内容**。Chrome 内置 PDF 阅读器
+渲染在一个独立的沙盒视图里，DOM 和无障碍树（实测 `Accessibility.
+getFullAXTree` 也查过，同样查不到正文）都看不进去——不是选择器没写对，是
+架构上够不到，没有绕过办法。真要读 PDF 正文，找有没有 HTML 版本（arXiv 论文
+详情页通常有「HTML (experimental)」链接，跳过去之后 `--mode article`
+可以正常读）；没有 HTML 版本的 PDF 目前读不了正文，只能 `owb shot` 截图看，
+或者告诉用户直接在浏览器里看。
+
 ## 出错怎么办
 
 | 错误 | 含义 | 动作 |
