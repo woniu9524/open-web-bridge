@@ -1578,8 +1578,15 @@ const CDP_ERROR_RULES = [
     "NO_TAB", false, "call list_tabs for live tabIds"],
   [/cannot access|cannot be debugged|chrome:\/\/|extensions gallery|devtools:\/\//i,
     "FORBIDDEN", false,
-    "Chrome forbids debugging this URL (chrome://, the Web Store, devtools://); " +
-    "navigate to a regular http(s) page first"],
+    // BUG-83: 实地测试里这个错误反复出现在「明明是 https 页面」的 tab 上。
+    // 归因：用户装的标签管理类扩展（OneTab 等）会把标签页整个换成自己的
+    // chrome-extension:// 页面，owb 正在操作的 tab 被第三方接管了。
+    // 原文案只说「Chrome 禁止调试此 URL」，AI 会以为自己传错了 tabId 而反复重试。
+    "Chrome forbids debugging this URL (chrome://, the Web Store, devtools://, " +
+    "or another extension's page); call list_tabs to see what this tab actually " +
+    "shows now — tab-manager extensions (OneTab and similar) replace tabs with " +
+    "their own page, which takes the tab out of reach. Re-open the target URL " +
+    "in a fresh tab"],
   [/could not find object with given id|invalid remote object id/i,
     "BAD_ARGS", false,
     "object_id expired (RemoteObjects die on navigation/GC); " +

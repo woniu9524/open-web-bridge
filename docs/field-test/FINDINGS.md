@@ -1,9 +1,25 @@
 # 实地测试发现清单
 
-对 117 个真实站点跑核心链路（open → page → article）+ 深度交互实测，记录暴露出的
+对 **219 个真实站点**跑核心链路（open → page → article）+ 深度交互实测，记录暴露出的
 问题。每条含：现象、复现、根因、影响面、状态。
 
-数据：`raw.jsonl`（广度扫描原始记录）、`sweep.mjs`（扫描脚本）、`sites.json`（站点清单）。
+## 总览
+
+| 指标 | 结果 |
+|---|---|
+| 站点样本 | 219（第一波 119 + 第二波 100） |
+| 覆盖类型 | 新闻/社区/电商/学术/文档/教育/医疗/金融/招聘/SaaS/开源主页/知识库/工具/社交/视频/游戏/旅游/天气/实时数据/WebGL/无障碍/标准组织 |
+| 导航耗时 p50 / p90 / p99 | 4.7s / 15.3s / 30.2s |
+| 快照耗时 p50 | 185ms |
+| **硬失败** | **3 / 219**（1 导航 + 2 快照，均已归因，见 BUG-83） |
+| 修复前哑 ref 率 | **15.7%**（3682 / 23412） |
+| 首屏即触顶截断 | 36 / 219（16%） |
+
+**发现并修复 13 个 bug**，其中 4 个属「静默失败」——AI 拿到看似合法的结果却完全错误，
+是最危险的一类（BUG-72 空快照、BUG-75 假成功、BUG-78 错误页、BUG-73 孤儿记录）。
+
+数据：`raw-before-fix.jsonl` / `raw-wave2.jsonl`（原始记录）、`sweep.mjs`（扫描脚本）、
+`sites.json` / `sites-wave2.json`（站点清单）。演示案例见 `SHOWCASE.md`。
 
 ---
 
@@ -221,16 +237,17 @@ BUG-78 的 `httpErrorHint` 即为此。
 **待查**：是站点本身慢/被墙，还是 `open` 的完成条件过于严格（等所有子资源）？
 若是后者，`wait_until: domcontentloaded` 应能大幅改善——需要对照实测。
 
-### ISSUE-05 · 导航途中 `page` 偶发 FORBIDDEN（即便显式 `--tab`）🟡 偶发
+### ISSUE-05 · 「明明是 https 页却报 FORBIDDEN」✅ 已归因（BUG-83）
 
-**现象**：npm OTP 页跳转过程中调 `owb page --tab <id>`，报
-`FORBIDDEN: Cannot access a chrome-extension:// URL of different extension`，
-而该 tab 明明是 https 页面。重试即恢复。
+219 站扫描中复现 2 次（东方财富、知网），加上此前 npm 那次共 3 次。
 
-**推测**：前一次失败调用（活动 tab 恰为扩展页）在 debugger attach 状态留下残留，
-后续显式 tabId 的调用被旧状态污染。
+**归因**：用户装了 **OneTab** 这类标签管理扩展，它会把标签页整个替换成自己的
+`chrome-extension://.../onetab.html` 页面。owb 正在操作的 tab 被第三方扩展接管后，
+`chrome.debugger.attach` 自然被拒。**不是 owb 的缺陷**，是浏览器里多扩展共存的现实。
 
-**关联**：可能与 e2e 测试里既有的 11 项 hook/断点失败同源（都涉及 attach 时序）。
+**处置**：原错误文案只说「Chrome 禁止调试此 URL」，AI 会以为自己传错了 tabId 而
+反复重试。改为点明真实成因并给出动作——查 `list_tabs` 看这个 tab 现在究竟是什么，
+用新标签页重开目标地址。
 
 ---
 
@@ -306,3 +323,19 @@ recorder 就被销毁了，save 无从下手。而 `record_stop` 把整份 HAR �
 
 **设计教训**：当 B 操作内部包含 A 操作时，命令名必须让人看出来，否则「先 A 再 B」
 这个最直觉的顺序就是陷阱。
+
+### BUG-83 · FORBIDDEN 错误文案误导 AI 反复重试 🟡 低影响
+
+**现象**：`page` / `eval` 对一个**明明是 https 的标签页**报
+`FORBIDDEN: Cannot access a chrome-extension:// URL of different extension`。
+219 站扫描中复现 2 次（东方财富、知网），此前 npm 登录流程中 1 次。
+
+**归因**：用户装了 **OneTab** 这类标签管理扩展，它把标签页整个替换成自己的
+`chrome-extension://.../onetab.html`。owb 正在操作的 tab 被第三方接管，
+`chrome.debugger.attach` 自然被拒。**不是 owb 的缺陷**，是多扩展共存的现实。
+
+**问题在文案**：原文只说「Chrome 禁止调试此 URL」，AI 会以为自己传错了 tabId
+而反复重试同一个失败调用。
+
+**修复**：错误信息点明真实成因（标签管理类扩展会替换页面）并给出可执行动作
+（`list_tabs` 看这个 tab 现在是什么 → 用新标签页重开目标地址）。
