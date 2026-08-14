@@ -2109,6 +2109,20 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     return acc;
   };
   const els = collect(document, []);
+  // BUG-95: next 是扩展侧持久化的计数器，靠"文档导航时清零"保证不重号。但如果
+  // 某次事件把计数器错当成整页导航清零了（比如同文档内的 pushState 被
+  // Page.frameNavigated 误判），文档其实根本没销毁——DOM 上还留着上一轮
+  // collect() 写的 data-owb-ref 属性。新一轮从 e1 重新数，撞上还活在页面里的
+  // 旧 e1：两个完全不同的元素共享同一个 ref，AI 点 @e1 点到哪个全看
+  // querySelector 命中顺序，静默点错。不管传进来的 next 对不对，先扫一遍当前
+  // 文档已经贴好的 data-owb-ref，保证新分配的号必然比现存最大值还大。
+  for (const el of els) {
+    const r = el.getAttribute("data-owb-ref");
+    if (r) {
+      const n = parseInt(r.slice(1), 10);
+      if (!isNaN(n) && n >= next) next = n + 1;
+    }
+  }
   // BUG-72: 后台/未绘制的 tab 里所有元素 getBoundingClientRect() 全为 0，
   // 于是可见性过滤把整页元素丢光，快照静默返回空。记下被过滤数，
   // 让扩展侧能区分"页面真没东西"和"页面没渲染"。
