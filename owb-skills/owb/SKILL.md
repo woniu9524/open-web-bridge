@@ -1,118 +1,185 @@
 ---
 name: owb
-description: 用 owb CLI 驱动用户的真实浏览器（用户的登录态、指纹、正在看的页面）。当任务涉及打开网页、读页面内容、点击/填表、抓包分析、录制 HAR、保存登录态、hook 页面函数、模拟环境、或需要人机交接（验证码/扫码登录）时使用。
+description: 用 owb 命令驱动用户自己的浏览器——带着用户已登录的账号去读页面、查资料、填表、走流程、调试网站。当任务需要「打开某个网页看看」「把这几页内容整理一下」「帮我在某站上操作」「我的网站前端出问题了」，或任何需要用户登录态/真实浏览器环境才能完成的事情时使用。
 ---
 
-# Open Web Bridge (owb)
+# owb — 驱动用户的真实浏览器
 
-通过 `owb` 命令行驱动用户本机真实浏览器：语义快照、点击填表、网络抓包、HAR 录制、
-登录态保存、页面 hook/断点、环境模拟、人机交接。所有能力都在一个 CLI 里，直接用
-Bash 调用即可，无需任何客户端配置。
+`owb` 让你操作**用户自己正在用的那个浏览器**：他登录过的账号、他的设置、他打开着的标签页。
+所以你能看到只有登录后才能看到的内容，能替他完成需要身份的操作。
 
-## 前提
+这也意味着：**你的每一步都作用在真人的账号上**。当心。
 
-`owb` 是 open-web-bridge 仓库 `owb-daemon/` 下的 bin（源码 `owb-daemon/src/cli.js`）。
-用户已 `npm install` 后，用以下任一方式调用：
-
-- `node <仓库>/owb-daemon/src/cli.js <命令>`（始终可用）
-- `owb <命令>`（若已 `npm link` 或全局装）
-
-daemon 未运行时 **CLI 会自动拉起**，无需手动 `npm start`。浏览器扩展需用户在
-`chrome://extensions` 以开发者模式加载 `owb-extension/` 目录（一次性）。
-
-## 第一步永远是 doctor
-
-任何浏览器任务开始前，先跑无参 `owb` 自检：
+## 开始之前：先自检
 
 ```bash
-node owb-daemon/src/cli.js
+owb
 ```
 
-- `✓ daemon` + `✓ 扩展已连接` → 可以干活
-- `✗ 扩展未连接` → 让用户点浏览器工具栏的扩展图标看状态，别急着调工具（会一直报
-  NO_EXTENSION）
+- `✓ daemon` + `✓ 扩展已连接` → 可以开始
+- `✗ 扩展未连接` → 停下来告诉用户：点浏览器工具栏的扩展图标看状态。别硬调工具，会一直报 `NO_EXTENSION`
+- 命令找不到 → 用户可能没装：`npm i -g open-web-bridge`，然后 `owb setup`
 
-## 核心工作流：读 → 定位 → 操作
+## 核心循环：看 → 指 → 动
 
-owb 的定位模型是**语义快照**：`owb page` 给页面可交互元素打上 `@eN` 稳定 ref，
-后续 `click`/`fill` 直接引用 ref，不用猜 CSS selector。
+owb 不需要你猜 CSS 选择器。`owb page` 会把当前页面变成一份带编号的清单，
+每个可交互元素有个 `@eN` 编号，你直接用编号操作。
 
 ```bash
-node owb-daemon/src/cli.js open https://www.zhihu.com          # 打开页面
-node owb-daemon/src/cli.js page                                # 快照，得到 @e1 @e2 …
-node owb-daemon/src/cli.js fill @e3 "开源浏览器自动化"          # 填搜索框（@ 开头 = ref）
-node owb-daemon/src/cli.js click @e5                           # 点搜索按钮
-node owb-daemon/src/cli.js wait --url-pattern "search"         # 等结果页
-node owb-daemon/src/cli.js page --mode article                # 正文提取为 markdown
+owb open https://example.com     # 打开
+owb page                          # 看：得到 @e1 @e2 … 和页面结构
+owb fill @e3 "关键词"             # 指 + 动
+owb click @e5
+owb wait --text "搜索结果"        # 等页面就绪，别用 sleep
+owb page --mode article           # 正文提取成 markdown，适合读长文
 ```
 
-要点：
-- **ref 会失效**：页面导航或重渲染后旧 ref 报 `REF_STALE`，重新 `owb page` 取新 ref。
-- **selector 也行**：不以 `@` 开头的定位参数按 CSS selector 处理，如
-  `owb click ".submit-btn"`。
-- **增量快照省 token**：`owb page --since-last` 只返回上次快照后的变化。
-- **等待优于轮询**：需要等元素/文本/URL/网络空闲，用 `owb wait`，别写 `eval` 轮询。
+几条要紧的：
 
-## 命令组一览
+- **编号会过期**。页面跳转或重渲染后旧编号失效（报 `REF_STALE`），重新 `owb page` 拿新的。
+- **等待用 `owb wait`**，别写循环 `eval` 轮询——`wait` 支持 `--selector` / `--text` /
+  `--url-pattern` / `--network-idle`。
+- **读长文用 `--mode article`**，比整页快照省一大截 token；连续读同一页用 `--since-last` 只拿变化。
+- 也可以用 CSS 选择器：不以 `@` 开头就按选择器处理，如 `owb click ".submit"`。
 
-`owb help` 看全部，`owb help <组>` 看组内详情。常用：
+## 常见任务怎么做
 
-| 组 | 用途 | 高频命令 |
+### 读需要登录才能看的内容
+
+用户的登录态就在浏览器里，直接开就行。
+
+```bash
+owb open https://www.zhihu.com/question/12345
+owb page --mode article          # 正文 → markdown
+```
+
+多页收集时，先 `owb page` 找到下一页的编号，点进去再读，循环。
+
+### 把散落在几个页面的信息汇总
+
+```bash
+owb open <页面1> && owb page --mode article
+owb open <页面2> && owb page --mode article
+```
+
+读完在你这边合并成用户要的形式（表格、摘要、对比）。不用把中间结果写进文件，
+除非用户要留档。
+
+### 帮用户填表 / 走流程
+
+```bash
+owb page                          # 先看清表单有哪些字段
+owb fill @e2 "张三"
+owb fill @e3 "13800138000"
+owb page                          # 提交前再看一眼，确认填对了
+```
+
+**提交前必须停下来问用户**——见下面「边界」。
+
+### 调试用户自己的网站
+
+前端排查时，你能看到浏览器里真实发生了什么：
+
+```bash
+owb net start                     # 开始记录网络
+owb open http://localhost:3000
+owb click @e4                     # 触发那个出问题的操作
+owb net list                      # 看请求都发了什么、返回什么
+owb net detail --id <请求id>      # 单条请求的完整头和 body
+owb debug console                 # 页面 console 输出（报错在这）
+```
+
+慢的问题看 `owb net list` 的耗时；想留证据给同事看，用
+`owb har start` / `owb har stop` / `owb har save` 存成标准 HAR 文件。
+
+### 测移动端 / 弱网 / 其他地区
+
+```bash
+owb env set --width 390 --height 844 --mobile true --touch true   # 手机视口
+owb env set --args '{"network":{"latency":300,"download":400000,"upload":400000}}'  # 弱网
+owb env set --args '{"geolocation":{"latitude":31.23,"longitude":121.47}}'          # 定位
+owb env reset                                                      # 用完务必恢复
+```
+
+视口用扁平参数就行；`network`/`geolocation` 是对象，走 `--args`。改完记得
+`owb env reset`，否则用户的浏览器会一直停在模拟状态。
+
+### 撞到验证码、要扫码登录
+
+不要试图绕过。把控制权交回用户：
+
+```bash
+owb handoff                       # 把标签页交还用户，并告诉他要做什么
+owb wait-user                     # 等他弄完，你自动接管继续
+```
+
+然后**明确告诉用户你需要他做什么**（"请在浏览器里完成扫码，好了我继续"）。
+
+### 保存登录态备用
+
+```bash
+owb state save 某站                # cookie + localStorage + IndexedDB
+owb state load 某站                # 换机器/换 profile 后恢复
+```
+
+### 把跑通的流程固化下来
+
+同样的流程要重复跑（每周导报表之类）：
+
+```bash
+owb flow save 周报                 # 把刚才这串操作存成工作流
+owb flow run 周报                  # 以后一条命令重放
+```
+
+## 命令速查
+
+`owb help` 看全部，`owb help <组>` 看某组详情。
+
+| 组 | 干什么 | 常用 |
 |---|---|---|
-| 基础 | 导航/快照/操作 | `open` `page` `click` `fill` `keys` `wait` `eval` `shot` `scroll` |
+| 基础 | 导航、看页面、操作 | `open` `page` `click` `fill` `keys` `wait` `eval` `shot` |
 | tab | 多标签 | `tab list` `tab find` `tab close` |
-| net | 网络抓包 | `net start` `net list` `net detail` `net initiator` |
-| har | 会话录制 | `har start` `har stop` `har save` `har to-replay` |
-| hook | 页面注入 | `hook preset xhr` `hook fn` `hook logs` |
-| debug | 断点调试 | `debug break-xhr` `debug frames` `debug resume` |
-| state | 登录态 | `state save zhihu` `state load zhihu` |
-| env | 环境模拟 | `env set` `env reset` `env compare` |
-| human | 人机交接 | `handoff` `wait-user` |
+| net | 网络请求 | `net start` `net list` `net detail` |
+| har | 录成 HAR 存档 | `har start` `har stop` `har save` |
+| state | 登录态存取 | `state save` `state load` |
+| env | 设备/网络/地区模拟 | `env set` `env reset` |
+| flow | 工作流固化 | `flow save` `flow run` |
+| human | 交回人类 | `handoff` `wait-user` |
+| debug | 页面调试 | `debug console` `debug break-xhr` `hook preset` |
 
-## 参数约定
+## 参数写法
 
-- `--foo-bar v` → 工具参数 `foo_bar`；值能 JSON 解析就解析（`--new-tab true`、
-  `--timeout-ms 5000`），否则当字符串。
-- `--tab <id>` 指定目标 tab（缺省用当前活动 tab）。
-- `--timeout <秒>` 放宽单次调用超时（截图/慢站导航）。
-- `--args '<json>'` 整体传参，用于命令别名没覆盖的冷门参数。
-- 逃生口：`owb call <ctl工具名> --args '<json>'` 直调任意底层工具；
-  `owb cdp` 直发 CDP 命令。
+- `--foo-bar 值` → 工具参数 `foo_bar`；能当 JSON 解析就解析（`--new-tab true`），否则当字符串
+- `--tab <id>` 指定标签页（不给就用当前活动的）
+- `--timeout <秒>` 放宽超时（截图、慢站导航可能要）
+- `--args '<json>'` 传别名没覆盖到的冷门参数
+- 逃生口：`owb call <底层工具名> --args '<json>'`
 
-## 输出与错误处理
+## 出错了怎么办
 
-- 成功：工具的 data 以 JSON 打到 stdout（`--compact` 单行）。
-- 失败：stderr 一行 `error CODE: message`，退出码 1；用法错误退出码 2。
-- 错误信息是为你写的、可操作的。常见：
-  - `NO_EXTENSION` → 扩展没连，先 doctor。
-  - `REF_STALE` → 重新 `owb page`。
-  - `AMBIGUOUS_TAB` → 多个 tab 匹配，用 `--tab <id>` 指定。
-  - `PAUSED` → 页面停在断点上，先 `owb debug resume`。
+失败时 stderr 会有一行 `error CODE: message`，退出码非 0。常见的：
 
-## 典型任务范式
-
-**抓某站的签名接口**：
-```bash
-node owb-daemon/src/cli.js net start
-node owb-daemon/src/cli.js open <目标页> && node owb-daemon/src/cli.js click @eN   # 触发请求
-node owb-daemon/src/cli.js net list --url-pattern "api/sign"
-node owb-daemon/src/cli.js net detail --id <请求id>
-node owb-daemon/src/cli.js net initiator --id <请求id>                        # 定位发起调用栈
-```
-
-**保存并复用登录态**（用户已在浏览器里登录）：
-```bash
-node owb-daemon/src/cli.js state save zhihu       # cookie + localStorage + IndexedDB
-node owb-daemon/src/cli.js state load zhihu        # 换机/换 profile 后恢复
-```
-
-**撞验证码/需扫码时交回人类**：
-```bash
-node owb-daemon/src/cli.js handoff                 # tab 交还用户
-node owb-daemon/src/cli.js wait-user               # 用户操作完，你自动接管继续
-```
+| 错误 | 意思 | 怎么办 |
+|---|---|---|
+| `NO_EXTENSION` | 扩展没连上 | 告诉用户点扩展图标检查，别重试 |
+| `REF_STALE` | 元素编号过期 | 重新 `owb page` |
+| `AMBIGUOUS_TAB` | 多个标签页都匹配 | 用 `owb tab list` 找到 id，加 `--tab <id>` |
+| `PAUSED` | 页面停在断点上 | `owb debug resume` |
+| `TIMEOUT` | 超时 | 页面可能还在加载，先 `owb wait`，或加 `--timeout` |
 
 ## 边界
 
-- 只驱动用户已授权加载扩展的本机浏览器；不做隐蔽操作、不碰用户没要求的敏感页面。
-- 发消息/发帖/提交表单/下单等不可逆动作，先向用户确认再执行。
+这些操作作用在真人的账号上，很多不可撤销。
+
+**做之前必须先问用户**：
+- 发送任何东西——发消息、发帖、评论、发邮件
+- 提交表单、下单、支付、确认
+- 删除任何内容
+- 修改账号设置、授权第三方
+
+**永远不做**：
+- 输入密码、验证码、支付信息——撞到就 `owb handoff` 交给用户
+- 绕过人机验证
+- 打开与任务无关的页面，尤其是用户的私信、邮箱、账单
+
+读取和浏览可以直接做。**改变状态的操作，先说清楚你要做什么，等用户点头。**

@@ -25,6 +25,7 @@
  */
 import WebSocket from "ws";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -330,6 +331,93 @@ function applyPositionals(spec, positionals, args) {
 class UsageError extends Error {}
 
 // ---------------------------------------------------------------------------
+// setup / skill：安装引导（把「照 README 手动做」变成可执行命令，AI 也能照做）
+// ---------------------------------------------------------------------------
+
+// 包根：cli.js 在 <root>/owb-daemon/src/ 下
+const PKG_ROOT = path.resolve(__dirname, "..", "..");
+const EXT_DIR = path.join(PKG_ROOT, "owb-extension");
+const SKILL_SRC = path.join(PKG_ROOT, "owb-skills", "owb");
+
+// Chrome 应用商店地址：上架后填这里，setup 就会把商店作为首选路径
+// （一键安装 + 自动更新，无需开发者模式）。留空则只引导本地加载。
+const STORE_URL = "";
+
+function skillTargets() {
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  return {
+    global: home ? path.join(home, ".claude", "skills", "owb") : null,
+    project: path.join(process.cwd(), ".claude", "skills", "owb"),
+  };
+}
+
+// 装 skill 到 ~/.claude/skills/owb（--project 装到当前项目）
+function installSkill(toProject) {
+  if (!fs.existsSync(SKILL_SRC)) {
+    process.stderr.write(`error SKILL_MISSING: 包内找不到 skill（${SKILL_SRC}）\n`);
+    process.exitCode = 1;
+    return null;
+  }
+  const t = skillTargets();
+  const dest = toProject ? t.project : t.global;
+  if (!dest) {
+    process.stderr.write("error NO_HOME: 无法定位 home 目录，请用 --project\n");
+    process.exitCode = 1;
+    return null;
+  }
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.cpSync(SKILL_SRC, dest, { recursive: true });
+  return dest;
+}
+
+function cmdSkill(sub, toProject) {
+  if (sub === "path") {
+    process.stdout.write(SKILL_SRC + "\n");
+    return;
+  }
+  if (sub && sub !== "install") {
+    throw new UsageError(`owb skill: 未知子命令 ${sub}（可用：install / path）`);
+  }
+  const dest = installSkill(toProject);
+  if (dest) process.stdout.write(`✓ skill 已装到 ${dest}\n  重开 agent 会话即可生效。\n`);
+}
+
+// 安装引导：打印扩展路径 + 装 skill + 自检。人工步骤只有「Chrome 加载扩展」一步。
+async function cmdSetup(ctl, autostart) {
+  const out = process.stdout;
+  out.write("Open Web Bridge 安装引导\n\n");
+
+  // 1. 扩展：必须装进用户自己的浏览器 profile（登录态就在那儿），无法命令行代劳
+  const extOk = fs.existsSync(path.join(EXT_DIR, "manifest.json"));
+  out.write("① 装浏览器扩展（唯一需要你手动做的一步）\n");
+  if (STORE_URL) {
+    out.write(`   推荐 · 应用商店一键装（自动更新）：${STORE_URL}\n`);
+    if (extOk) out.write(`   或用随包的开发版：chrome://extensions → 开发者模式 → 加载已解压 → ${EXT_DIR}\n`);
+  } else if (extOk) {
+    out.write(`   扩展目录：${EXT_DIR}\n`);
+    out.write("   在浏览器里：chrome://extensions → 打开右上角「开发者模式」\n");
+    out.write("   → 点「加载已解压的扩展程序」→ 选上面那个目录\n");
+  } else {
+    out.write(`   ✗ 找不到扩展目录（${EXT_DIR}）——安装可能不完整\n`);
+  }
+
+  // 2. skill：可选但推荐
+  out.write("\n② 装 skill（让 AI agent 知道怎么用，可选）\n");
+  const t = skillTargets();
+  const already = t.global && fs.existsSync(path.join(t.global, "SKILL.md"));
+  if (already) {
+    out.write(`   ✓ 已装：${t.global}\n`);
+  } else {
+    out.write("   运行：owb skill install          （装到 ~/.claude/skills/）\n");
+    out.write("   或：  owb skill install --project（只装到当前项目）\n");
+  }
+
+  // 3. 连通性自检
+  out.write("\n③ 自检\n");
+  await doctor(ctl, autostart);
+}
+
+// ---------------------------------------------------------------------------
 // help / doctor
 // ---------------------------------------------------------------------------
 
@@ -341,9 +429,11 @@ function printHelp(groupName) {
       out.push(`  owb ${name.padEnd(22)} ${spec.desc}`);
     }
   } else {
-    out.push("owb — 让 AI agent 驱动你的真实浏览器（详细流程见 skill：owb-skills/owb/SKILL.md）");
+    out.push("owb — 让 AI agent 驱动你的真实浏览器");
     out.push("");
+    out.push("  owb setup              安装引导（装完先跑这个）");
     out.push("  owb                    自检：daemon/扩展连接状态");
+    out.push("  owb skill install      把 skill 装进 ~/.claude/skills/（--project 装到当前项目）");
     out.push("  owb help <组>          组内命令详情");
     out.push("  owb call <工具> --args '<json>'   直调任意 ctl 工具");
     out.push("");
@@ -395,11 +485,25 @@ async function main() {
     printHelp(positionals[1]);
     return;
   }
+  // skill 安装是纯本地文件操作，不连 ctl
+  if (positionals[0] === "skill") {
+    try {
+      cmdSkill(positionals[1], args.project === true);
+    } catch (e) {
+      process.stderr.write(`用法错误：${e.message}\n`);
+      process.exitCode = 2;
+    }
+    return;
+  }
 
   const ctl = new CtlClient();
   try {
     if (positionals.length === 0) {
       await doctor(ctl, cli.autostart);
+      return;
+    }
+    if (positionals[0] === "setup") {
+      await cmdSetup(ctl, cli.autostart);
       return;
     }
 

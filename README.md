@@ -22,58 +22,64 @@
 - **站点会话库**：`daemon_state_save/load zhihu` 一键保存/恢复登录态（cookie + localStorage + IndexedDB）
 - **页面调试与分析**（按需）：hook 预设（xhr/fetch/crypto）、断点与调用帧读取、脚本改写、函数离线验证、TLS 指纹重放
 
-## 快速开始
+## 安装
 
 前提：**Node.js ≥ 18** + 一个 Chromium 系浏览器（Chrome/Edge）。
 
-```bash
-git clone <仓库地址>          # 或下载 zip 解压
-cd open-web-bridge/owb-daemon
-npm install
-```
+### 让 AI 帮你装
 
-装扩展（一次性）：
+把下面这段话整段发给你的 AI agent（Claude Code / Kimi Code / Codex 等），它会带你走完：
 
-1. 浏览器打开 `chrome://extensions`
-2. 右上角打开「开发者模式」
-3. 「加载已解压的扩展程序」→ 选择本仓库的 `owb-extension/` 目录
-4. 扩展默认连本地 daemon（`ws://127.0.0.1:43917/ws`），无需配对；点工具栏图标
-   可看实时连接状态，改地址在弹窗「本地」页填写后保存。
+> 帮我安装 open-web-bridge，步骤如下，每步做完告诉我结果：
+>
+> 1. 运行 `npm i -g open-web-bridge`
+> 2. 运行 `owb setup`，把输出里「装浏览器扩展」那一步的具体做法念给我，等我装完再继续
+> 3. 运行 `owb`，确认输出里 daemon 和扩展都是 ✓；如果扩展未连接，让我点浏览器工具栏的扩展图标看状态
+> 4. 运行 `owb skill install` 装上技能，然后告诉我重开一个会话
+>
+> 装好后你就能用 `owb` 命令驱动我的浏览器了，`owb help` 看全部命令。
 
-接入 AI 工具——不需要任何客户端配置。agent 直接用 shell 调 `owb` CLI 即可
-（daemon 未运行时 CLI 会**自动拉起**，无需先手动 `npm start`）：
+### 手动装
 
 ```bash
-node owb-daemon/src/cli.js                       # 自检：daemon/扩展连接状态
-node owb-daemon/src/cli.js open https://www.zhihu.com
-node owb-daemon/src/cli.js page                  # 语义快照，得到 @eN ref
-node owb-daemon/src/cli.js click @e5             # 引用 ref 操作
-node owb-daemon/src/cli.js help                  # 12 个命令组，79 个工具
+npm i -g open-web-bridge     # CLI + 扩展文件 + skill，一条命令装齐
+owb setup                     # 引导：扩展安装路径、装 skill、连通性自检
 ```
 
-`npm link`（或全局装）后可直接 `owb <命令>`。
+`owb setup` 会告诉你扩展怎么装。**这是唯一需要你手动做的一步**——扩展必须装进你
+平时用的那个浏览器（登录态在那儿，这正是本项目的意义），命令行代劳不了。
 
-装 skill（可选，推荐）——让 agent 一上手就知道怎么用，不靠猜：
+装完跑一次 `owb` 自检，两个 ✓ 就绪。然后 `owb skill install` 把 skill 装进
+`~/.claude/skills/`（加 `--project` 则只装到当前项目）。其他 agent 直接把
+`owb-skills/owb/SKILL.md` 内容并进你的规则/系统提示即可，纯 markdown 无专有格式。
+
+### 试一下
+
+对 agent 说一句「打开知乎搜一下 XXX，把前三条整理给我」，就能看到它干活。或者你自己敲：
 
 ```bash
-cp -r owb-skills/owb ~/.claude/skills/          # Claude Code：全局装
-cp -r owb-skills/owb <你的项目>/.claude/skills/  # 或只在某个项目里装
+owb open https://example.com
+owb page                 # 语义快照：可交互元素带 @eN 编号
+owb click @e1            # 直接引用编号操作
+owb help                 # 全部命令
 ```
 
-其他 agent 把 `owb-skills/owb/SKILL.md` 内容并入你的规则/系统提示即可（纯 markdown，
-无专有格式）。装好后对 agent 说一句「打开知乎搜一下 XXX」就能看到它干活。
+> 从源码跑（开发/尝鲜）：`git clone` 后在仓库根 `npm install`，用
+> `node owb-daemon/src/cli.js <命令>` 代替 `owb`，或 `npm link` 后照常用 `owb`。
 
 ## 目录结构
 
 ```
-open-web-bridge/
-├── owb-daemon/     Node 包：owb CLI（agent 接入面）+ 本地 daemon + 测试
-├── owb-extension/  MV3 Chrome 扩展（浏览器加载这个目录）
-├── owb-relay/      可选：Cloudflare Workers 公网中转（远程控制用）
-└── owb-skills/owb/ 交付物：给 AI agent 装的 skill
+open-web-bridge/          ← npm 包根（package.json 在这里）
+├── owb-daemon/src/       owb CLI（agent 接入面）+ 本地 daemon
+├── owb-daemon/tests/     测试（不进 npm 包）
+├── owb-extension/        MV3 Chrome 扩展
+├── owb-relay/            可选：Cloudflare Workers 公网中转（独立部署，不进 npm 包）
+└── owb-skills/owb/       给 AI agent 装的 skill
 ```
 
-运行时产物（分析归档、登录态、HAR）落在 `work/`，已 gitignore。
+`npm i -g open-web-bridge` 会把 CLI、扩展文件、skill 一起装到本机——`owb setup`
+打印的扩展路径就指向包里那份。运行时产物（分析归档、登录态、HAR）落在 `work/`，已 gitignore。
 
 ## 中转模式（远程控制，可选）
 
@@ -99,7 +105,7 @@ npx wrangler deploy         # 输出 https://owb-relay2.<你的子域>.workers.d
 ```bash
 export OWB_RELAY_URL="wss://owb-relay2.xxx.workers.dev"
 export OWB_RELAY_TOKEN="<与扩展端相同的 Token>"
-node src/server.js            # 日志会标注「中转模式」
+owb-daemon                    # 日志会标注「中转模式」
 ```
 
 两者配对后，`owb daemon-status` 的 `mode` 字段为 `relay`，远程 agent 即可像本地一样驱动浏览器。CLI 接入面不变（仍连本地 `/ctl`）。
