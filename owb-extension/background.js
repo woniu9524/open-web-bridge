@@ -3834,6 +3834,24 @@ const tools = {
   async oracle_call(args) {
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
+    // BUG-88: 参数名写错时静默无参调用，返回 {ok:true, value:null}——
+    // AI 会以为自己给的样本跑过了。实测把 call_args 误写成 samples 即复现：
+    // __t(1,2) 应得 102，实际是 __t() → NaN → JSON 序列化成 null。
+    // 这是最危险的失败形态：看起来成功，结果全错。收到不认识的参数直接报错。
+    const KNOWN = new Set([
+      "tabId", "function_path", "object_id", "call_args", "freeze",
+      "timeout", "timeout_ms",
+    ]);
+    const unknown = Object.keys(args).filter((k) => !KNOWN.has(k));
+    if (unknown.length) {
+      throw new ToolError(
+        "BAD_ARGS",
+        `oracle_call: unknown parameter(s) ${unknown.join(", ")} — ` +
+          "call arguments go in call_args (an array), e.g. " +
+          '{"function_path":"app.sign","call_args":[1,2]}',
+        false,
+      );
+    }
     const freeze = args.freeze !== false;
     const callArgs = args.call_args || [];
     if (args.object_id) {

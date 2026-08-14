@@ -404,3 +404,19 @@ navigate 照报 `loadCompleted:true`，AI 直到下一步 `read_page` 才撞墙�
 
 **修复**：把「主线程饱和（重 JS / 仍在加载）→ 先 `wait_for {network_idle}` 再重试」
 列为首要成因。
+
+### BUG-88 · oracle_call 参数名写错时静默无参调用 🔴 高影响（静默失败）
+
+**现象**：把 `call_args` 误写成 `samples` 后，`oracle_call` 返回
+`{"ok":true, "value":null}`——**看起来成功了**。实际是无参调用：
+`__t(1,2)` 本应得 102，实际执行的是 `__t()` → `NaN` → JSON 序列化成 `null`。
+
+**危险性**：这是最坏的失败形态——AI 拿到 `ok:true` 会认为自己给的样本已经跑过，
+据此得出的任何结论都是错的，且没有任何迹象提示出了问题。
+
+**修复**：oracle_call 校验参数名白名单，遇到不认识的参数直接
+`BAD_ARGS` 并指明「调用实参放在 `call_args` 数组里」。
+
+**这类问题的通用形态**：宽松透传参数的工具，参数名写错时会静默走默认路径。
+本项目其他工具多数有必填校验（缺 url/expression/name 会报错），oracle_call
+的所有参数都是可选的，才暴露出来。
