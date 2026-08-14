@@ -752,3 +752,36 @@ API 实现。
 
 **验证**：`https://example.com/` 修复前 `dir` 字段指向不存在路径；修复后
 文件确实出现在 `work/downloads/`，`dir`/`path` 字段可以直接拿去读文件。
+
+### BUG-100 · `scroll`/`scrollIntoView` 在 smooth 滚动的站点上可能永久卡住 🔴 高影响
+
+**现象**：MDN 页面（`scroll-behavior: smooth`）上 `owb scroll --args
+'{"to":"bottom"}'` 报 `{y:0, atBottom:false}`——页面明明有 19027px 可滚动。
+不是"读早了"这么简单：等了好几秒之后单独 `eval window.scrollY` 依然是
+`0`，说明滚动这件事根本没有发生，不是异步进度还没追上。
+
+**根因**：`scroll` 工具和 `click`/`fill`/`mouse_click` 共用的
+`scrollIntoView` 都没传 `behavior`，默认值 `"auto"` 会跟随页面 CSS 的
+`scroll-behavior`。站点设了 `smooth`（这类站点不少，本身是常见的锚点跳转
+体验优化）时，`scrollTo`/`scrollIntoView` 触发的是一次跨帧动画。这本身只是
+时序问题（同步读位置读到动画开始前的值），但叠加上这次探索反复踩到的
+同一个环境条件——**Chrome 窗口没有操作系统级焦点时，跟 rAF 挂钩的动画根本
+不推进**（BUG-93 的 rAF 挂起、play2048 棋盘不出现、YouTube 卡缓冲都是
+同一个根因）——平滑滚动动画同样会卡住，不是慢，是永远不发生。
+
+**影响面比看起来大**：`scrollIntoView` 是 `click`/`fill`/`mouse_click`/
+`upload` 共用的"先定位再操作"步骤（`elementSnippet`）。如果目标元素本来
+不在视口内、又赶上站点用了 smooth 滚动 + 窗口没有系统焦点这个组合，
+`mouse_click` 算出来的点击坐标会用元素滚动前的旧位置，**点到错误的地方**。
+本次探索里 Reddit 上一次点击"结果没反应"的诡异现象（当时归因于登录浮层
+导致的布局抖动）很可能就是这个问题的另一次发作，只是当时没有确认根因。
+
+**修复**：所有 `scrollIntoView`/`scrollTo`/`scrollBy` 调用统一显式传
+`behavior: "instant"`。跳过动画直接同步到位——不需要平滑滚动的视觉效果
+（这是自动化工具，不是给人看的），也就不受站点 CSS 或窗口焦点状态影响。
+
+**验证**：同一个 MDN 页面，修复前 `scroll --to bottom` 报 `y:0`，独立
+`eval` 数秒后仍确认 `scrollY:0`（滚动真的没发生，不是读快了）；修复后
+`{y:19027, atBottom:true}`，`eval window.scrollY` 立即验证一致，全程窗口
+仍是 `visibilityState:hidden`——不依赖窗口拿到系统焦点，从根上绕开了问题
+而不是等条件改善。

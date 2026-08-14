@@ -1837,7 +1837,15 @@ function elementSnippet(selector, body) {
   return (
     `(() => { ${DEEP_QUERY_FN}` +
     ` const el = __owbDeepQuery(${JSON.stringify(selector)});` +
-    ` if (!el) return null; el.scrollIntoView({ block: "center", inline: "center" });` +
+    // BUG-100: 不带 behavior 的 scrollIntoView 跟着页面自己的 CSS
+    // scroll-behavior 走。站点设了 scroll-behavior:smooth 时这是一次跨帧动画
+    // ——紧接着同步读 getBoundingClientRect() 拿到的是动画开始前的旧位置，
+    // click/fill/mouse_click 用这个位置算点击坐标就点歪了。更糟的是：
+    // Chrome 窗口没有系统焦点（这次探索里反复碰到的同一个环境条件）时，
+    // 这个滚动动画会卡住永远不推进——不是"读早了"，是滚动这件事根本没发生，
+    // 实测 window.scrollY 在动画本该早就播完的几秒后依然是 0。
+    // instant 绕开动画，同步立即到位，跟窗口有没有系统焦点无关。
+    ` if (!el) return null; el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });` +
     ` ${body} })()`
   );
 }
@@ -2698,15 +2706,20 @@ const tools = {
       const dy = args.y != null ? Number(args.y) : args.dy != null ? Number(args.dy) : null;
       const dx = args.x != null ? Number(args.x) : args.dx != null ? Number(args.dx) : 0;
       const to = args.to; // "top" | "bottom"
+      // BUG-100: 不带 behavior 的 scrollTo/scrollBy 跟着页面 CSS
+      // scroll-behavior 走——站点设了 smooth 时是跨帧动画，紧接着同步读
+      // scrollY 拿到的是动画开始前的旧值；Chrome 窗口没有系统焦点时这个
+      // 动画还会直接卡住不推进（不是读早了，是滚动真的没发生，实测数秒后
+      // window.scrollY 依然是 0）。instant 绕开动画同步立即到位。
       expression =
         `(() => {` +
         (to === "bottom"
-          ? ` scrollTo(0, document.documentElement.scrollHeight);`
+          ? ` scrollTo({ top: document.documentElement.scrollHeight, left: 0, behavior: "instant" });`
           : to === "top"
-            ? ` scrollTo(0, 0);`
+            ? ` scrollTo({ top: 0, left: 0, behavior: "instant" });`
             : args.absolute
-              ? ` scrollTo(${dx || 0}, ${dy == null ? 0 : dy});`
-              : ` scrollBy(${dx || 0}, ${dy == null ? 600 : dy});`) +
+              ? ` scrollTo({ left: ${dx || 0}, top: ${dy == null ? 0 : dy}, behavior: "instant" });`
+              : ` scrollBy({ left: ${dx || 0}, top: ${dy == null ? 600 : dy}, behavior: "instant" });`) +
         ` return { x: scrollX, y: scrollY,` +
         ` maxY: Math.max(document.body ? document.body.scrollHeight : 0,` +
         ` document.documentElement.scrollHeight) - innerHeight }; })()`;
