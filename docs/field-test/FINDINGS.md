@@ -894,3 +894,21 @@ network_idle`），换到目标站点后显式 `net start` 开始抓包、跑一
 httpbin.org → 显式 `net start` → 发一个请求 → `net list`）；修复前列表里
 混着 IMDb 的图片请求，修复后只有 httpbin.org 这次请求本身（一条 JSON
 fetch + 一个页面自带的 SVG 图标），干净利落。
+
+## 观察到但暂不处理：`click` 在部分自定义组件上静默无效（第二个实例）
+
+玩 NYT Connections 时复现：`click` 点选词卡（底层是 `visually-hidden` 的原生
+`<input type="checkbox">`）后，`checked` 属性确实变成了 `true`，但格子不
+高亮、"Submit" 按钮不解锁——游戏自己的选中状态压根没更新。换成 `click-mouse`
+（真实 CDP 鼠标事件）点同一个 ref，立刻正常：格子高亮、按钮解锁、最终成功
+提交。这是本次探索里第二次遇到这个模式（第一次是 Reddit 的分享卡片，当时
+没深究根因），这次用一个干净、可稳定复现的场景确认了：**某些站的自定义交互
+组件会检查 `event.isTrusted`，只认真实鼠标事件，`click()`（`isTrusted:
+false`）能改动底层 DOM 属性、但触发不了应用自己的状态更新**。
+
+**没有改代码**：`click`/`click-mouse` 都在按各自设计工作——`click` 更快
+且没有光标动画开销，多数站点够用；这个现象是目标站点自己的实现选择（很可能
+是有意的防作弊/防脚本设计，NYT Games 对此有动机），不是 OWB 的故障。已经把
+这个判别方法写进 SKILL.md："`click` 报成功但没有预期效果 → 换 `click-mouse`
+重试"，同时提醒 `checked`/`aria-*` 这类底层属性不能单独作为"选中成功"的
+证据，需要看视觉或功能性副作用确认。

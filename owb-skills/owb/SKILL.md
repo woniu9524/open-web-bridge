@@ -170,6 +170,26 @@ owb eval 'JSON.stringify([...document.querySelectorAll(".item")].slice(0,20).map
 外层容器和内层元素会各匹配一次，同一条数据出现两遍。实测抓地震列表时就这么
 重复了。用一个**足够具体**的选择器，拿到结果先看条数对不对。
 
+### `click` 报成功但页面看起来什么都没发生
+
+`click` 走的是 `element.click()`（脚本触发，`isTrusted:false`）；`click-mouse`
+走真实 CDP 鼠标事件（`isTrusted:true`）。多数网站两者效果一样，但**有些站的
+自定义交互组件会读 `event.isTrusted`，只认真实事件**——`click` 在这类元素上
+会稳定复现"DOM 属性确实变了、但应用自己的状态没反应"：NYT Connections 选词卡
+就是这样，底层是个 `visually-hidden` 的原生 `<input type="checkbox">`，
+`click()` 后 `checked` 属性真的变成了 `true`，但格子不会高亮、"Submit"
+按钮也不会解锁——只有 `click-mouse` 点同一个 ref 才会让游戏自己的状态真正
+更新。Reddit 上点"分享"卡片、外链卡片时也遇到过同样的静默无效。
+
+判断依据：`click` 报了 `clicked:true` 却没有预期的视觉/状态变化（截图确认，
+别只信返回值），换 `click-mouse` 重试。反过来，`click` 更快、没有光标动画，
+普通表单/按钮优先用它，遇到这个具体症状再升级。
+
+⚠️ **`checked`/`aria-*` 这类底层 DOM 属性不能作为"选中成功"的证据**——它们
+可能被 `click()` 正常改动，但应用自己的状态（决定按钮是否可用、格子是否
+高亮）是另一套东西，两者可能脱节。真要确认，看视觉（截图）或看功能性的
+副作用（按钮解锁了没有），别只查 DOM 属性。
+
 ### 拖拽 / 画布绘图（canvas、看板、滑块）
 
 `click` / `click-mouse` 都是"落点即抬"，模拟不了拖拽——canvas 画图、看板卡片
