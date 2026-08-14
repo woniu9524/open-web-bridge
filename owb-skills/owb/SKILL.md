@@ -383,6 +383,15 @@ CDP 层面的绕过方法——试过 `Emulation.setFocusEmulationEnabled`，能
 占满（尤其还在加载时）。先 `owb wait --network-idle true` 再重试，别去找
 根本不存在的断点。
 
+**但如果连 `owb shot`（截图）都超时，重试没有意义**。截图走的是合成器
+帧捕获，正常不需要 JS 参与，理论上主线程再忙也不该卡住它。实测在 Google
+表格上连续碰到：`open` 到别的网址不生效（还停在原页面）、`eval "1+1"`
+这种最简单的表达式也超时、`shot` 同样超时——几分钟后依然如此，不是"忙一会
+就好"。这种情况下页面大概率是真的卡死了（渲染进程层面，不是"脚本正忙"），
+`owb debug resume` 也无济于事（`NOT_PAUSED`，不是断点问题）。**别在同一个
+标签页上反复重试**——`owb tab close` 关掉这个标签页、`owb open --new-tab
+true` 重开一个，新标签页立刻恢复正常响应。
+
 **直接打开 PDF 网址，`page` 三种模式都读不出内容**。Chrome 内置 PDF 阅读器
 渲染在一个独立的沙盒视图里，DOM 和无障碍树（实测 `Accessibility.
 getFullAXTree` 也查过，同样查不到正文）都看不进去——不是选择器没写对，是
@@ -400,7 +409,7 @@ getFullAXTree` 也查过，同样查不到正文）都看不进去——不是�
 | `AMBIGUOUS_TAB` | 多个标签页都匹配 | `owb tab list` 拿 id，加 `--tab` |
 | `PAUSED` | 页面停在断点 | `owb debug resume` |
 | `FRAME_NOT_FOUND` | iframe 找不到 | `owb frames` 看清单；`contextId:null` 的是跨域框架，求值不了 |
-| `TIMEOUT` | 页面主线程忙（最常见）/ 断点 / 模态框 | 先 `owb wait --network-idle true` 再重试，或加 `--timeout <秒>` |
+| `TIMEOUT` | 页面主线程忙（最常见）/ 断点 / 模态框 | 先 `owb wait --network-idle true` 再重试，或加 `--timeout <秒>`；连 `shot` 都超时就是标签页卡死了，重试没用，`tab close` 重开 |
 | `FORBIDDEN` + 提到 interstitial | Chrome 安全拦截页 | 无解，让用户在浏览器里处理证书警告 |
 | 快照带 `renderNote` | 标签页没在渲染 | 已自动前台化重试；`renderNote` 会说清是内容问题还是**窗口没有系统焦点**（后者要让用户切整个浏览器窗口，不是切标签页，见下节） |
 
