@@ -230,15 +230,30 @@ owb wait-user                    # 等他弄完，你自动接管
 然后**明确告诉用户你需要他做什么**。他弄完后用 `owb page` 确认状态（比如页面上
 出现了头像/用户名）再继续。
 
-### 保存登录态 / 固化流程
+### 保存登录态
 
 ```bash
 owb state save 某站      # cookie + localStorage + IndexedDB
 owb state load 某站      # 换机器/换 profile 后恢复
-
-owb flow save 周报       # 把刚跑通的流程存下来
-owb flow run 周报        # 以后一条命令重放
 ```
+
+### 固化流程，以后一条命令重放
+
+⚠️ `flow save` **必须先开任务上下文**——它按时间窗抓取这段时间里的操作：
+
+```bash
+owb task begin "每周报表"      # ← 先开，否则 flow save 报 NEED_TASK
+owb open <页面> && owb click @eN && ...
+owb flow save 周报
+owb flow run 周报              # 以后一条命令重放
+```
+
+⚠️ 两个回放注意事项：
+- **录制期间别做无关操作**。时间窗内的所有调用都会被录进去，包括你顺手开的
+  别的标签页。
+- **回放需要安静的浏览器**。录制的 tabId 跨会话无意义会被剥掉，每步改用
+  「当前活动标签页」解析；此时若用户正在切标签、或另有流程在跑，就会
+  `AMBIGUOUS_TAB`。
 
 ## 参数与输出
 

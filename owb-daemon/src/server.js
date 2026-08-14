@@ -853,7 +853,14 @@ export class Bridge {
               : "") +
             "REF_STALE failures mean the workflow recorded @eN refs that no " +
             "longer exist — re-record with selectors, or re-run read_page " +
-            "before replay"
+            "before replay. " +
+            // BUG-84: 回放默认剥掉录制时的 tabId，改由「当前活动 tab」解析，
+            // 所以浏览器里同时有别的活动（用户在切标签、或另一个流程在跑）时
+            // 就会 AMBIGUOUS_TAB。实地测试中并行跑扫描即复现。
+            "AMBIGUOUS_TAB failures mean replay resolves each step to the " +
+            "active tab (recorded tabIds are dropped as meaningless across " +
+            "sessions) — replay needs a quiet browser, or pass keep_tab_ids:true " +
+            "if the original tabs are still open"
           : undefined,
       } };
     }
