@@ -339,15 +339,23 @@ base64 灌进你的上下文。任何工具返回超过 60KB 会被截断并附 
 **空快照要看 `renderNote`**。标签页没在渲染时元素全无布局盒，工具会自动前台化
 重试并说明；如果仍空，让用户切到那个标签页。
 
-**Chrome 窗口不是系统前台窗口时，视频会卡在缓冲**。实测在 YouTube 上复现：
-窗口被其他窗口挡住（不是标签页不是激活页，是**整个 Chrome 窗口**没有操作系统
-级焦点）时，`<video>` 元素稳定卡在 `readyState:0`（HAVE_NOTHING）、
-`currentTime` 不走，画面显示加载圈转个不停——`Page.bringToFront` 救不了，
-它只能把标签页在自己窗口内切到激活位，管不到窗口本身有没有系统焦点。这是
-Chrome 为省资源对隐藏窗口做的媒体缓冲节流，不是 OWB 的故障，目前也没有 CDP
-层面的绕过方法。看到视频类任务卡住不动，先 `owb eval
-'document.visibilityState'` 查一下，是 `"hidden"` 就提醒用户把浏览器窗口切到
-前台，而不是反复重试或断定工具坏了。
+**Chrome 窗口不是系统前台窗口时，一整类靠 rAF/可见性驱动的页面行为会卡住**。
+不是"标签页不是激活页"这种 tab 内部状态，是**整个 Chrome 窗口**没有操作系统
+级焦点（被别的窗口挡住）——`Page.bringToFront` 救不了这个，它只能把标签页
+在自己窗口内切到激活位，管不到窗口本身有没有系统焦点。实测踩过三种表现：
+
+- YouTube：`<video>` 卡在 `readyState:0`（HAVE_NOTHING），画面转圈不进度
+- Ctrip：请求被拦截返回极简响应，页面渲染异常（间接受影响，非直接因果）
+- play2048.co：棋盘上的方块（`requestAnimationFrame` 驱动 + worker 渲染）
+  一个都不生成，按方向键完全没反应，`document.querySelectorAll(".tile")`
+  持续为 0
+
+共同根因：Chrome 对隐藏窗口里的页面做资源节流（`requestAnimationFrame`
+不触发、媒体缓冲暂停），这是浏览器的省电设计，不是 OWB 的故障，也没有
+CDP 层面的绕过方法。**凡是页面看起来"该动的没动"——动画卡住、视频不转、
+游戏没反应、按键点击了却没有任何视觉变化**，先 `owb eval
+'document.visibilityState'` 查一下，是 `"hidden"` 就提醒用户把浏览器窗口
+切到前台，而不是反复重试或断定工具坏了。
 
 **慢站真的慢**。219 站实测导航耗时 p50 4.7 秒、p90 15 秒、p99 30 秒。
 超过 30 秒基本是站点问题不是工具问题，用 `--timeout` 放宽或换 `domcontentloaded`。
