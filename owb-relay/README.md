@@ -21,7 +21,7 @@ Open Web Bridge 的中转 broker，跑在 **Cloudflare Workers + Durable Objects
 前提：一个 Cloudflare 账号（免费即可）。装 wrangler：
 
 ```bash
-cd relay
+cd owb-relay
 npm install
 npx wrangler login          # 浏览器授权一次
 npx wrangler deploy         # 部署，输出 https://owb-relay2.<你的子域>.workers.dev

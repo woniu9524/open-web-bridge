@@ -4,7 +4,7 @@
  *
  * 设计：
  *   - 任何能跑 shell 的 agent（Claude Code / Kimi Code / Codex …）直接调用，
- *     零客户端配置；配套 skill 见仓库 skills/owb/SKILL.md。
+ *     零客户端配置；配套 skill 见仓库 owb-skills/owb/SKILL.md。
  *   - 79 个桥工具收敛为「高频顶层动词 + 12 个命令组」，`owb help` 渐进披露。
  *   - daemon 未启动时自动拉起（--no-autostart 关闭），用户从「装完就能用」开始。
  *
@@ -261,7 +261,7 @@ async function callWithAutostart(ctl, name, args, timeout, autostart) {
     const refused = /ECONNREFUSED|ctl disconnected/.test(String(e && e.message));
     if (!refused || !autostart) throw e;
     if (!(await autostartDaemon())) {
-      throw new Error(`daemon 拉起失败：手动运行 node ${path.join("daemon", "src", "server.js")} 看报错`);
+      throw new Error(`daemon 拉起失败：手动运行 node ${path.join("owb-daemon", "src", "server.js")} 看报错`);
     }
     return ctl.call(name, args, timeout);
   }
@@ -341,7 +341,7 @@ function printHelp(groupName) {
       out.push(`  owb ${name.padEnd(22)} ${spec.desc}`);
     }
   } else {
-    out.push("owb — 让 AI agent 驱动你的真实浏览器（详细流程见 skill：skills/owb/SKILL.md）");
+    out.push("owb — 让 AI agent 驱动你的真实浏览器（详细流程见 skill：owb-skills/owb/SKILL.md）");
     out.push("");
     out.push("  owb                    自检：daemon/扩展连接状态");
     out.push("  owb help <组>          组内命令详情");
@@ -377,7 +377,7 @@ async function doctor(ctl, autostart) {
     const msg = extRes && extRes.error ? extRes.error.message : "未连接";
     process.stdout.write(`✗ 扩展未连接（${msg}）\n`);
     process.stdout.write(
-      "  检查：浏览器已加载 extension/ 目录（chrome://extensions 开发者模式）？\n" +
+      "  检查：浏览器已加载 owb-extension/ 目录（chrome://extensions 开发者模式）？\n" +
       "  点扩展工具栏图标看连接状态，必要时「重新连接」。\n",
     );
   }

@@ -7,7 +7,7 @@
  *  - har_assert 支持 path 入参 + 各断言类型
  *  - har_save 无扩展时优雅失败（NO_EXTENSION / NO_HAR）
  *
- * 运行：cd daemon && node tests/har_daemon_test.js
+ * 运行：cd owb-daemon && node tests/har_daemon_test.js
  */
 import fs from "node:fs";
 import os from "node:os";

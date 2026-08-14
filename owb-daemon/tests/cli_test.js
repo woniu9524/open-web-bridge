@@ -10,7 +10,7 @@
  *   6. help 渐进披露
  *
  * 端口隔离：freePort + OWB_PORT/OWB_WORK_DIR，跑完杀 daemon。
- * 运行：cd daemon && node tests/cli_test.js
+ * 运行：cd owb-daemon && node tests/cli_test.js
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";

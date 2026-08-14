@@ -4,7 +4,7 @@
  *   glob 匹配语义、prepend 顺序、proxy_probe 探针实际行为（每 key 只报一次、
  *   getter 不炸、幂等）、补丁后脚本仍可执行。
  *
- * 运行：node daemon/tests/script_patch_test.js
+ * 运行：node owb-daemon/tests/script_patch_test.js
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8")
+  path.join(__dirname, "..", "..", "owb-extension", "background.js"), "utf8")
   .replace(/\r\n/g, "\n");
 
 function extractFn(name) {

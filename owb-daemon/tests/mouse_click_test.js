@@ -6,7 +6,7 @@
  *   单例幂等（二次 ensure 不重建 DOM）、moveTo 贝塞尔动画中途渐进且
  *   按时到达目标、clickFx 涟漪元素产生与超时清理。
  *
- * 运行：node daemon/tests/mouse_click_test.js
+ * 运行：node owb-daemon/tests/mouse_click_test.js
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8")
+  path.join(__dirname, "..", "..", "owb-extension", "background.js"), "utf8")
   .replace(/\r\n/g, "\n");
 const m = bg.match(/const CURSOR_OVERLAY_EXPR = `([\s\S]*?)`;\n/);
 if (!m) {

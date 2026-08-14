@@ -11,21 +11,21 @@ Bash 调用即可，无需任何客户端配置。
 
 ## 前提
 
-`owb` 是 open-web-bridge 仓库 `daemon/` 下的 bin（源码 `daemon/src/cli.js`）。
+`owb` 是 open-web-bridge 仓库 `owb-daemon/` 下的 bin（源码 `owb-daemon/src/cli.js`）。
 用户已 `npm install` 后，用以下任一方式调用：
 
-- `node <仓库>/daemon/src/cli.js <命令>`（始终可用）
+- `node <仓库>/owb-daemon/src/cli.js <命令>`（始终可用）
 - `owb <命令>`（若已 `npm link` 或全局装）
 
 daemon 未运行时 **CLI 会自动拉起**，无需手动 `npm start`。浏览器扩展需用户在
-`chrome://extensions` 以开发者模式加载 `extension/` 目录（一次性）。
+`chrome://extensions` 以开发者模式加载 `owb-extension/` 目录（一次性）。
 
 ## 第一步永远是 doctor
 
 任何浏览器任务开始前，先跑无参 `owb` 自检：
 
 ```bash
-node daemon/src/cli.js
+node owb-daemon/src/cli.js
 ```
 
 - `✓ daemon` + `✓ 扩展已连接` → 可以干活
@@ -38,12 +38,12 @@ owb 的定位模型是**语义快照**：`owb page` 给页面可交互元素打�
 后续 `click`/`fill` 直接引用 ref，不用猜 CSS selector。
 
 ```bash
-node daemon/src/cli.js open https://www.zhihu.com          # 打开页面
-node daemon/src/cli.js page                                # 快照，得到 @e1 @e2 …
-node daemon/src/cli.js fill @e3 "开源浏览器自动化"          # 填搜索框（@ 开头 = ref）
-node daemon/src/cli.js click @e5                           # 点搜索按钮
-node daemon/src/cli.js wait --url-pattern "search"         # 等结果页
-node daemon/src/cli.js page --mode article                # 正文提取为 markdown
+node owb-daemon/src/cli.js open https://www.zhihu.com          # 打开页面
+node owb-daemon/src/cli.js page                                # 快照，得到 @e1 @e2 …
+node owb-daemon/src/cli.js fill @e3 "开源浏览器自动化"          # 填搜索框（@ 开头 = ref）
+node owb-daemon/src/cli.js click @e5                           # 点搜索按钮
+node owb-daemon/src/cli.js wait --url-pattern "search"         # 等结果页
+node owb-daemon/src/cli.js page --mode article                # 正文提取为 markdown
 ```
 
 要点：
@@ -93,23 +93,23 @@ node daemon/src/cli.js page --mode article                # 正文提取为 mark
 
 **抓某站的签名接口**：
 ```bash
-node daemon/src/cli.js net start
-node daemon/src/cli.js open <目标页> && node daemon/src/cli.js click @eN   # 触发请求
-node daemon/src/cli.js net list --url-pattern "api/sign"
-node daemon/src/cli.js net detail --id <请求id>
-node daemon/src/cli.js net initiator --id <请求id>                        # 定位发起调用栈
+node owb-daemon/src/cli.js net start
+node owb-daemon/src/cli.js open <目标页> && node owb-daemon/src/cli.js click @eN   # 触发请求
+node owb-daemon/src/cli.js net list --url-pattern "api/sign"
+node owb-daemon/src/cli.js net detail --id <请求id>
+node owb-daemon/src/cli.js net initiator --id <请求id>                        # 定位发起调用栈
 ```
 
 **保存并复用登录态**（用户已在浏览器里登录）：
 ```bash
-node daemon/src/cli.js state save zhihu       # cookie + localStorage + IndexedDB
-node daemon/src/cli.js state load zhihu        # 换机/换 profile 后恢复
+node owb-daemon/src/cli.js state save zhihu       # cookie + localStorage + IndexedDB
+node owb-daemon/src/cli.js state load zhihu        # 换机/换 profile 后恢复
 ```
 
 **撞验证码/需扫码时交回人类**：
 ```bash
-node daemon/src/cli.js handoff                 # tab 交还用户
-node daemon/src/cli.js wait-user               # 用户操作完，你自动接管继续
+node owb-daemon/src/cli.js handoff                 # tab 交还用户
+node owb-daemon/src/cli.js wait-user               # 用户操作完，你自动接管继续
 ```
 
 ## 边界

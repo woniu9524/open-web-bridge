@@ -5,7 +5,7 @@
  *   导出结构（keyPath 元数据、records k/v）、恢复（外线键 vs keyPath 两种 put 路径）、
  *   ls/ss 清空重建、缺失 store 容错。
  *
- * 运行：node daemon/tests/state_test.js
+ * 运行：node owb-daemon/tests/state_test.js
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8")
+  path.join(__dirname, "..", "..", "owb-extension", "background.js"), "utf8")
   .replace(/\r\n/g, "\n");
 const exportMatch = bg.match(/const STATE_EXPORT_EXPR = `([\s\S]*?)`;\n/);
 const importMatch = bg.match(/const STATE_IMPORT_EXPR = `([\s\S]*?)`;\n/);

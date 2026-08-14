@@ -28,7 +28,7 @@
 
 ```bash
 git clone <仓库地址>          # 或下载 zip 解压
-cd open-web-bridge/daemon
+cd open-web-bridge/owb-daemon
 npm install
 ```
 
@@ -36,7 +36,7 @@ npm install
 
 1. 浏览器打开 `chrome://extensions`
 2. 右上角打开「开发者模式」
-3. 「加载已解压的扩展程序」→ 选择本仓库的 `extension/` 目录
+3. 「加载已解压的扩展程序」→ 选择本仓库的 `owb-extension/` 目录
 4. 扩展默认连本地 daemon（`ws://127.0.0.1:43917/ws`），无需配对；点工具栏图标
    可看实时连接状态，改地址在弹窗「本地」页填写后保存。
 
@@ -44,11 +44,11 @@ npm install
 （daemon 未运行时 CLI 会**自动拉起**，无需先手动 `npm start`）：
 
 ```bash
-node daemon/src/cli.js                       # 自检：daemon/扩展连接状态
-node daemon/src/cli.js open https://www.zhihu.com
-node daemon/src/cli.js page                  # 语义快照，得到 @eN ref
-node daemon/src/cli.js click @e5             # 引用 ref 操作
-node daemon/src/cli.js help                  # 12 个命令组，79 个工具
+node owb-daemon/src/cli.js                       # 自检：daemon/扩展连接状态
+node owb-daemon/src/cli.js open https://www.zhihu.com
+node owb-daemon/src/cli.js page                  # 语义快照，得到 @eN ref
+node owb-daemon/src/cli.js click @e5             # 引用 ref 操作
+node owb-daemon/src/cli.js help                  # 12 个命令组，79 个工具
 ```
 
 `npm link`（或全局装）后可直接 `owb <命令>`。
@@ -56,21 +56,21 @@ node daemon/src/cli.js help                  # 12 个命令组，79 个工具
 装 skill（可选，推荐）——让 agent 一上手就知道怎么用，不靠猜：
 
 ```bash
-cp -r skills/owb ~/.claude/skills/          # Claude Code：全局装
-cp -r skills/owb <你的项目>/.claude/skills/  # 或只在某个项目里装
+cp -r owb-skills/owb ~/.claude/skills/          # Claude Code：全局装
+cp -r owb-skills/owb <你的项目>/.claude/skills/  # 或只在某个项目里装
 ```
 
-其他 agent 把 `skills/owb/SKILL.md` 内容并入你的规则/系统提示即可（纯 markdown，
+其他 agent 把 `owb-skills/owb/SKILL.md` 内容并入你的规则/系统提示即可（纯 markdown，
 无专有格式）。装好后对 agent 说一句「打开知乎搜一下 XXX」就能看到它干活。
 
 ## 目录结构
 
 ```
 open-web-bridge/
-├── daemon/       Node 包：owb CLI（agent 接入面）+ 本地 daemon + 测试
-├── extension/    MV3 Chrome 扩展（浏览器加载这个目录）
-├── relay/        可选：Cloudflare Workers 公网中转（远程控制用）
-└── skills/owb/   交付物：给 AI agent 装的 skill
+├── owb-daemon/     Node 包：owb CLI（agent 接入面）+ 本地 daemon + 测试
+├── owb-extension/  MV3 Chrome 扩展（浏览器加载这个目录）
+├── owb-relay/      可选：Cloudflare Workers 公网中转（远程控制用）
+└── owb-skills/owb/ 交付物：给 AI agent 装的 skill
 ```
 
 运行时产物（分析归档、登录态、HAR）落在 `work/`，已 gitignore。
@@ -84,13 +84,13 @@ open-web-bridge/
 **1. 部署中转（约 2 分钟，一次性）：**
 
 ```bash
-cd relay
+cd owb-relay
 npm install
 npx wrangler login          # 浏览器授权一次
 npx wrangler deploy         # 输出 https://owb-relay2.<你的子域>.workers.dev
 ```
 
-详见 `relay/README.md`。
+详见 `owb-relay/README.md`。
 
 **2. 扩展端配置：** 点浏览器工具栏的扩展图标 → 切到「中转」页 → 填中转 URL（如 `wss://owb-relay2.xxx.workers.dev`）→ 点「生成」→「保存并重连」。弹窗上方实时显示配对进度（浏览器 → 中转 → daemon 逐环点亮）。
 
@@ -131,7 +131,7 @@ node src/server.js            # 日志会标注「中转模式」
 ## 测试
 
 ```bash
-cd daemon
+cd owb-daemon
 node tests/smoke_test.js        # 60 项：协议/守护/编排（自起子进程，无需停 daemon）
 node tests/relay_test.js        # 10 项：中转模式集成（mock 中转 + 真 daemon）
 node tests/cli_test.js          # 13 项：owb CLI 接入面（命令映射/转发/错误模型）
@@ -139,7 +139,7 @@ node tests/verify_replay_test.js # 11 项：离线验证 + 重放
 node tests/e2e_browser_test.js  # 68 项：真机端到端（headless Chromium + 真扩展）
 node tests/read_page_test.js    # 页面表达式单测（另有 7 个同类文件，共 101 项）
 
-cd ../relay && node test/relay_test.mjs  # 14 项：中转 Durable Object 单元测试
+cd ../owb-relay && node test/relay_test.mjs  # 14 项：中转 Durable Object 单元测试
 ```
 
 ## License

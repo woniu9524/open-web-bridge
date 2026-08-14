@@ -15,7 +15,7 @@
  * 自我端口隔离：挑空闲端口 spawn `node src/server.js`
  * （OWB_PORT + OWB_WORK_DIR=临时目录），跑完杀子进程。
  *
- * 运行：cd daemon && node tests/smoke_test.js
+ * 运行：cd owb-daemon && node tests/smoke_test.js
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";

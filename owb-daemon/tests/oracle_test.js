@@ -3,7 +3,7 @@
  * 从 background.js 提取真实 ORACLE_EXPR 验证：调用目标函数、
  * freeze 冻结/恢复 Date.now 与 Math.random、错误路径、Promise 结果。
  *
- * 运行：node daemon/tests/oracle_test.js
+ * 运行：node owb-daemon/tests/oracle_test.js
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8");
+  path.join(__dirname, "..", "..", "owb-extension", "background.js"), "utf8");
 const m = bg.match(/const ORACLE_EXPR = `([\s\S]*?)`;/);
 if (!m) {
   console.error("[FAIL] 无法从 background.js 提取 ORACLE_EXPR");

@@ -8,7 +8,7 @@
  *   4. replay e2e：本地 http 服务器，GET 带自定义头 + POST 带 body
  *   5. replay 错误路径：无法连接（curl-impersonate 二进制缺失时 REPLAY_FAILED 同样算过）
  *
- * 运行：cd daemon && node tests/verify_replay_test.js
+ * 运行：cd owb-daemon && node tests/verify_replay_test.js
  */
 import http from "node:http";
 import { first_divergence, verify_signer } from "../src/verify.js";

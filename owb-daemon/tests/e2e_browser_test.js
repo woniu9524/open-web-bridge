@@ -12,7 +12,7 @@
  * 自我端口隔离：挑空闲端口 spawn `node src/server.js`（OWB_PORT +
  * OWB_WORK_DIR=临时目录），扩展副本改写默认 wsUrl 指向同一端口，跑完杀子进程。
  *
- * 运行：cd daemon && node tests/e2e_browser_test.js
+ * 运行：cd owb-daemon && node tests/e2e_browser_test.js
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -26,8 +26,8 @@ import { HOST, makeChecker, freePort, waitPort, killProc, onceOpen, tk } from ".
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const REPO = path.resolve(__dirname, "..", "..");
-const DAEMON_DIR = path.join(REPO, "daemon");
-const EXT_DIR = path.join(REPO, "extension");
+const DAEMON_DIR = path.join(REPO, "owb-daemon");
+const EXT_DIR = path.join(REPO, "owb-extension");
 
 // e2e 用独立端口 + 扩展副本（改写副本默认 wsUrl 指向独立端口）：
 // 单扩展模型下，日常浏览器里已连接的扩展会与 headless 测试浏览器互相顶替

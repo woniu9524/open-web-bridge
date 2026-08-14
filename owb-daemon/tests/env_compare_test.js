@@ -4,7 +4,7 @@
  *   通用采集器（值/函数标签/对象标签/undefined/异常）、
  *   features 表达式可解析性（不执行，浏览器专属）、探针清单覆盖关键项。
  *
- * 运行：node daemon/tests/env_compare_test.js
+ * 运行：node owb-daemon/tests/env_compare_test.js
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8")
+  path.join(__dirname, "..", "..", "owb-extension", "background.js"), "utf8")
   .replace(/\r\n/g, "\n");
 
 function grab(re, name) {

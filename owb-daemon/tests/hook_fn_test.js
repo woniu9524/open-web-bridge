@@ -3,7 +3,7 @@
  * 模拟扩展的 OPTS 替换流程，覆盖：after/before/replace 三种 position、
  * hookCode 自定义代码、nonOverridable、toString 原生样式、错误路径、幂等。
  *
- * 运行：node daemon/tests/hook_fn_test.js
+ * 运行：node owb-daemon/tests/hook_fn_test.js
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const TEMPLATE_PATH = path.join(__dirname, "..", "..", "extension", "hooks", "fn_hook.js");
+const TEMPLATE_PATH = path.join(__dirname, "..", "..", "owb-extension", "hooks", "fn_hook.js");
 const template = fs.readFileSync(TEMPLATE_PATH, "utf8");
 const SENTINEL = "/*__OWB_OPTS__*/null/*__OWB_OPTS_END__*/";
 

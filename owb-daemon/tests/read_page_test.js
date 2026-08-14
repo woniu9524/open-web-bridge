@@ -6,7 +6,7 @@
  *   ref 首次分配与二次快照复用（稳定性）、role 推断、name 优先级、
  *   不可见跳过、行格式、hash 同行稳定、max_nodes 截断。
  *
- * 运行：node daemon/tests/read_page_test.js
+ * 运行：node owb-daemon/tests/read_page_test.js
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bg = fs.readFileSync(
-  path.join(__dirname, "..", "..", "extension", "background.js"), "utf8")
+  path.join(__dirname, "..", "..", "owb-extension", "background.js"), "utf8")
   .replace(/\r\n/g, "\n");
 const snapMatch = bg.match(
   /const READ_PAGE_SNAPSHOT_EXPR = \(nextRef, maxNodes\) => `([\s\S]*?)`;\n/);

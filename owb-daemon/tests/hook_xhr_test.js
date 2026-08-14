@@ -3,7 +3,7 @@
  * 用最小 FakeXHR 验证：open/setRequestHeader/send 捕获、loadend 响应捕获、
  * toString 原生样式、重复注入幂等。
  *
- * 运行：node daemon/tests/hook_xhr_test.js
+ * 运行：node owb-daemon/tests/hook_xhr_test.js
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const PRESET_PATH = path.join(__dirname, "..", "..", "extension", "hooks", "xhr.js");
+const PRESET_PATH = path.join(__dirname, "..", "..", "owb-extension", "hooks", "xhr.js");
 const source = fs.readFileSync(PRESET_PATH, "utf8");
 
 // ---- 页面环境 mock ----

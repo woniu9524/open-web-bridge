@@ -8,7 +8,7 @@
  *   4. ctl call status → tool_call 经中转转发到扩展 → tool_result 回到 ctl
  *   5. status.data.mode === "relay"、relay_url 回填
  *
- * 运行：cd daemon && node tests/relay_test.js
+ * 运行：cd owb-daemon && node tests/relay_test.js
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -43,7 +43,7 @@ function recvJson(ws, timeoutMs = 8000) {
 }
 
 // mock 中转：单 pair（一个 ext 槽 + 一个 ctl 槽），对端已在线即配对，之后透明双向转发。
-// 行为对齐 relay/src/relay-room.js 的 Durable Object（含重连重配对）。
+// 行为对齐 owb-relay/src/relay-room.js 的 Durable Object（含重连重配对）。
 function startMockRelay(port) {
   const wss = new WebSocketServer({ port, host: "127.0.0.1" });
   let ext = null, ctl = null;
