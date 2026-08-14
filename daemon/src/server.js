@@ -454,7 +454,9 @@ export class Bridge {
 
     let reconnectTimer = null;
     let delayMs = 1000;
-    const RECONNECT_MAX_MS = 15000;
+    // 60s 上限：对公网中转每次重连都是一次 DO 计费请求（免费额度每月 1M），
+    // 长时间失联时 15s 上限会无谓烧额度。
+    const RECONNECT_MAX_MS = 60000;
     const resetBackoff = () => { delayMs = 1000; };
     const scheduleReconnect = () => {
       if (this._relayStopping) return;

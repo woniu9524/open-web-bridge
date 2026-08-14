@@ -63,17 +63,17 @@ args = ["<仓库绝对路径>/daemon/src/mcp_server.js"]
 cd relay
 npm install
 npx wrangler login          # 浏览器授权一次
-npx wrangler deploy         # 输出 https://owb-relay.<你的子域>.workers.dev
+npx wrangler deploy         # 输出 https://owb-relay2.<你的子域>.workers.dev
 ```
 
 详见 `relay/README.md`。
 
-**2. 扩展端配置：** 点浏览器工具栏的扩展图标 → 切到「中转」页 → 填中转 URL（如 `wss://owb-relay.xxx.workers.dev`）→ 点「生成」→「保存并重连」。弹窗上方实时显示配对进度（浏览器 → 中转 → daemon 逐环点亮）。
+**2. 扩展端配置：** 点浏览器工具栏的扩展图标 → 切到「中转」页 → 填中转 URL（如 `wss://owb-relay2.xxx.workers.dev`）→ 点「生成」→「保存并重连」。弹窗上方实时显示配对进度（浏览器 → 中转 → daemon 逐环点亮）。
 
 **3. daemon 端配置：** 在 AI agent 机器上设同名环境变量再启动 daemon：
 
 ```bash
-export OWB_RELAY_URL="wss://owb-relay.xxx.workers.dev"
+export OWB_RELAY_URL="wss://owb-relay2.xxx.workers.dev"
 export OWB_RELAY_TOKEN="<与扩展端相同的 Token>"
 node src/server.js            # 日志会标注「中转模式」
 ```

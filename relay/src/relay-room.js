@@ -22,7 +22,18 @@ export class RelayRoom {
     this.env = env;
   }
 
+  // DO 内未捕获异常同样只会外化成无线索的 internal error——这里 catch 住
+  // 打印真实堆栈（wrangler tail 可见），错误信息带回响应体。
   async fetch(request) {
+    try {
+      return await this._fetch(request);
+    } catch (e) {
+      console.log("RelayRoom uncaught:", (e && e.stack) || String(e));
+      return new Response("relay room error: " + ((e && e.message) || e) + "\n", { status: 500 });
+    }
+  }
+
+  async _fetch(request) {
     const url = new URL(request.url);
     const role = url.searchParams.get("role");
     if (role !== ROLE_EXT && role !== ROLE_CTL) {

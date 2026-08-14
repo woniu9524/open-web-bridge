@@ -24,14 +24,14 @@ Open Web Bridge 的中转 broker，跑在 **Cloudflare Workers + Durable Objects
 cd relay
 npm install
 npx wrangler login          # 浏览器授权一次
-npx wrangler deploy         # 部署，输出 https://owb-relay.<你的子域>.workers.dev
+npx wrangler deploy         # 部署，输出 https://owb-relay2.<你的子域>.workers.dev
 ```
 
-部署后拿到中转 URL（如 `wss://owb-relay.abc.workers.dev`）。两端各配「中转 URL + 同一个 token」即可。
+部署后拿到中转 URL（如 `wss://owb-relay2.abc.workers.dev`）。两端各配「中转 URL + 同一个 token」即可。
 
 ### 自定义域名（可选）
 
-默认 `*.workers.dev` 子域即可用。想用自己的域名：CF Dashboard → Workers & Pages → `owb-relay` → Settings → Triggers → Custom Domains 绑定，TLS 自动签发。
+默认 `*.workers.dev` 子域即可用。想用自己的域名：CF Dashboard → Workers & Pages → `owb-relay2` → Settings → Triggers → Custom Domains 绑定，TLS 自动签发。
 
 ## 生成 token
 
@@ -51,6 +51,20 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 npm test                    # 14 项 DO 单元测试（纯 Node mock，无需部署）
 npx wrangler dev            # 本地起 Worker（Miniflare），手动连 ws 验证
 ```
+
+## 故障排查
+
+入口和 DO 都有最外层 catch：出错时**响应体直接带错误信息**（`curl https://<relay>/health` 或看 WS 升级失败的 HTTP body），完整堆栈用 `npx wrangler tail` 看。不会再出现只有 reference id 的裸 1101。
+
+常见错误：
+
+- **`Exceeded allowed volume of requests in Durable Objects free tier`**：免费额度
+  （每月 1M DO 请求）耗尽，每月 1 号重置；升级 Workers Paid（$5/月）即时解除。
+  两端对失联中转的重连退避上限已放宽到 60s 以减缓消耗。
+- **`error code: 1042` / 404（未进 worker）**：workers.dev 路由未启用，确认
+  wrangler.toml 里有 `workers_dev = true` 后重新 deploy。
+- **裸 1101（无信息）**：说明异常发生在 catch 层之外（部署损坏/平台故障），
+  `wrangler tail` 复现观察；换 worker 名重部署可甩掉坏的 DO namespace 状态。
 
 ## 安全模型（用前请读）
 

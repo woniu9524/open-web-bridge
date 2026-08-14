@@ -1,6 +1,10 @@
-name = "owb-relay"
+# 名字用 owb-relay2 而非 owb-relay：旧 worker 首次部署（无 sqlite migration）
+# 可能在账号上留下了坏的 DO namespace 状态（已部署类无法事后改 SQLite 后端），
+# 换名 = 全新 namespace，甩掉历史。旧 owb-relay 可在 CF Dashboard 手动删除。
+name = "owb-relay2"
 main = "src/index.js"
 compatibility_date = "2025-09-01"
+workers_dev = true   # 显式启用 *.workers.dev 路由（缺省时可能未开，表现为 1042/404）
 
 # Durable Object 绑定：Worker 经 env.RELAY_ROOM 寻址 RelayRoom 实例
 [[durable_objects.bindings]]

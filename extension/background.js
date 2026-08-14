@@ -126,6 +126,10 @@ let relayPaired = false; // 中转模式：收到 relay_paired 后置 true，之
 let reconnectTimer = null;
 let reconnectDelayMs = 1000;
 const RECONNECT_MAX_MS = 15000;
+// 中转模式退避上限放宽到 60s：对公网中转，每次重连都是一次 DO 计费请求，
+// 15s 上限 24 小时打即 ~5.7k 次/天/端，会无谓消耗 Cloudflare 免费额度
+// （每月 1M DO 请求）。本地模式保持 15s，重连快且免费。
+const RECONNECT_MAX_RELAY_MS = 60000;
 
 function wsOpen() {
   return ws && ws.readyState === 1;
@@ -214,7 +218,8 @@ function scheduleReconnect() {
     reconnectTimer = null;
     connect();
   }, reconnectDelayMs);
-  reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_MAX_MS);
+  const maxMs = config.relayMode ? RECONNECT_MAX_RELAY_MS : RECONNECT_MAX_MS;
+  reconnectDelayMs = Math.min(reconnectDelayMs * 2, maxMs);
 }
 
 // ---------------------------------------------------------------------------

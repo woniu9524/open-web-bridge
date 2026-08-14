@@ -13,7 +13,20 @@
 export { RelayRoom } from "./relay-room.js";
 
 export default {
+  // 最外层兜底：任何未捕获异常都会变成 Cloudflare 1101（页面只有一个
+  // reference id，毫无线索）。这里 catch 住打印真实堆栈——`wrangler tail`
+  // 即可看到，且返回体带上错误信息方便 curl 定位。
   async fetch(request, env, ctx) {
+    try {
+      return await handle(request, env);
+    } catch (e) {
+      console.log("owb-relay uncaught:", (e && e.stack) || String(e));
+      return new Response("relay error: " + ((e && e.message) || e) + "\n", { status: 500 });
+    }
+  },
+};
+
+async function handle(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/health") {
@@ -35,8 +48,7 @@ export default {
     const stub = env.RELAY_ROOM.get(id);
     // 原样把升级请求转给 DO（token 在 path、role 在 query 已就位）
     return stub.fetch(request);
-  },
-};
+}
 
 async function sha256Hex(s) {
   const data = new TextEncoder().encode(s);
