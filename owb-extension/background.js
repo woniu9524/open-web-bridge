@@ -2166,10 +2166,15 @@ const READ_PAGE_ARTICLE_EXPR = `(() => {
     "[role='alert'], [role='dialog'], [aria-hidden='true'], " +
     ".nav, .navbar, .menu, .sidebar, .footer, .header, " +
     ".breadcrumb, .toc, .comment, .comments, .advert, .ads, " +
-    "[class*='sitenotice'], [class*='site-notice'], [class*='dismissable'], " +
-    "[class*='dismissible'], [class*='cookie'], [class*='consent'], " +
-    "[class*='newsletter'], [class*='subscribe'], [class*='paywall'], " +
-    "[id*='sitenotice'], [id*='cookie-banner'], [class*='promo-banner']";
+    // 子串选择器必须带 i 标志：CSS 属性选择器默认区分大小写，
+    // 而 Wikipedia 的募捐横幅容器 id 是驼峰的 siteNotice，
+    // 不加 i 就永远匹配不到（这个修复的第一版就栽在这里）。
+    "[class*='sitenotice' i], [class*='site-notice' i], [class*='dismissable' i], " +
+    "[class*='dismissible' i], [class*='cookie' i], [class*='consent' i], " +
+    "[class*='newsletter' i], [class*='subscribe' i], [class*='paywall' i], " +
+    "[class*='promo-banner' i], [class*='banner' i], " +
+    "[id*='sitenotice' i], [id*='centralnotice' i], [id*='cookie' i], " +
+    "[id*='banner' i]";
   const inBoiler = (el) => !!(el.closest && el.closest(BOILER));
   const textLen = (root) => {
     let n = 0;
