@@ -281,3 +281,28 @@ nav/header/footer/aside/广告，但漏掉「正文容器**内部**的公告块�
 **修复**：`BOILER` 增补语义类名/角色——`[class*=sitenotice]`、`[class*=dismissable]`、
 `[class*=cookie]`、`[class*=consent]`、`[class*=newsletter]`、`[class*=subscribe]`、
 `[class*=paywall]`、`[role=alert]`、`[role=dialog]` 等。
+
+### BUG-82 · HAR 录制的正确流程无法从命令名推出，且 `har stop` 吐 10MB 🟠 中影响
+
+**现象一**：最自然的写法 `har start` → `har stop` → `har save` **必然失败**，
+报 `NOT_RECORDING: tab X is not recording`，且录制数据已永久丢失。
+
+**根因**：`har_save` 内部**自己就会调 `record_stop`**。先手动 stop 一次，
+recorder 就被销毁了，save 无从下手。而 `record_stop` 把整份 HAR 随响应返回后
+即丢弃——数据没落盘、也拿不回来。
+
+**现象二**：`har stop` 把完整 HAR 内联返回。实测一次两页导航的录制 = 42 条请求、
+**10MB body**，全部塞进 stdout。这是继截图之后第二个「一条命令炸掉 AI 上下文」的地方。
+
+**修复**：
+1. CLI 里 `har save` 排到 `har stop` 前面，描述直说「录完用这个，它已含 stop」；
+   `har stop` 描述标注「停了再 save 会失败」
+2. `NOT_RECORDING` 错误信息改为讲清正确流程（否则 AI 只会反复重试）
+3. CLI 输出整形摘掉 `har` 字段，代之以 `_harOmitted` 指路 `har save`
+   —— 实测 `har stop` 输出从 ~10MB 降到 **153 字节**
+
+**验证**：正确流程 `har start` → `har save` 一次跑通，22 条请求落盘到
+`work/har/field-test-demo.har`。
+
+**设计教训**：当 B 操作内部包含 A 操作时，命令名必须让人看出来，否则「先 A 再 B」
+这个最直觉的顺序就是陷阱。

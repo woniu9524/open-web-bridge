@@ -3031,7 +3031,13 @@ const tools = {
     if (!rec)
       throw new ToolError(
         "NOT_RECORDING",
-        `tab ${tabId} is not recording`,
+        // BUG-82: har_save 内部就会调 record_stop，所以「先 stop 再 save」
+        // 这个最自然的写法必然失败，且录制数据在 stop 时已随响应返回并丢弃。
+        // 错误信息必须说清正确姿势，否则 AI 只会反复重试。
+        `tab ${tabId} is not recording. If you already called record_stop, ` +
+          "the recording is gone — record_stop returns the HAR inline and drops it. " +
+          "Correct flow: record_start → (do things) → har_save (which stops AND " +
+          "writes to disk in one step). Do not call record_stop before har_save.",
         false,
       );
     const { har, entries } = await finalizeRecorder(tabId, rec, args.title);

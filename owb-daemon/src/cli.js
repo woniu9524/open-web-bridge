@@ -78,9 +78,9 @@ const GROUPS = {
   },
   har: {
     "har start": { ctl: "record_start", desc: "开始录制（HAR 1.2 全量）" },
-    "har stop": { ctl: "record_stop", desc: "停止录制" },
+    "har save": { ctl: "daemon.har_save", desc: "停止录制并落盘（录完用这个，它已含 stop）" },
+    "har stop": { ctl: "record_stop", desc: "只停止不落盘——录完请直接用 har save，停了再 save 会失败" },
     "har status": { ctl: "record_status", desc: "录制状态" },
-    "har save": { ctl: "daemon.har_save", desc: "录制结果落盘为 HAR 文件" },
     "har to-replay": { ctl: "daemon.har_to_replay", desc: "HAR → python/curl/node 重放脚本" },
     "har diff": { ctl: "daemon.har_diff", desc: "两份 HAR 对比漂移" },
     "har assert": { ctl: "daemon.har_assert", desc: "HAR 断言校验" },
@@ -370,6 +370,18 @@ function saveBinary(toolName, data, cli) {
 function dropRedundant(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) return data;
   const out = { ...data };
+  // BUG-82: record_stop 把整份 HAR 内联返回（实测 42 条请求 / 10MB body）。
+  // 这东西对 AI 的 stdout 毫无用处，只会撑爆上下文——HAR 的正确去处是磁盘。
+  // 摘掉并指路 har save。
+  if (out.har && typeof out.har === "object") {
+    const n = out.entries != null
+      ? out.entries
+      : ((out.har.log || {}).entries || []).length;
+    delete out.har;
+    out._harOmitted =
+      `HAR body (${n} entries) not printed — it belongs on disk, not in stdout. ` +
+      'Next time use "owb har save" instead of "har stop" (save includes stop).';
+  }
   if (typeof out.lines === "string") {
     if (out.text === out.lines) delete out.text;
     // nodes[].line 逐条重复 lines 的内容；ref/role/name 也都已在行里
