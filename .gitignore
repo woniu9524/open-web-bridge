@@ -10,3 +10,7 @@ bin/
 # 分析产物与登录态（敏感，不入库）
 work/
 *.tgz
+
+# 实地测试的原始扫描数据（体量大、可重跑）
+docs/field-test/raw*.jsonl
+docs/field-test/sweep.log

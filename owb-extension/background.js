@@ -2020,6 +2020,20 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     }
     if (!v) v = el.getAttribute("name") || el.getAttribute("title") || "";
     if (!v) v = el.value || el.innerText || "";
+    // BUG-60: innerText 遵循 CSS 可见性——元素在 visibility:hidden 的容器里
+    // （悬停菜单、折叠导航很常见）时返回空串，但它仍有布局盒、仍会进快照。
+    // 实测界面新闻首页 43% 的 ref 因此变成 @eN link ""，AI 只能靠 href 猜。
+    // textContent 不依赖渲染，是这类元素唯一能拿到的文字。
+    if (!v) v = el.textContent || "";
+    // BUG-61: 纯图片链接/按钮（<a><img alt="..."></a>）自身没有任何文字，
+    // alt 挂在子元素上，取不到就完全无名。
+    if (!v && el.querySelector) {
+      const im = el.querySelector("img[alt], img[title], [aria-label]");
+      if (im) {
+        v = im.getAttribute("alt") || im.getAttribute("title") ||
+          im.getAttribute("aria-label") || "";
+      }
+    }
     if (!v) v = el.id ? "#" + el.id : "";
     return String(v).replace(/\\s+/g, " ").trim().slice(0, 80);
   };
@@ -2039,10 +2053,14 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     return acc;
   };
   const els = collect(document, []);
+  // BUG-62: 后台/未绘制的 tab 里所有元素 getBoundingClientRect() 全为 0，
+  // 于是可见性过滤把整页元素丢光，快照静默返回空。记下被过滤数，
+  // 让扩展侧能区分"页面真没东西"和"页面没渲染"。
+  let skippedNoRect = 0;
   for (const el of els) {
     if (nodes.length >= ${maxNodes}) { truncated = true; break; }
     const rect = el.getBoundingClientRect(); // 无布局盒 = 不可见，跳过
-    if (!rect || !(rect.width > 0 && rect.height > 0)) continue;
+    if (!rect || !(rect.width > 0 && rect.height > 0)) { skippedNoRect++; continue; }
     const role = roleOf(el);
     const name = nameOf(el);
     let ref = null;
@@ -2089,7 +2107,7 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     .filter((f) => f.src || f.name).slice(0, 20);
   return { url: location.href, title: document.title, nodes,
     nextRef: next, refsAssigned: assigned, truncated,
-    shadowRoots, iframes };
+    shadowRoots, iframes, skippedNoRect, candidates: els.length };
 })()`;
 
 // article 的页面内提取器：简化 readability——候选根按 <p> 文本总长评分取最优，
@@ -2662,7 +2680,17 @@ const tools = {
     const limit = args.limit || 100;
     const all = [];
     let extensionRequests = 0;
+    let orphanRecords = 0;
     for (const rec of getBuffer(tabId).values()) {
+      // BUG-65: 抓包在页面已加载后才启动、或跨 reload 时，会收到只有响应事件
+      // 而没有 requestWillBeSent 的记录 —— 它们没有 url/method/requestId，
+      // 在列表里就是一行 {status,finished,failed}，AI 既认不出是谁也没法
+      // network_detail 它。实测 USGS 上 45 条全是这种，整个抓包结果等于废掉。
+      // 无身份 = 不可操作，默认剔除并单独计数（要看用 include_orphans:true）。
+      if (!rec.url && !rec.requestId) {
+        orphanRecords++;
+        if (!args.include_orphans) continue;
+      }
       // UX-222: 其他扩展的资源请求混在抓包结果里，忙页面上会把真正的 API 挤掉
       if (!args.include_extensions && isExtensionUrl(rec.url)) {
         extensionRequests++;
@@ -2697,6 +2725,9 @@ const tools = {
       buffered: getBuffer(tabId).size,
       order: newest ? "newest-first" : "oldest-first",
       extensionRequestsHidden: extensionRequests || undefined,
+      // BUG-65: 剔除了多少条无身份记录（抓包起晚了/跨了 reload）。
+      // 数量大说明该在导航前就 network_start，否则前半段请求已经错过。
+      orphanRecordsHidden: orphanRecords || undefined,
     };
   },
 
@@ -4209,10 +4240,36 @@ const tools = {
     // snapshot：页面表达式算好 nodes/line/hash，增量比对在扩展侧做
     const maxNodes = Math.min(Math.max(args.max_nodes || 400, 1), 2000);
     const nextRef = readPageNextRef.get(tabId) || 1;
-    const v = (await evaluateJs(
+    let v = (await evaluateJs(
       tabId,
       READ_PAGE_SNAPSHOT_EXPR(nextRef, maxNodes),
     )) || { nodes: [], nextRef };
+    // BUG-62: 页面有候选元素、却因全部零尺寸被过滤光 —— 这是「tab 在后台没绘制」
+    // 的特征（Chrome 不给后台 tab 做布局），不是「页面真的空」。静默返回空快照
+    // 会让 AI 以为页面没内容而走错路。前台化一次重试，并在结果里说明发生了什么。
+    let renderNote = null;
+    if (!v.nodes.length && v.skippedNoRect > 0) {
+      try {
+        await cdpCall(tabId, "Page.bringToFront");
+        await new Promise((r) => setTimeout(r, 250));
+        const again = await evaluateJs(
+          tabId,
+          READ_PAGE_SNAPSHOT_EXPR(nextRef, maxNodes),
+        );
+        if (again && again.nodes.length) {
+          v = again;
+          renderNote =
+            `tab was not being rendered (all ${v.skippedNoRect || 0} candidate ` +
+            "elements had zero layout boxes); brought it to front and re-read";
+        }
+      } catch (e) {}
+      if (!renderNote) {
+        renderNote =
+          `page has ${v.candidates || 0} candidate elements but all were skipped ` +
+          "for zero layout boxes — the tab is likely not rendering (background tab, " +
+          "or content hidden by CSS). Activate the tab and retry.";
+      }
+    }
     readPageNextRef.set(tabId, v.nextRef);
 
     const prev = readPageSnapshots.get(tabId) || new Map();
@@ -4268,6 +4325,8 @@ const tools = {
           ? "raise max_nodes (default 400, max 2000) or narrow with since_last"
           : undefined,
       refsAssigned: v.refsAssigned,
+      // BUG-62: 空快照/渲染异常时说明原因，不让 AI 面对无解释的空结果
+      renderNote: renderNote || undefined,
       // UX-214: 快照里有多少内容来自 shadow DOM（0 = 该页没用 Web Component）
       shadowRoots: v.shadowRoots || undefined,
       // UX-100: iframe 的存在必须让 AI 知道，否则找不到的元素永远找不到
@@ -4777,6 +4836,20 @@ const tools = {
       dataLength: shot.data.length,
       // UX-96: base64 在 data 字段，不是 base64 字段 —— 返回里点一句
       encoding: "base64",
+    };
+  },
+
+  // 开发用：让扩展重载自己。改完 background.js 不必再去 chrome://extensions
+  // 手点重载——那一步在开发循环里出现得太频繁，且 AI 无法代劳（扩展管理页
+  // 禁止被 debugger 附着）。重载会重启 SW，本次调用的响应可能来不及送达，
+  // 因此先回包再重载。
+  async reload_extension() {
+    setTimeout(() => {
+      try { chrome.runtime.reload(); } catch (e) {}
+    }, 150);
+    return {
+      reloading: true,
+      note: "extension is restarting; the WS will drop and reconnect within a few seconds",
     };
   },
 

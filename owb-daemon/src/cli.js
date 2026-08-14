@@ -156,6 +156,7 @@ const GROUPS = {
   },
   daemon: {
     "daemon-status": { ctl: "daemon.status", desc: "daemon 状态（模式/中转/工作目录）" },
+    "reload-ext": { ctl: "reload_extension", desc: "让扩展重载自己（改完扩展代码用，免去手点 chrome://extensions）" },
   },
 };
 
@@ -304,6 +305,7 @@ function parseArgv(argv) {
       case "compact": cli.compact = true; if (val !== undefined && eq < 0) { positionals.push(val); } continue;
       case "no-autostart": cli.autostart = false; if (val !== undefined && eq < 0) { positionals.push(val); } continue;
       case "args": cli.rawArgs = val; continue;
+      case "out": cli.out = val; continue;   // 二进制结果落盘路径
       case "tab": args.tabId = parseValue(val); continue;
     }
     args[key.replace(/-/g, "_")] = parseValue(val);
@@ -329,6 +331,65 @@ function applyPositionals(spec, positionals, args) {
 }
 
 class UsageError extends Error {}
+
+// ---------------------------------------------------------------------------
+// 输出整形：CLI 的读者是 AI 的上下文窗口，不是磁盘
+// ---------------------------------------------------------------------------
+
+// 二进制结果（截图 473KB base64、PDF 更大）直接打到 stdout 会一次性吃掉
+// AI 的整个上下文窗口，且 base64 对它毫无可读价值。落盘 + 只回路径。
+const BINARY_TOOLS = {
+  screenshot: { field: "data", ext: (d) => (d.format === "jpeg" ? "jpg" : "png") },
+  print_pdf: { field: "data", ext: () => "pdf" },
+};
+
+// 任何工具的返回超过这个体量都先截断——宁可让 AI 多问一次，
+// 也不要它一条命令就失去上下文。
+const MAX_STDOUT_BYTES = 60000;
+
+function saveBinary(toolName, data, cli) {
+  const spec = BINARY_TOOLS[toolName];
+  const buf = Buffer.from(data[spec.field], "base64");
+  let out = cli.out;
+  if (!out) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    out = path.join(process.cwd(), `owb-${toolName === "print_pdf" ? "pdf" : "shot"}-${stamp}.${spec.ext(data)}`);
+  }
+  fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
+  fs.writeFileSync(out, buf);
+  const rest = { ...data };
+  delete rest[spec.field];
+  delete rest.dataLength;
+  return { ...rest, savedTo: path.resolve(out), bytes: buf.length };
+}
+
+function shapeForAgent(toolName, data, cli) {
+  if (!data || typeof data !== "object") return data;
+  if (BINARY_TOOLS[toolName] && typeof data[BINARY_TOOLS[toolName].field] === "string") {
+    return saveBinary(toolName, data, cli);
+  }
+  const json = JSON.stringify(data);
+  if (json.length <= MAX_STDOUT_BYTES) return data;
+  // 超限：保留结构，把最长的字符串字段截掉并说明怎么拿全量
+  const out = {};
+  let clipped = null;
+  for (const [k, v] of Object.entries(data)) {
+    if (typeof v === "string" && v.length > 4000) {
+      out[k] = v.slice(0, 4000);
+      clipped = clipped || [];
+      clipped.push(`${k} (${v.length} chars → 4000)`);
+    } else {
+      out[k] = v;
+    }
+  }
+  if (clipped) {
+    out._clipped = clipped;
+    out._hint =
+      "输出过大已截断。要全量：加 --out <文件> 落盘，或用 --max-chars/--max-nodes 缩小范围，" +
+      "或 --raw 拿原始信封自行处理。";
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // setup / skill：安装引导（把「照 README 手动做」变成可执行命令，AI 也能照做）
@@ -442,7 +503,7 @@ function printHelp(groupName) {
       out.push(`  [${gname}] ${[...new Set(names)].join(" ")}`);
     }
     out.push("");
-    out.push("通用 flag：--tab <id> --timeout <s> --raw --compact --no-autostart --args '<json>'");
+    out.push("通用 flag：--tab <id> --timeout <s> --out <文件> --raw --compact --no-autostart --args '<json>'");
   }
   process.stdout.write(out.join("\n") + "\n");
 }
@@ -552,7 +613,8 @@ async function main() {
       return;
     }
     if (res.ok) {
-      process.stdout.write(JSON.stringify(res.data ?? null, null, cli.compact ? 0 : 2) + "\n");
+      const shaped = shapeForAgent(ctlName, res.data, cli);
+      process.stdout.write(JSON.stringify(shaped ?? null, null, cli.compact ? 0 : 2) + "\n");
     } else {
       const err = res.error || {};
       let line = `error ${err.code || "INTERNAL"}: ${err.message !== undefined ? err.message : err}`;
