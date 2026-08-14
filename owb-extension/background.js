@@ -1571,9 +1571,15 @@ const CDP_PERMISSIONS = new Set([
 ]);
 
 const CDP_ERROR_RULES = [
+  // BUG-87: 原文案只列了断点与模态框两种成因，但实测最常见的是第三种——
+  // 页面主线程被长时间占满（重 JS 站点仍在加载时），CDP 的 Runtime.evaluate
+  // 根本排不上队。eBay 实测导航耗时 60 秒，期间快照必超时（该页元素只有 2606 个，
+  // 与 DOM 体量无关）。少了这一条，AI 会去找根本不存在的断点。
   [/cdpCall timeout/i, "TIMEOUT", true,
-    "CDP call did not return in 30s; the page may be paused at a breakpoint " +
-    "(call resume) or blocked by a modal dialog"],
+    "CDP call did not return in 30s. Most often the page's main thread is " +
+    "saturated (heavy JS, or the page is still loading) — call " +
+    "wait_for {network_idle:true} and retry. Other causes: the page is paused " +
+    "at a breakpoint (call resume), or blocked by a modal dialog"],
   [/no tab with given id|no target with given id|tab was closed|no tab found/i,
     "NO_TAB", false, "call list_tabs for live tabIds"],
   [/cannot access|cannot be debugged|chrome:\/\/|extensions gallery|devtools:\/\//i,
@@ -1587,6 +1593,16 @@ const CDP_ERROR_RULES = [
     "shows now — tab-manager extensions (OneTab and similar) replace tabs with " +
     "their own page, which takes the tab out of reach. Re-open the target URL " +
     "in a fresh tab"],
+  // BUG-86: Chrome 的安全拦截页（证书错误/隐私设置错误/不安全下载警告）
+  // 禁止 debugger 附着，报的却是一句毫无线索的 "Cannot attach to this target"。
+  // 知网连续三轮实测均卡在这里——页面标题是本地化的「隐私设置错误」，
+  // 说明是 net::ERR_CERT_* 类拦截。AI 看到原文案只会当成瞬时故障反复重试。
+  [/cannot attach to this target/i, "FORBIDDEN", false,
+    "Chrome refuses to attach a debugger to this page. Most often it is a " +
+    "security interstitial (certificate / privacy error / unsafe-download " +
+    "warning) — those pages cannot be inspected at all. Check the tab in the " +
+    "browser: if it shows a certificate warning, the site's TLS is broken or " +
+    "intercepted; either fix it or click through the warning manually first"],
   [/could not find object with given id|invalid remote object id/i,
     "BAD_ARGS", false,
     "object_id expired (RemoteObjects die on navigation/GC); " +
@@ -2453,6 +2469,7 @@ const tools = {
     let isChromeError = tab.url && tab.url.startsWith("chrome-error://");
     let errorCode = null;
     let httpErrorHint = null;
+    let attachHint = null;
     if (!isChromeError) {
       // BUG-75: 这段探测原来直接 cdpCall，而 navigate 全程没 ensureAttached ——
       // 未附着时 Runtime.evaluate 必抛，异常又被 catch 吞掉，于是错误页检测
@@ -2460,7 +2477,20 @@ const tools = {
       // 实测 .invalid 域名：tab.url 保留请求 URL，只有页内 location.href
       // 才是 chrome-error://chromewebdata/，所以这条页内探测是必需的。
       try {
-        await ensureAttached(tabId);
+        try {
+          await ensureAttached(tabId);
+        } catch (attachErr) {
+          // BUG-86: 附着失败最常见的原因是 Chrome 安全拦截页（证书/隐私错误），
+          // 这类页面根本无法被检查。原来这里被外层 catch 静默吞掉，navigate
+          // 照报成功，AI 直到下一步 read_page 才撞上难懂的 "Cannot attach"。
+          // 提前说破，AI 才不会在不可检查的页面上继续操作。
+          attachHint =
+            "page loaded but the debugger cannot attach to it (" +
+            String((attachErr && attachErr.message) || attachErr).slice(0, 80) +
+            ") — most often a Chrome security interstitial (certificate / " +
+            "privacy error); the page cannot be read or interacted with";
+          throw attachErr;
+        }
         const evRes = await cdpCall(tabId, "Runtime.evaluate", {
           expression:
             '(()=>{const e=document.querySelector("#main-frame-error");' +
@@ -2533,6 +2563,8 @@ const tools = {
     // BUG-78: 服务端 4xx/5xx 是「加载成功」的错误页，不拦截但必须说破，
     // 否则 AI 只会看到一份空快照而误判成「这页没内容」。
     if (httpErrorHint) out.httpErrorHint = httpErrorHint;
+    // BUG-86: 附着失败必须在 navigate 就说破，别等到 read_page 才撞墙
+    if (attachHint) out.attachHint = attachHint;
     return out;
   },
 
