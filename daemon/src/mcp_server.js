@@ -3,7 +3,7 @@
  * MCP (stdio) 接入面：把 ctl 通道的桥工具暴露为 MCP tools。
  *
  * 运行：node src/mcp_server.js（或 bin owb-mcp）
- * 依赖：daemon 已在运行（ws://127.0.0.1:18086，OWB_PORT 环境变量覆盖）。
+ * 依赖：daemon 已在运行（ws://127.0.0.1:43917，OWB_PORT 环境变量覆盖）。
  *
  * AI 工具配置示例（Kimi Code config.toml / Claude Code mcp 配置同构）：
  *   [mcp_servers.owb]

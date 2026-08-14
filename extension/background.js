@@ -43,7 +43,7 @@ import { Stats, StatsBuilder } from "./har/stats.js";
 import { HARBuilder } from "./har/builder.js";
 
 const DEFAULT_CONFIG = {
-  wsUrl: "ws://127.0.0.1:18086/ws",
+  wsUrl: "ws://127.0.0.1:43917/ws",
   relayUrl: "",
   relayToken: "",
 };
@@ -66,19 +66,6 @@ async function loadConfig() {
   config.relayUrl = stored.relayUrl || "";
   config.relayToken = stored.relayToken || "";
   config.relayMode = !!(config.relayUrl && config.relayToken);
-  // ws.json（扩展目录内可选文件，e2e 隔离/多实例调试用）：覆盖以上任一字段。
-  // 文件优先于 storage——它是开发者显式放置的配置。
-  try {
-    const res = await fetch(chrome.runtime.getURL("ws.json"));
-    if (res.ok) {
-      const j = await res.json();
-      if (j.wsUrl) config.wsUrl = j.wsUrl;
-      if (j.relayUrl) config.relayUrl = j.relayUrl;
-      if (j.relayToken) config.relayToken = j.relayToken;
-      config.relayMode = !!(config.relayUrl && config.relayToken);
-      log("ws.json override", config.relayMode ? "relay" : config.wsUrl);
-    }
-  } catch (e) {}
 }
 
 async function boot() {
@@ -88,7 +75,7 @@ async function boot() {
   connect();
 }
 
-// options 页保存即时生效：任一连接字段变化 → 重读配置并立即重连
+// popup 保存即时生效：任一连接字段变化 → 重读配置并立即重连
 // （不等自然断连/4401 轮询）。cleanupWs 会把旧 ws 的回调置 null，
 // close 不会触发 scheduleReconnect，直接 connect 即可。
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -100,7 +87,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   });
 });
 
-// popup 页：查连接状态 / 触发重连 / 打开设置页
+// popup 页：查连接状态 / 触发重连
 // （引用的 ws/helloAcked/relayPaired/reconnectTimer 等在下方声明；
 //  onMessage 回调异步触发，此时 SW 已完成顶层初始化，无 TDZ 问题）
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -123,11 +110,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.cmd === "reconnect") {
     cleanupWs();
     connect();
-    sendResponse({ ok: true });
-    return false;
-  }
-  if (msg.cmd === "openOptions") {
-    chrome.runtime.openOptionsPage();
     sendResponse({ ok: true });
     return false;
   }

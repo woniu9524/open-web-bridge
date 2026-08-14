@@ -35,14 +35,14 @@ npx wrangler deploy         # 部署，输出 https://owb-relay.<你的子域>.w
 
 ## 生成 token
 
-token 是线上唯一秘密（32 字节随机足够）。任一端生成都行，扩展 options 页有「生成 Token」按钮；命令行：
+token 是线上唯一秘密（32 字节随机足够）。任一端生成都行，扩展弹窗「中转」页有「生成」按钮；命令行：
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
 把同一个 token 分别填到：
-- **扩展** options 页「中转 Token」字段；
+- **扩展** 弹窗「中转」页的「中转 Token」字段；
 - **daemon** 环境变量 `OWB_RELAY_TOKEN`。
 
 ## 本地开发 / 自测

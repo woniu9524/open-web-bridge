@@ -4,7 +4,7 @@
 
 两种部署形态：
 
-- **本地模式**（默认）：三层架构 AI agent → 本地 daemon（Node.js，`127.0.0.1:18086`）→ MV3 Chrome 扩展 → 经 CDP 操作页面。通过 **MCP** 接入，Kimi Code / Claude Code 等工具零适配使用，76 个工具。
+- **本地模式**（默认）：三层架构 AI agent → 本地 daemon（Node.js，`127.0.0.1:43917`）→ MV3 Chrome 扩展 → 经 CDP 操作页面。通过 **MCP** 接入，Kimi Code / Claude Code 等工具零适配使用，76 个工具。
 - **中转模式**（可选）：daemon 与扩展都拨出到一个公网中转（Cloudflare Workers + Durable Objects，按 token 配对），让**远程** AI agent 经公网控制你的浏览器，不暴露本机端口。默认关闭，不影响本地模式。
 
 ## 能干什么
@@ -30,7 +30,7 @@
 git clone <仓库地址>          # 或下载 zip 解压
 cd open-web-bridge/daemon
 npm install
-node src/server.js            # 启动 daemon，监听 127.0.0.1:18086
+node src/server.js            # 启动 daemon，监听 127.0.0.1:43917
 ```
 
 装扩展（一次性）：
@@ -38,8 +38,8 @@ node src/server.js            # 启动 daemon，监听 127.0.0.1:18086
 1. 浏览器打开 `chrome://extensions`
 2. 右上角打开「开发者模式」
 3. 「加载已解压的扩展程序」→ 选择本仓库的 `extension/` 目录
-4. 扩展默认连本地 daemon（`ws://127.0.0.1:18086/ws`），无需配对；改地址才需要
-   到「扩展程序选项」配置。
+4. 扩展默认连本地 daemon（`ws://127.0.0.1:43917/ws`），无需配对；点工具栏图标
+   可看实时连接状态，改地址在弹窗「本地」页填写后保存。
 
 接入 AI 工具（以 Kimi Code 的 `config.toml` 为例，其他 MCP 客户端同构）：
 
@@ -68,7 +68,7 @@ npx wrangler deploy         # 输出 https://owb-relay.<你的子域>.workers.de
 
 详见 `relay/README.md`。
 
-**2. 扩展端配置：** 浏览器打开扩展「选项页」→ 选「中转模式」→ 填中转 URL（如 `wss://owb-relay.xxx.workers.dev`）→ 点「生成 Token」→ 保存并重连。
+**2. 扩展端配置：** 点浏览器工具栏的扩展图标 → 切到「中转」页 → 填中转 URL（如 `wss://owb-relay.xxx.workers.dev`）→ 点「生成」→「保存并重连」。弹窗上方实时显示配对进度（浏览器 → 中转 → daemon 逐环点亮）。
 
 **3. daemon 端配置：** 在 AI agent 机器上设同名环境变量再启动 daemon：
 

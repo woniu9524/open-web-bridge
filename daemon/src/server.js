@@ -2,9 +2,10 @@
 /**
  * Open Web Bridge daemon — WS server。
  *
- * 拓扑（默认端口 18086；10086 与 kimi-webbridge 默认端口冲突，故更换）：
- *   扩展  → ws://127.0.0.1:18086/ws   （hello 握手，Host/Origin 校验防 DNS rebinding）
- *   控制器 → ws://127.0.0.1:18086/ctl  （call / subscribe / events 补拉）
+ * 拓扑（默认端口 43917——高位冷门端口，避免与常见开发端口/其他工具撞车；
+ * 曾用 18086，10086 与 kimi-webbridge 默认端口冲突）：
+ *   扩展  → ws://127.0.0.1:43917/ws   （hello 握手，Host/Origin 校验防 DNS rebinding）
+ *   控制器 → ws://127.0.0.1:43917/ctl  （call / subscribe / events 补拉）
  *
  * 仅绑定 127.0.0.1。本地信任模型：无 token 认证（同机任意进程可连），
  * Host/Origin 校验防网页 DNS rebinding。
@@ -26,7 +27,7 @@ import { replay } from "./replay.js";
 import { harToReplay, harDiff, harAssert } from "./harexport.js";
 
 export const HOST = "127.0.0.1";
-export const PORT = parseInt(process.env.OWB_PORT || "18086", 10);
+export const PORT = parseInt(process.env.OWB_PORT || "43917", 10);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 // work/ 目录可用 OWB_WORK_DIR 覆盖（e2e 与日常浏览器隔离用），默认行为不变
 export const WORK_DIR = process.env.OWB_WORK_DIR || path.join(REPO_ROOT, "work");

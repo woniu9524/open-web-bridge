@@ -31,9 +31,5 @@
   "background": {
     "service_worker": "background.js",
     "type": "module"
-  },
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": true
   }
 }

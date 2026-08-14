@@ -4,55 +4,220 @@
 <meta charset="utf-8">
 <title>Open Web Bridge</title>
 <style>
-  body { font: 13px/1.5 system-ui, sans-serif; width: 300px; margin: 0; padding: 14px 14px 12px; color: #222; }
-  .head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-  .head img { width: 22px; height: 22px; }
-  .head h1 { font-size: 14px; margin: 0; flex: 1; }
-  .ver { color: #888; font-size: 11px; }
-  .card { border: 1px solid #e3e3e3; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
-  .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: #bbb; flex-shrink: 0; }
-  .dot.ok { background: #1e8e3e; }
-  .dot.wait { background: #f29900; animation: pulse 1.1s infinite; }
-  .dot.bad { background: #d93025; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
-  .state { font-weight: 600; flex: 1; }
-  .badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; font-weight: 600; }
-  .badge.local { background: #e8f0fe; color: #1a73e8; }
-  .badge.relay { background: #fef7e0; color: #b06000; }
-  .label { color: #666; font-size: 11px; margin-right: 4px; }
-  .val { font: 11px monospace; color: #333; word-break: break-all; flex: 1; }
-  .kv { display: flex; gap: 4px; margin: 3px 0; align-items: baseline; }
-  .actions { display: flex; gap: 8px; margin-top: 4px; }
-  button { flex: 1; padding: 7px 0; border: 1px solid #dadce0; border-radius: 6px; background: #fff; color: #1a73e8; cursor: pointer; font: 12px system-ui; }
-  button:hover { background: #f6faff; }
-  button.primary { background: #1a73e8; color: #fff; border-color: #1a73e8; }
-  button.primary:hover { background: #1765cc; }
-  .hint { color: #888; font-size: 11px; margin-top: 6px; }
+  /* 固定浅色面板，不随浏览器主题切换。扁平：实色填充 + 1px 实线边框。 */
+  :root {
+    --bg: #ffffff;
+    --bg2: #f6f7f9;                      /* 块面/输入框 */
+    --fg: #1a1d23;
+    --muted: #6b7280;
+    --line: #e2e5ea;
+    --line2: #c9cfd8;
+    --accent: #2f6fed;
+    --sc: #8a919c;                       /* 状态色，JS 换：绿通/琥珀建立中/红断 */
+  }
+  * { box-sizing: border-box; }
+  body {
+    width: 324px; margin: 0; padding: 14px 16px 14px;
+    font: 13px/1.5 system-ui, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--fg); -webkit-font-smoothing: antialiased;
+  }
+
+  .head { display: flex; align-items: center; gap: 7px; margin-bottom: 14px; }
+  .head img { width: 16px; height: 16px; border-radius: 4px; }
+  .head h1 { font-size: 12px; font-weight: 600; margin: 0; flex: 1; letter-spacing: .6px; color: var(--muted); }
+  .ver { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+  /* ── 拓扑 ─────────────────────────────────────────── */
+  .topo { display: flex; align-items: flex-start; gap: 4px; }
+  .node { width: 64px; flex: none; text-align: center; }
+  .node .box {
+    width: 36px; height: 36px; margin: 0 auto 5px; border-radius: 9px;
+    display: grid; place-items: center;
+    background: var(--bg2); border: 1px solid var(--line);
+  }
+  .node svg { width: 18px; height: 18px; stroke: #4b5563; fill: none; stroke-width: 2;
+              stroke-linecap: round; stroke-linejoin: round; }
+  .node span { font-size: 11px; color: var(--muted); }
+  .node.lit .box { border-color: var(--sc); background: color-mix(in srgb, var(--sc) 10%, #fff); }
+  .node.lit svg { stroke: var(--sc); }
+  .node.dim { opacity: .45; }
+
+  /* 连线：打通的段 = 状态色短划匀速行进（数据流向）；断开段 = 灰色静止虚线 + ✕ */
+  .wire { flex: 1; height: 36px; position: relative; min-width: 24px; }
+  .wire::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 17px; height: 2px;
+    background: #dde1e7;
+  }
+  .wire.on::before {
+    background: repeating-linear-gradient(90deg, var(--sc) 0 6px, transparent 6px 12px);
+    animation: march 1.8s linear infinite;                                 /* 建立中：慢 */
+  }
+  body.live .wire.on::before { animation-duration: .9s; }                  /* 已连通：快 */
+  @keyframes march { from { background-position: 0 0 } to { background-position: 12px 0 } }
+  .wire.cut::before, .wire.dash::before {
+    background: repeating-linear-gradient(90deg, #b9c0ca 0 5px, transparent 5px 10px);
+  }
+  .brk {
+    position: absolute; top: 9px; left: 50%; transform: translateX(-50%);
+    width: 18px; height: 18px; border-radius: 50%; display: none; place-items: center;
+    background: var(--bg); border: 1px solid var(--sc);
+    font-size: 11px; line-height: 1; color: var(--sc); font-weight: 700;
+  }
+  .wire.cut .brk { display: grid; }
+
+  /* ── 状态 ─────────────────────────────────────────── */
+  .stateRow { display: flex; align-items: center; gap: 9px; margin-top: 14px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--sc); }
+  body.pending .dot { animation: breathe 1.2s ease-in-out infinite; }
+  @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .3 } }
+  .state { font-size: 16px; font-weight: 700; letter-spacing: .2px; flex: 1; }
+  #reconnect {
+    width: 30px; height: 30px; flex: none; display: grid; place-items: center;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: transparent; color: var(--muted); cursor: pointer;
+  }
+  #reconnect:hover { color: var(--fg); border-color: var(--line2); }
+  #reconnect:disabled { opacity: .45; cursor: default; }
+  #reconnect svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2;
+                   stroke-linecap: round; stroke-linejoin: round; }
+  .meta {
+    margin-top: 6px; font: 11.5px/1.5 ui-monospace, Consolas, monospace; color: #4b5563;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .note { margin-top: 4px; font-size: 12px; color: var(--sc); }
+
+  /* ── 模式 tab（始终可见）────────────────────────────── */
+  .tabs { display: flex; margin-top: 14px; border-bottom: 1px solid var(--line); }
+  .tab {
+    flex: 1; padding: 9px 0; border: 0; background: none; cursor: pointer;
+    font: 13px system-ui; font-weight: 600; color: var(--muted);
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  /* 当前实际生效的模式：tab 前亮一个状态色小点 */
+  .tab .live { width: 6px; height: 6px; border-radius: 50%; background: var(--sc); display: none; }
+  .tab.active .live { display: inline-block; }
+
+  /* ── 配置区 ───────────────────────────────────────── */
+  .pane { display: none; padding-top: 4px; }
+  .pane.on { display: block; }
+  label { display: block; font-size: 11px; font-weight: 600; color: var(--muted);
+          margin: 12px 0 5px; letter-spacing: .4px; }
+  input[type=text] {
+    width: 100%; padding: 9px 10px; border: 1px solid var(--line2); border-radius: 8px;
+    background: var(--bg); color: var(--fg); font: 12px ui-monospace, Consolas, monospace;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  input::placeholder { color: #9aa1ad; }
+  .row { display: flex; gap: 7px; }
+  .row input { flex: 1; min-width: 0; }
+  .btn {
+    padding: 9px 12px; border: 1px solid var(--line2); border-radius: 8px;
+    background: transparent; color: var(--fg); cursor: pointer;
+    font: 12px system-ui; font-weight: 600; white-space: nowrap;
+  }
+  .btn:hover { background: var(--bg2); }
+  .btn:active { transform: translateY(.5px); }
+  .hint { color: var(--muted); font-size: 11.5px; line-height: 1.55; margin: 7px 0 0; }
+  .hint code { font-family: ui-monospace, Consolas, monospace; color: #4b5563; }
+
+  #save {
+    width: 100%; margin-top: 13px; padding: 10px 0; border: 0; border-radius: 8px;
+    background: #1a1d23; color: #fff; cursor: pointer;
+    font: 13px system-ui; font-weight: 700;
+  }
+  #save:hover { background: #2a303c; }
+  #save:active { transform: translateY(.5px); }
+  #msg { font-size: 12px; color: var(--accent); min-height: 1.4em; margin-top: 8px; }
+  #msg.err { color: #d93025; }
 </style>
 </head>
 <body>
 <div class="head">
   <img src="icons/icon48.png" alt="">
-  <h1>Open Web Bridge</h1>
+  <h1>OPEN WEB BRIDGE</h1>
   <span class="ver" id="ver"></span>
 </div>
 
-<div class="card">
-  <div class="row">
-    <span id="dot" class="dot"></span>
-    <span id="state" class="state">查询中…</span>
-    <span id="mode" class="badge local">本地</span>
+<div class="topo">
+  <div class="node lit" id="nBrowser">
+    <div class="box">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="4" y="4" width="16" height="16" rx="2"></rect>
+        <path d="M4 8h16M8 4v4"></path>
+      </svg>
+    </div>
+    <span>浏览器</span>
   </div>
-  <div class="kv"><span class="label">目标</span><span id="target" class="val">—</span></div>
-  <div class="kv" id="tokenRow" style="display:none"><span class="label">Token</span><span id="token" class="val"></span></div>
+
+  <div class="wire" id="wireA"><span class="brk">✕</span></div>
+
+  <div class="node" id="nRelay">
+    <div class="box">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6.66 18C4.09 18 2 15.99 2 13.52s2.09-4.48 4.66-4.48c.39-1.76 1.79-3.2 3.67-3.78 1.88-.57 3.96-.19 5.45 1 1.49 1.19 2.16 3.01 1.77 4.77h.99c1.91 0 3.46 1.56 3.46 3.49S20.45 18 18.54 18H6.66z"></path>
+      </svg>
+    </div>
+    <span>中转</span>
+  </div>
+
+  <div class="wire" id="wireB"><span class="brk">✕</span></div>
+
+  <div class="node" id="nDaemon">
+    <div class="box">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3" y="4" width="18" height="8" rx="3"></rect>
+        <rect x="3" y="12" width="18" height="8" rx="3"></rect>
+        <path d="M7 8v.01M7 16v.01"></path>
+      </svg>
+    </div>
+    <span>daemon</span>
+  </div>
 </div>
 
-<div class="actions">
-  <button id="reconnect" class="primary">重新连接</button>
-  <button id="options">打开设置</button>
+<div class="stateRow">
+  <span class="dot"></span>
+  <span class="state" id="state">查询中…</span>
+  <button id="reconnect" type="button" title="重新连接">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M20 12a8 8 0 1 1-2.4-5.7"></path><path d="M20 4v4h-4"></path>
+    </svg>
+  </button>
 </div>
-<div class="hint" id="hint"></div>
+<div class="meta" id="target">—</div>
+<div class="note" id="note" style="display:none"></div>
+
+<div class="tabs" role="tablist">
+  <button class="tab" id="tabLocal" type="button" role="tab" aria-selected="true">
+    <span class="live"></span>本地
+  </button>
+  <button class="tab" id="tabRelay" type="button" role="tab" aria-selected="false">
+    <span class="live"></span>中转
+  </button>
+</div>
+
+<div id="paneLocal" class="pane on">
+  <label for="wsUrl">DAEMON 地址</label>
+  <input id="wsUrl" type="text" placeholder="ws://127.0.0.1:43917/ws">
+  <p class="hint">直连本机 daemon，留空用默认地址，一般无需改动。</p>
+</div>
+
+<div id="paneRelay" class="pane">
+  <label for="relayUrl">中转 URL</label>
+  <input id="relayUrl" type="text" placeholder="wss://owb-relay.你的子域.workers.dev">
+  <label for="relayToken">中转 TOKEN</label>
+  <div class="row">
+    <input id="relayToken" type="text" placeholder="与 daemon 端一致">
+    <button id="gen" class="btn" type="button">生成</button>
+    <button id="copy" class="btn" type="button">复制</button>
+  </div>
+  <p class="hint">Token 是远程控制你浏览器的唯一钥匙，需与 daemon 端环境变量 <code>OWB_RELAY_TOKEN</code> 完全一致，勿外泄。</p>
+</div>
+
+<button id="save" type="button">保存并重连</button>
+<div id="msg"></div>
 
 <script src="popup.js"></script>
 </body>

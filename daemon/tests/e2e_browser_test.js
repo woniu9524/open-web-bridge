@@ -10,7 +10,7 @@
  * 靶站：本地 http 服务器，页面带确定性计算函数 owbSign + fireRequest() 发 XHR。
  *
  * 自我端口隔离：挑空闲端口 spawn `node src/server.js`（OWB_PORT +
- * OWB_WORK_DIR=临时目录），扩展副本 ws.json 指向同一端口，跑完杀子进程。
+ * OWB_WORK_DIR=临时目录），扩展副本改写默认 wsUrl 指向同一端口，跑完杀子进程。
  *
  * 运行：cd daemon && node tests/e2e_browser_test.js
  */
@@ -29,7 +29,7 @@ const REPO = path.resolve(__dirname, "..", "..");
 const DAEMON_DIR = path.join(REPO, "daemon");
 const EXT_DIR = path.join(REPO, "extension");
 
-// e2e 用独立端口 + 扩展副本（ws.json 指向独立端口）：
+// e2e 用独立端口 + 扩展副本（改写副本默认 wsUrl 指向独立端口）：
 // 单扩展模型下，日常浏览器里已连接的扩展会与 headless 测试浏览器互相顶替
 // （REPLACED ping-pong 把进行中的 tool_call 打成 DISCONNECTED），必须隔离。
 
@@ -263,12 +263,18 @@ async function main() {
       return 1;
     }
 
-    // 3. headless Chrome + 扩展副本（ws.json 指向独立端口，防日常浏览器顶替）
+    // 3. headless Chrome + 扩展副本（改写副本 background.js 的默认地址指向
+    //    独立端口，防日常浏览器顶替；副本 storage 为空，默认地址即生效地址）
     const extCopy = path.join(tmpdir, "ext");
     fs.cpSync(EXT_DIR, extCopy, { recursive: true });
-    fs.writeFileSync(path.join(extCopy, "ws.json"), jstr({
-      wsUrl: `ws://${HOST}:${e2ePort}/ws`,
-    }), "utf8");
+    const bgPath = path.join(extCopy, "background.js");
+    const bgSrc = fs.readFileSync(bgPath, "utf8");
+    const bgPatched = bgSrc.replace(
+      /wsUrl: "ws:\/\/127\.0\.0\.1:\d+\/ws"/,
+      `wsUrl: "ws://${HOST}:${e2ePort}/ws"`,
+    );
+    if (bgPatched === bgSrc) throw new Error("e2e: 未找到扩展默认 wsUrl，无法改写端口");
+    fs.writeFileSync(bgPath, bgPatched, "utf8");
     chromeProc = spawn(chrome, [
       "--headless=new", "--disable-gpu", "--mute-audio",
       "--no-first-run", "--no-default-browser-check",
