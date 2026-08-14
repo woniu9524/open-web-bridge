@@ -2068,10 +2068,24 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
   // 于是可见性过滤把整页元素丢光，快照静默返回空。记下被过滤数，
   // 让扩展侧能区分"页面真没东西"和"页面没渲染"。
   let skippedNoRect = 0;
+  // BUG-79: 用户装的其他扩展会往页面注入悬浮工具栏（翻译、收藏、划词……），
+  // 这些元素混进快照后 AI 会当成页面功能去点。实测澎湃 403 页上「页面元素」
+  // 全是某翻译扩展的按钮（图片翻译/语音翻译/快捷设置）。按注入宿主容器识别
+  // 并整棵剔除：Plasmo/CRXJS 等主流扩展框架都用自定义元素挂载。
+  let extensionUi = 0;
+  const isExtensionInjected = (el) => {
+    for (let n = el; n && n !== document.documentElement; n = n.parentElement || (n.getRootNode && n.getRootNode().host)) {
+      const tag = n.tagName || "";
+      if (tag.startsWith("PLASMO-") || tag.startsWith("CRX-") ||
+          (n.id && /^(plasmo|crx|__)[-_]/i.test(n.id))) return true;
+    }
+    return false;
+  };
   for (const el of els) {
     if (nodes.length >= ${maxNodes}) { truncated = true; break; }
     const rect = el.getBoundingClientRect(); // 无布局盒 = 不可见，跳过
     if (!rect || !(rect.width > 0 && rect.height > 0)) { skippedNoRect++; continue; }
+    if (isExtensionInjected(el)) { extensionUi++; continue; }
     const role = roleOf(el);
     const name = nameOf(el);
     let ref = null;
@@ -2118,7 +2132,7 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     .filter((f) => f.src || f.name).slice(0, 20);
   return { url: location.href, title: document.title, nodes,
     nextRef: next, refsAssigned: assigned, truncated,
-    shadowRoots, iframes, skippedNoRect, candidates: els.length };
+    shadowRoots, iframes, skippedNoRect, extensionUi, candidates: els.length };
 })()`;
 
 // article 的页面内提取器：简化 readability——候选根按 <p> 文本总长评分取最优，
@@ -2417,6 +2431,7 @@ const tools = {
     // show the requested URL, so also check location.href in-page.
     let isChromeError = tab.url && tab.url.startsWith("chrome-error://");
     let errorCode = null;
+    let httpErrorHint = null;
     if (!isChromeError) {
       // BUG-75: 这段探测原来直接 cdpCall，而 navigate 全程没 ensureAttached ——
       // 未附着时 Runtime.evaluate 必抛，异常又被 catch 吞掉，于是错误页检测
@@ -2429,7 +2444,9 @@ const tools = {
           expression:
             '(()=>{const e=document.querySelector("#main-frame-error");' +
             'return JSON.stringify({h:location.href,err:e?' +
-            '((document.querySelector(".error-code")||{}).textContent||"").trim():null})})()',
+            '((document.querySelector(".error-code")||{}).textContent||"").trim():null,' +
+            't:(document.title||"").slice(0,80),' +
+            'len:(document.body?document.body.innerText.trim().length:0)})})()',
           returnByValue: true,
         });
         const probe = JSON.parse((evRes.result && evRes.result.value) || "{}");
@@ -2439,6 +2456,21 @@ const tools = {
         ) {
           isChromeError = true;
           errorCode = probe.err || null;
+        } else {
+          // BUG-78: 服务端返回的 4xx/5xx 错误页是「正常加载」的——没有
+          // chrome-error://，页面就是服务器给的那段错误正文。实测澎湃新闻
+          // 直接回 403（body 仅 "403 Forbidden Zen/4.3"），而 navigate 照样
+          // 报 loadCompleted:true，AI 完全看不出自己被拒了，只会对着一份
+          // 几乎空的快照困惑。这里用「标题像 HTTP 错误 + 正文极短」识别，
+          // 只提示不拦截（有站点的 404 页做得很丰富，不该误判）。
+          const m = /^\s*(\d{3})\s|^(40[0-9]|41[0-9]|42[0-9]|43[0-9]|44[0-9]|50[0-9])\b/.exec(probe.t || "");
+          const code = m ? m[1] || m[2] : null;
+          if (code && Number(code) >= 400 && (probe.len || 0) < 200) {
+            httpErrorHint =
+              `page loaded but looks like an HTTP ${code} error page ` +
+              `(title="${probe.t}", body only ${probe.len} chars) — ` +
+              "the site likely blocked or rejected this request";
+          }
         }
       } catch (e) {}
     }
@@ -2477,6 +2509,9 @@ const tools = {
         "raise timeout_ms, or call wait_for {network_idle:true} / " +
         "wait_for {selector} before interacting";
     }
+    // BUG-78: 服务端 4xx/5xx 是「加载成功」的错误页，不拦截但必须说破，
+    // 否则 AI 只会看到一份空快照而误判成「这页没内容」。
+    if (httpErrorHint) out.httpErrorHint = httpErrorHint;
     return out;
   },
 
@@ -4373,6 +4408,8 @@ const tools = {
       refsAssigned: v.refsAssigned,
       // BUG-72: 空快照/渲染异常时说明原因，不让 AI 面对无解释的空结果
       renderNote: renderNote || undefined,
+      // BUG-79: 剔除了多少个「其他扩展注入的悬浮 UI」元素
+      extensionUiHidden: v.extensionUi || undefined,
       // UX-214: 快照里有多少内容来自 shadow DOM（0 = 该页没用 Web Component）
       shadowRoots: v.shadowRoots || undefined,
       // UX-100: iframe 的存在必须让 AI 知道，否则找不到的元素永远找不到
