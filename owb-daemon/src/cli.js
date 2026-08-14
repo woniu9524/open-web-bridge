@@ -363,30 +363,54 @@ function saveBinary(toolName, data, cli) {
   return { ...rest, savedTo: path.resolve(out), bytes: buf.length };
 }
 
+// 同一份内容被返回多次时，只留最可读的那一份。read_page 实测：
+// lines(20KB) + text(lines 的别名，20KB) + nodes(结构化重复，66KB) = 108KB，
+// 真实信息量只有 20KB。不去冗余就会触发下面的截断护栏，
+// 而截断又偏偏砍掉最该保留的 lines —— 先瘦身再判大小，顺序很重要。
+function dropRedundant(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+  const out = { ...data };
+  if (typeof out.lines === "string") {
+    if (out.text === out.lines) delete out.text;
+    // nodes[].line 逐条重复 lines 的内容；ref/role/name 也都已在行里
+    if (Array.isArray(out.nodes) && out.nodes.length) {
+      out._nodesOmitted = out.nodes.length;
+      delete out.nodes;
+    }
+  } else if (typeof out.content === "string" && out.text === out.content) {
+    delete out.text; // article 模式：content 与 text 同值
+  }
+  return out;
+}
+
 function shapeForAgent(toolName, data, cli) {
   if (!data || typeof data !== "object") return data;
   if (BINARY_TOOLS[toolName] && typeof data[BINARY_TOOLS[toolName].field] === "string") {
     return saveBinary(toolName, data, cli);
   }
-  const json = JSON.stringify(data);
-  if (json.length <= MAX_STDOUT_BYTES) return data;
-  // 超限：保留结构，把最长的字符串字段截掉并说明怎么拿全量
-  const out = {};
-  let clipped = null;
-  for (const [k, v] of Object.entries(data)) {
-    if (typeof v === "string" && v.length > 4000) {
-      out[k] = v.slice(0, 4000);
-      clipped = clipped || [];
-      clipped.push(`${k} (${v.length} chars → 4000)`);
-    } else {
-      out[k] = v;
+  const slim = dropRedundant(data);
+  const json = JSON.stringify(slim);
+  if (json.length <= MAX_STDOUT_BYTES) return slim;
+  // 仍然超限：从**最大**的字符串字段开始砍，并给它保留尽可能多的额度，
+  // 而不是一刀切把每个长字段都砍到同一个小值。
+  const out = { ...slim };
+  const strFields = Object.entries(slim)
+    .filter(([, v]) => typeof v === "string" && v.length > 2000)
+    .sort((a, b) => b[1].length - a[1].length);
+  const clipped = [];
+  for (const [k, v] of strFields) {
+    if (JSON.stringify(out).length <= MAX_STDOUT_BYTES) break;
+    const others = JSON.stringify({ ...out, [k]: "" }).length;
+    const budget = Math.max(2000, MAX_STDOUT_BYTES - others - 200);
+    if (v.length > budget) {
+      out[k] = v.slice(0, budget);
+      clipped.push(`${k} (${v.length} → ${budget} chars)`);
     }
   }
-  if (clipped) {
+  if (clipped.length) {
     out._clipped = clipped;
     out._hint =
-      "输出过大已截断。要全量：加 --out <文件> 落盘，或用 --max-chars/--max-nodes 缩小范围，" +
-      "或 --raw 拿原始信封自行处理。";
+      "输出过大已截断。要全量：--max-chars/--max-nodes 缩小范围，或 --raw 拿原始信封。";
   }
   return out;
 }
