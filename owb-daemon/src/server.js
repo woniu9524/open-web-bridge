@@ -417,7 +417,17 @@ export class Bridge {
       if (this.pending.delete(rid)) {
         resolveP({ ok: false,
                    error: { code: "TIMEOUT",
-                            message: `tool ${name} timed out`, retryable: true } });
+                            // BUG-91: 原文案只说「timed out」，不说等了多久、
+                            // 也不说是哪一层的超时，AI 无法判断该加时间还是放弃。
+                            // 实测和风天气给到 120 秒仍超时——需要这些信息才能
+                            // 得出「这站就是打不开」而不是继续加码重试。
+                            message:
+                              `tool ${name} did not respond within ${timeout}s ` +
+                              "(daemon-side wait). Either the page is genuinely " +
+                              "that slow/unreachable, or the extension is stuck — " +
+                              "raise the call timeout once; if it times out again " +
+                              "at a higher value, the site is the problem, not the timeout",
+                            retryable: true } });
       }
     }, timeout * 1000);
     const payload = await p;
