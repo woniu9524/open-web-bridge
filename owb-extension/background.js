@@ -1580,8 +1580,15 @@ const CDP_ERROR_RULES = [
     "saturated (heavy JS, or the page is still loading) — call " +
     "wait_for {network_idle:true} and retry. Other causes: the page is paused " +
     "at a breakpoint (call resume), or blocked by a modal dialog"],
-  [/no tab with given id|no target with given id|tab was closed|no tab found/i,
-    "NO_TAB", false, "call list_tabs for live tabIds"],
+  // BUG-89: Chrome 这条错误有两种措辞——chrome.debugger 报 "No tab with given
+  // id"，chrome.tabs 报 "No tab with id: <n>"。原正则只覆盖前者，后者落到
+  // INTERNAL（可重试），AI 会对着一个已经不存在的 tab 反复重试。
+  // 实测：标签管理类扩展批量收纳标签页时即触发（虎嗅一轮就这么失败的）。
+  [/no tab with (given )?id|no target with given id|tab was closed|no tab found/i,
+    "NO_TAB", false,
+    "that tab no longer exists (it was closed — tab-manager extensions like " +
+    "OneTab close tabs in bulk). Call list_tabs for live tabIds, or re-open " +
+    "the URL in a new tab"],
   [/cannot access|cannot be debugged|chrome:\/\/|extensions gallery|devtools:\/\//i,
     "FORBIDDEN", false,
     // BUG-83: 实地测试里这个错误反复出现在「明明是 https 页面」的 tab 上。

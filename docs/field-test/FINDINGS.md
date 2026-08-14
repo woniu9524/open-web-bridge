@@ -420,3 +420,19 @@ navigate 照报 `loadCompleted:true`，AI 直到下一步 `read_page` 才撞墙�
 **这类问题的通用形态**：宽松透传参数的工具，参数名写错时会静默走默认路径。
 本项目其他工具多数有必填校验（缺 url/expression/name 会报错），oracle_call
 的所有参数都是可选的，才暴露出来。
+
+### BUG-89 · 「标签页已关闭」被归为可重试的 INTERNAL 🟡 低影响
+
+**现象**：虎嗅在第四轮失败，报 `INTERNAL: No tab with id: 612680141.（可重试）`。
+AI 会对着一个**已经不存在**的标签页反复重试。
+
+**根因**：Chrome 这条错误有两种措辞——`chrome.debugger` 报
+`No tab with given id`，`chrome.tabs` 报 `No tab with id: <n>`。错误映射的正则
+只覆盖了前者，后者落到兜底的 INTERNAL 且被标为可重试。
+
+**触发场景**：标签管理类扩展（OneTab）批量收纳标签页时会把它们关掉，
+正在其上操作的调用就会撞到这个错误。
+
+**修复**：正则改为 `no tab with (given )?id` 覆盖两种措辞，并把成因
+（可能被标签管理扩展关掉了）与动作（`list_tabs` 查存活 tab，或新标签页重开）
+写进错误信息。
