@@ -206,24 +206,36 @@ export function harAssert(har, assertions) {
         r.ok = !entries.some((e) => re.test(e.request.url));
         r.detail = r.ok ? "absent as expected" : "unexpectedly present";
       } else if (a.type === "response_status") {
+        // BUG-27/UX-57: 断言字段名从未文档化，AI 按直觉传 code/expected 会
+        // 静默变成 Number(undefined)=NaN → 永远 false。三个名字都收。
+        const want = a.status ?? a.code ?? a.expected;
         const re = new RegExp(a.url_pattern);
         const e = entries.find((x) => re.test(x.request.url));
-        if (!e) { r.detail = "no matching request"; }
-        else { r.ok = e.response.status === Number(a.status); r.detail = `got ${e.response.status}`; }
+        if (want === undefined) {
+          r.detail = "response_status needs a status field (HTTP status number)";
+        } else if (!e) { r.detail = "no matching request"; }
+        else { r.ok = e.response.status === Number(want); r.detail = `got ${e.response.status}`; }
       } else if (a.type === "response_contains") {
+        // BUG-27: value / text / contains 同义
+        const want = a.value ?? a.text ?? a.contains;
         const re = new RegExp(a.url_pattern);
         const e = entries.find((x) => re.test(x.request.url));
-        if (!e) { r.detail = "no matching request"; }
+        if (want === undefined) {
+          r.detail = "response_contains needs a value field (substring to look for)";
+        } else if (!e) { r.detail = "no matching request"; }
         else {
           const text = e.response.content.text || "";
-          r.ok = text.includes(String(a.value));
+          r.ok = text.includes(String(want));
           r.detail = r.ok ? "found" : "not found in body";
         }
       } else if (a.type === "min_requests") {
-        r.ok = entries.length >= Number(a.count || 0);
+        // BUG-26: count / min 同义
+        r.ok = entries.length >= Number(a.count ?? a.min ?? 0);
         r.detail = `${entries.length} requests`;
       } else {
-        r.detail = `unknown assertion type: ${a.type}`;
+        // UX-68: 报错带合法值
+        r.detail = `unknown assertion type: ${a.type} (valid: ` +
+          "request_exists|request_absent|response_status|response_contains|min_requests)";
       }
     } catch (e) {
       r.detail = String(e && e.message ? e.message : e);
@@ -231,5 +243,11 @@ export function harAssert(har, assertions) {
     if (r.ok) passed++; else failed++;
     results.push(r);
   }
-  return { passed, failed, results, pass_rate: assertions && assertions.length ? passed / assertions.length : 1 };
+  // 工具级 ok 只说明"校验执行了"。判定放在 data.ok 上，一眼可见，
+  // 免得 AI 只看外层 ok 就当成全部通过（failed 藏在深处容易被略过）。
+  return {
+    ok: failed === 0,
+    passed, failed, results,
+    pass_rate: assertions && assertions.length ? passed / assertions.length : 1,
+  };
 }

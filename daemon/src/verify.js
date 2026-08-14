@@ -43,6 +43,43 @@ function evalSigner(signerCode) {
 }
 
 /**
+ * UX-109 dry-run：只跑不对拍。calls: [{args:[...]}]。
+ *
+ * 没有 expected 就没有对拍基准——拿函数自己的输出当 expected 等于自己跟自己比，
+ * 必然 pass，是假成功。所以这里不产 pass_rate，只把算出来的值交回给调用方看。
+ */
+export function dry_run_signer(signer_code, calls) {
+  let probe;
+  try {
+    probe = evalSigner(signer_code);
+  } catch (e) {
+    return { ok: false, error: "signer_code eval failed: " + e.message };
+  }
+  if (typeof probe !== "function") {
+    return { ok: false, error: "signer_code did not evaluate to a function, got " + typeof probe };
+  }
+  const results = (calls || []).map((c, i) => {
+    const id = (c && c.id) || `call-${i}`;
+    const argv = Array.isArray(c && c.args) ? c.args : [c && c.args];
+    try {
+      const fn = evalSigner(signer_code);
+      const computed = fn(...argv);
+      return { id, ok: true, computed: computed === undefined ? null : computed };
+    } catch (e) {
+      return { id, ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  });
+  return {
+    ok: results.every((r) => r.ok),
+    mode: "dry_run",
+    total: results.length,
+    results,
+    hint: "dry_run computes outputs only — no expected values to compare against. " +
+      "Pass samples: [{id, input, expected}] (expected from oracle_call) to get pass_rate.",
+  };
+}
+
+/**
  * 离线验证提取出的函数。samples: [{id, input, expected}]
  * signer_code 必须求值为函数 (sampleInput) => {param: value}
  * 每个样本在独立 vm 上下文中执行。

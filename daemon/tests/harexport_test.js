@@ -104,4 +104,29 @@ check("assert passed count", r.passed === 5);
 check("assert failed count", r.failed === 3);
 check("assert pass_rate", r.pass_rate === 5 / 8);
 
+// ---- BUG-26/BUG-27/UX-57: 断言字段别名（AI 按直觉传的名字也认） ----
+const alias = harAssert(aHar, [
+  { type: "response_status", url_pattern: "/data", code: 200 },      // status 别名
+  { type: "response_status", url_pattern: "/data", expected: 200 },  // status 别名
+  { type: "response_contains", url_pattern: "/data", text: '"ok":1' }, // value 别名
+  { type: "response_contains", url_pattern: "/data", contains: '"ok":1' },
+  { type: "min_requests", min: 2 },                                  // count 别名
+]);
+check("alias fields all pass", alias.passed === 5 && alias.failed === 0);
+
+// 缺字段不能被 Number(undefined)=NaN 悄悄判成 false —— 要说清缺什么
+const missing = harAssert(aHar, [
+  { type: "response_status", url_pattern: "/data" },
+  { type: "response_contains", url_pattern: "/data" },
+]);
+check("missing status field explains itself",
+  !missing.results[0].ok && /needs a status field/.test(missing.results[0].detail));
+check("missing value field explains itself",
+  !missing.results[1].ok && /needs a value field/.test(missing.results[1].detail));
+
+// UX-68: 未知断言类型要给出合法值
+const unknown = harAssert(aHar, [{ type: "no_such_assert" }]);
+check("unknown assertion type lists valid ones",
+  /valid: request_exists\|/.test(unknown.results[0].detail));
+
 summarize();

@@ -314,7 +314,7 @@ async function main() {
       `${firedSig} vs ${EXPECTED_SIG}`);
     await sleep(500);
     res = await ctl.call("network_list", { url_pattern: "/api/data" });
-    const items = res.data || [];
+    const items = (res.data || {}).requests || [];
     check("network_list 捕获 /api/data",
       items.length > 0 && items[0].status === 200,
       jstr(items));
@@ -509,14 +509,14 @@ async function main() {
     check("navigate new_tab 自动编组", !!gid && !!newTid,
       jstr(res).slice(0, 200));
     res = await ctl.call("list_tabs", {});
-    const grouped = (res.data || []).filter((t) => t.group === "OWB 分析");
+    const grouped = ((res.data || {}).tabs || []).filter((t) => t.group === "OWB 分析");
     check("list_tabs 可见 OWB 分组",
       grouped.some((t) => t.tabId === newTid),
       jstr(grouped).slice(0, 200));
     res = await ctl.call("close_group", {});
     const closed = (res.data || {}).closed || 0;
     const res3 = await ctl.call("list_tabs", {});
-    const still = (res3.data || []).filter((t) => t.tabId === newTid);
+    const still = ((res3.data || {}).tabs || []).filter((t) => t.tabId === newTid);
     check("close_group 清场", closed >= 1 && still.length === 0, `closed=${closed}`);
 
     // 20. wait_for / read_page（稳定 ref）/ ref 操作 / task_context
@@ -586,7 +586,7 @@ async function main() {
     res = await ctl.call("navigate", { url: pageUrl, new_tab: true });
     const taskTid = (res.data || {}).tabId;
     res = await ctl.call("list_tabs", {});
-    const grp = (res.data || []).find((t) => t.tabId === taskTid) || {};
+    const grp = ((res.data || {}).tabs || []).find((t) => t.tabId === taskTid) || {};
     check("navigate new_tab 入 task 组",
       grp.group === "task: e2e任务",
       jstr(grp).slice(0, 200));
@@ -599,7 +599,7 @@ async function main() {
     res = await ctl.call("navigate", { url: pageUrl, new_tab: true });
     const taskTid2 = (res.data || {}).tabId;
     res = await ctl.call("list_tabs", {});
-    const grp2 = (res.data || []).find((t) => t.tabId === taskTid2) || {};
+    const grp2 = ((res.data || {}).tabs || []).find((t) => t.tabId === taskTid2) || {};
     check("clear 后 navigate 回 OWB 组", grp2.group === "OWB 分析",
       jstr(grp2).slice(0, 200));
     for (const tid of [taskTid, taskTid2]) {  // 清场，别留在用户浏览器里
@@ -647,7 +647,7 @@ async function main() {
       res.ok && ho.handedOff === true && !!ho.url,
       jstr(res).slice(0, 200));
     res = await ctl.call("list_tabs", {});
-    const hgrp = (res.data || []).find((t) => t.tabId === v5Tid) || {};
+    const hgrp = ((res.data || {}).tabs || []).find((t) => t.tabId === v5Tid) || {};
     check("handoff tab 入「等你操作」组",
       (hgrp.group || "").includes("等你操作"),
       jstr(hgrp).slice(0, 200));
@@ -678,7 +678,7 @@ async function main() {
       && (wu.url || "").includes("tookover=1"),
       jstr(res).slice(0, 250));
     res = await ctl.call("list_tabs", {});
-    const hgrp2 = (res.data || []).find((t) => t.tabId === v5Tid) || {};
+    const hgrp2 = ((res.data || {}).tabs || []).find((t) => t.tabId === v5Tid) || {};
     check("wait_user 命中后 tab 出组（clear）",
       !hgrp2.group,
       jstr(hgrp2).slice(0, 200));

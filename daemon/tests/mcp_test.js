@@ -2,7 +2,7 @@
  * MCP 接入面冒烟测试：stdio 拉起真 mcp_server + 真 daemon 子进程。
  *
  * 覆盖：
- *   1. initialize + list_tools：76 个工具，daemon_* 命名映射在列
+ *   1. initialize + list_tools：79 个工具，daemon_* 命名映射在列
  *   2. call daemon_status → ok（daemon 本地工具不经浏览器，无需扩展）
  *   3. call 未知工具 → UNKNOWN_TOOL 错误模型
  *   4. call status → 转发到扩展通道（扩展未连时 NO_EXTENSION，连着时 ok；两者都算链路通）
@@ -64,7 +64,7 @@ async function main() {
 
     const tools = (await client.listTools()).tools;
     const names = new Set(tools.map((t) => t.name));
-    check("list_tools 76 个", tools.length === 76, `count=${tools.length}`);
+    check("list_tools 79 个", tools.length === 79, `count=${tools.length}`);
     check("daemon_* 命名映射",
       names.has("daemon_status") && names.has("daemon_replay")
       && names.has("status") && names.has("oracle_call"));

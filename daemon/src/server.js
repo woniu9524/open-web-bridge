@@ -21,7 +21,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 
 import { EvidenceStore } from "./evidence.js";
-import { verify_signer } from "./verify.js";
+import { verify_signer, dry_run_signer } from "./verify.js";
 import { replay } from "./replay.js";
 import { harToReplay, harDiff, harAssert } from "./harexport.js";
 
@@ -44,6 +44,40 @@ const MAX_PAYLOAD = 64 * 1024 * 1024;
 export const OWB_RELAY_URL = process.env.OWB_RELAY_URL || "";
 export const OWB_RELAY_TOKEN = process.env.OWB_RELAY_TOKEN || "";
 
+// UX-85: call_local 支持的 daemon 侧工具名（call_tool 用它给不带前缀的调用
+// 报出可操作的错误）。EXT_ONLY_OVERLAP 是两侧同名的工具——不带前缀时按老规矩
+// 转发给扩展，语义不变。
+const DAEMON_LOCAL_TOOLS = new Set([
+  "status", "hook_logs", "verify_signer", "replay", "evidence_write",
+  "task_begin", "task_end", "task_list", "workflow_save", "workflow_run",
+  "workflow_list", "state_save", "state_load", "state_list", "state_delete",
+  "har_save", "download", "har_to_replay", "har_diff", "har_assert",
+]);
+const EXT_ONLY_OVERLAP = new Set(["status", "download"]);
+
+/**
+ * UX-204: HAR 工具的 har 参数收到 JSON 字符串时会一路走到 har.log.entries →
+ * undefined → entries=[]，断言全过、diff 全空 —— 静默的假成功。这里统一把
+ * 字符串解析回对象，解析不了就明确报错。
+ */
+function coerceHar(v, label = "har") {
+  if (v && typeof v === "object") return v;
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s.startsWith("{")) return null; // 交给调用方按 path 处理
+    try {
+      return JSON.parse(s);
+    } catch (e) {
+      const err = new Error(
+        `${label}: value looks like JSON but failed to parse (${e.message})`,
+      );
+      err.owbCode = "BAD_HAR";
+      throw err;
+    }
+  }
+  return null;
+}
+
 // ---- 安全（Host + Origin 校验防 DNS rebinding / CSRF）----
 // 本地信任模型：仅绑定 127.0.0.1，不做 token 认证（同机任意进程可连）。
 // Host/Origin 是两层防线中的第二层：防网页经 DNS rebinding 打本机 daemon。
@@ -52,8 +86,16 @@ export const OWB_RELAY_TOKEN = process.env.OWB_RELAY_TOKEN || "";
 
 /** 工作流/会话库文件名 slug：小写、非字母数字转 -、截 40。 */
 function _slug(name) {
-  return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "").slice(0, 40);
+  const raw = String(name || "").toLowerCase();
+  // BUG-5: preserve trailing extension (e.g. .har) so "my_analysis.har"
+  // doesn't become "my-analysis-har.har" with double extension.
+  const extMatch = raw.match(/\.([a-z0-9]+)$/);
+  const ext = extMatch ? extMatch[0] : "";
+  const base = (ext ? raw.slice(0, -ext.length) : raw)
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return base + (base && ext ? ext : "");
 }
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -252,10 +294,15 @@ export class Bridge {
   // ---- 控制器通道 ----
 
   handleController(ws) {
-    // 每连接串行处理：上一个 call 处理完才读下一条
-    let queue = Promise.resolve();
+    // UX-51: 原来是 Promise 链串行队列 —— 一条 wait_user（最长 280s）会把
+    // 这个连接上后续【所有】工具调用堵到它超时为止：AI 在等用户操作期间既
+    // 不能截图也不能读页，更别提操作另一个 tab。
+    //
+    // 现在并发处理。安全性来源：每条 call 自带 id，结果按 id 回；pending 是
+    // Map<requestId>；扩展侧 SW 本来就并发处理消息。需要顺序的场景（如
+    // task_begin 必须在录制前）由调用方自己 await，与串行队列时行为一致。
     ws.on("message", (data) => {
-      queue = queue
+      Promise.resolve()
         .then(() => this._onControllerMessage(ws, data.toString()))
         .catch((e) => {
           // 单条消息处理出错保底不崩 daemon 进程
@@ -330,6 +377,16 @@ export class Bridge {
   // ---- 工具路由 ----
 
   async call_tool(name, args, timeout = 30.0) {
+    // UX-85: daemon 侧工具必须带 daemon. 前缀走 call_local；不带前缀会被转发到
+    // 扩展并撞 UNKNOWN_TOOL，AI 无从知道该加前缀。这里在错误里直接给出正确名字。
+    // 注意不能自动改路由：status / download 两侧同名，语义不同。
+    if (DAEMON_LOCAL_TOOLS.has(name) && !EXT_ONLY_OVERLAP.has(name)) {
+      return { ok: false, error: {
+        code: "UNKNOWN_TOOL",
+        message: `${name} is a daemon-side tool; call it as "daemon.${name}" ` +
+                 `(MCP name: daemon_${name})`,
+        retryable: false } };
+    }
     if (this.extension === null) {
       return { ok: false,
                error: { code: "NO_EXTENSION",
@@ -474,29 +531,93 @@ export class Bridge {
     }
     if (name === "hook_logs") {
       // hook_logs 取证：从事件 ring buffer 查 hook 命中
-      const source = args.source; // 精确源名，默认全部 hook:* 事件
-      const since = Math.trunc(Number(args.since_seq || 0)) || 0;
+      const source = args.source; // 源名，默认全部 hook:* 事件
+      // UX-212: 参数名是 since_seq，AI 惯性写 since —— 原来静默忽略，
+      // 返回全量历史，看着像"过滤没生效"。
+      const since = Math.trunc(Number(args.since_seq ?? args.since ?? 0)) || 0;
       const limit = Math.min(Math.trunc(Number(args.limit || 100)) || 0, 500);
+      // UX-211: ring buffer 是全局的，多 tab 同时挂 hook 时事件混在一起，
+      // AI 拿到别的 tab 的事件当成本 tab 的。
+      const tabId = args.tabId != null ? Number(args.tabId) : null;
       const out = [];
+      let otherTabs = 0;
       for (const rec of this.event_buffer) {
         if (rec.seq <= since) continue;
         const src = rec.source || "";
         if (source) {
-          if (src !== source) continue;
+          // UX-114: source:"hook" 这种前缀写法原来一条都匹配不到（严格相等）
+          if (src !== source && !src.startsWith(source + ":")) continue;
         } else if (!src.startsWith("hook:")) {
           continue;
+        }
+        if (tabId != null) {
+          const evTab = rec.data && rec.data.tabId;
+          if (evTab != null && Number(evTab) !== tabId) { otherTabs++; continue; }
         }
         out.push(rec);
         if (out.length >= limit) break;
       }
-      return { ok: true, data: { events: out, count: out.length,
-                                 event_seq: this.event_seq } };
+      return { ok: true, data: {
+        events: out,          // 字段名是 events，不是 logs（UX-95）
+        count: out.length,
+        event_seq: this.event_seq,
+        filtered_other_tabs: otherTabs || undefined,
+      } };
+    }
+    // UX-186: 会话库只能存/读/列，删不掉 —— 过期登录态只能手工去 work/ 下删
+    if (name === "state_delete") {
+      if (!args.name) {
+        return { ok: false, error: {
+          code: "BAD_ARGS", message: "state_delete: name is required",
+          retryable: false } };
+      }
+      const slug = _slug(args.name);
+      const p = this.store._abs(`states/${slug}.json`);
+      if (!fs.existsSync(p)) {
+        return { ok: false, error: {
+          code: "NOT_FOUND", message: `state not found: ${slug}`,
+          retryable: false } };
+      }
+      fs.unlinkSync(p);
+      return { ok: true, data: { name: slug, deleted: true } };
     }
     if (name === "verify_signer") {
-      const out = verify_signer(args.signer_code || "", args.samples || []);
+      // BUG-28/BUG-45: MCP 描述写的是 source/calls，实现读的是 signer_code/samples。
+      // 两套名字都收——AI 照文档传参不该必然失败。
+      const code = args.signer_code || args.source || "";
+      if (!code) {
+        return { ok: false, error: {
+          code: "BAD_ARGS",
+          // UX-55: 裸 function 声明求值为 undefined，这一点必须写进错误里
+          message: "verify_signer: source (or signer_code) is required — " +
+                   "JS that evaluates to a function, e.g. \"(input) => ({sig: ...})\"; " +
+                   "a bare function declaration evaluates to undefined, wrap it in parens",
+          retryable: false } };
+      }
+      const samples = args.samples || [];
+      // UX-109: 只给 calls（没有 expected）时走 dry-run，把算出来的值交回去；
+      // 不伪造 expected 来凑 pass_rate（自己跟自己比必然通过 = 假成功）。
+      if (!samples.length && Array.isArray(args.calls) && args.calls.length) {
+        const out = dry_run_signer(code, args.calls);
+        if ("error" in out) {
+          return { ok: false, error: {
+            code: "VERIFY_FAILED", message: out.error, retryable: false } };
+        }
+        return { ok: true, data: out };
+      }
+      const out = verify_signer(code, samples);
       if ("error" in out && !("results" in out)) {
         return { ok: false, error: {
           code: "VERIFY_FAILED", message: out.error, retryable: false } };
+      }
+      // UX-56: 全部样本对拍失败还 ok=true 是误导——AI 会当成验证通过。
+      if (out.pass_rate === 0 && out.results && out.results.length > 0) {
+        return { ok: false, error: {
+          code: "VERIFY_FAILED",
+          message: `all ${out.results.length} samples failed (pass_rate=0); ` +
+                   "see data.results[].first_divergence for the byte offset",
+          data: out,
+          retryable: false } };
       }
       return { ok: true, data: out };
     }
@@ -624,8 +745,9 @@ export class Bridge {
       if (!taskId) {
         return { ok: false, error: {
           code: "NEED_TASK",
-          message: "workflow_save 需要 task_id 或活动任务" +
-                   "（先 task_begin 包住要固化的流程）",
+          // UX-67/UX-208: 统一英文错误消息
+          message: "workflow_save needs task_id or an active task " +
+                   "(call task_begin first to wrap the flow you want to save)",
           retryable: false } };
       }
       const metaPath = this.store._abs(`tasks/${taskId}/task.json`);
@@ -709,9 +831,28 @@ export class Bridge {
         results.push(rec);
         if (!ok && !continueOnError) break; // 默认首败即停
       }
-      // 整体 ok=true：步骤失败信息在 results/failed 里，不算调用级错误
-      return { ok: true, data: { name: slug, ran: results.length,
-                                 passed, failed, results } };
+      // 整体 ok=true：步骤失败信息在 results/failed 里，不算调用级错误。
+      // UX-156/157: 但 AI 只看外层 ok 就会以为重放成功了 —— 把判定放到
+      // data.ok，并在没跑完时说清楚为什么停、下一步怎么办。
+      const total = steps.length;
+      return { ok: true, data: {
+        ok: failed === 0,
+        name: slug,
+        ran: results.length,
+        total,
+        passed,
+        failed,
+        results,
+        _hint: failed
+          ? (!continueOnError && results.length < total
+              ? `stopped at step ${results.length}/${total} (first failure); ` +
+                "pass continue_on_error:true to run the rest. "
+              : "") +
+            "REF_STALE failures mean the workflow recorded @eN refs that no " +
+            "longer exist — re-record with selectors, or re-run read_page " +
+            "before replay"
+          : undefined,
+      } };
     }
     if (name === "workflow_list") {
       const out = [];
@@ -842,7 +983,10 @@ export class Bridge {
     }
     // ---- C7: HAR → 重放脚本（python/curl/node）----
     if (name === "har_to_replay") {
-      let har = args.har;
+      let har;
+      try { har = coerceHar(args.har); }
+      catch (e) { return { ok: false, error: {
+        code: e.owbCode || "BAD_HAR", message: e.message, retryable: false } }; }
       if (!har && args.path) {
         const abs = this.store._abs(args.path);
         if (!fs.existsSync(abs)) {
@@ -862,7 +1006,16 @@ export class Bridge {
           code: "BAD_ARGS", message: "har_to_replay: har or path is required",
           retryable: false } };
       }
-      const format = ["python", "curl", "node"].includes(args.format) ? args.format : "python";
+      // UX-172: 非法 format 静默回退 python，AI 以为拿到的是 curl/node 脚本
+      if (args.format !== undefined &&
+          !["python", "curl", "node"].includes(args.format)) {
+        return { ok: false, error: {
+          code: "BAD_ARGS",
+          message: `har_to_replay: bad format: ${args.format} ` +
+                   "(valid: python|curl|node)",
+          retryable: false } };
+      }
+      const format = args.format || "python";
       const out = harToReplay(har, format);
       // 落盘（可选）：replay/<名>.<ext>
       if (args.save) {
@@ -878,6 +1031,9 @@ export class Bridge {
     if (name === "har_diff") {
       const loadHar = (src, label) => {
         if (src && typeof src === "object") return src;
+        // UX-204: JSON 字符串直接解析，不要当成路径去找文件
+        const inline = coerceHar(src, label);
+        if (inline) return inline;
         if (typeof src === "string") {
           const abs = this.store._abs(src);
           if (!fs.existsSync(abs)) {
@@ -904,7 +1060,10 @@ export class Bridge {
     }
     // ---- C9: 断言校验（一份 HAR vs 断言集）----
     if (name === "har_assert") {
-      let har = args.har;
+      let har;
+      try { har = coerceHar(args.har); }
+      catch (e) { return { ok: false, error: {
+        code: e.owbCode || "BAD_HAR", message: e.message, retryable: false } }; }
       if (!har && args.path) {
         const abs = this.store._abs(args.path);
         if (!fs.existsSync(abs)) {
@@ -924,8 +1083,17 @@ export class Bridge {
           code: "BAD_ARGS", message: "har_assert: har or path is required",
           retryable: false } };
       }
-      const result = harAssert(har, Array.isArray(args.assertions) ? args.assertions : []);
-      return { ok: true, data: result };
+      // UX-173: 空断言集返回 pass_rate=1，AI 会当成"全部校验通过"
+      if (!Array.isArray(args.assertions) || !args.assertions.length) {
+        return { ok: false, error: {
+          code: "BAD_ARGS",
+          message: "har_assert: assertions[] is required and must be non-empty " +
+                   "(an empty set would trivially 'pass'). Types: request_exists, " +
+                   "request_absent, response_status, response_contains, min_requests",
+          retryable: false } };
+      }
+      // 工具级 ok 表示"校验跑完了"，判定在 data.ok / data.failed 上（见 harAssert）
+      return { ok: true, data: harAssert(har, args.assertions) };
     }
     return { ok: false, error: {
       code: "UNKNOWN_TOOL", message: `unknown daemon tool: ${name}`,

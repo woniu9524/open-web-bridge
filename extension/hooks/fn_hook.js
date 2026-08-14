@@ -17,7 +17,10 @@
  * 超时报 phase:"error"。已存在则同步安装/报错。
  */
 (() => {
-  const OPTS = /*__OWB_OPTS__*/ null; /*__OWB_OPTS_END__*/
+  // ⚠️ 占位符必须保持这一整串（含分隔位置）：注入前由 background.js 整体替换成
+  // JSON。格式化器把它拆成 "/*__OWB_OPTS__*/ null; /*__OWB_OPTS_END__*/" 会让
+  // hook_function 直接报 PRESET_LOAD_FAILED（f2b170d 就这么坏过一次）。
+  const OPTS = /*__OWB_OPTS__*/null/*__OWB_OPTS_END__*/;
   if (!OPTS || !OPTS.path) return;
   window.__owbFnHooked = window.__owbFnHooked || {};
   if (window.__owbFnHooked[OPTS.key]) return; // 幂等

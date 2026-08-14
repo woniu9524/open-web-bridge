@@ -99,7 +99,11 @@ class MockExtension {
         const payload = name === "status"
           ? { ok: true, data: { ws: 1, attachedTabs: [111], mock: true } }
           : { ok: false, error: { code: "UNKNOWN_TOOL", message: name, retryable: false } };
-        this.ws.send(jstr({ type: "tool_result", requestId: msg.requestId, payload }));
+        // UX-51 用：slow_ms 让这一条应答故意拖慢，验证它不会堵住后面的调用
+        const delay = Number((msg.payload.args || {}).slow_ms) || 0;
+        const reply = () =>
+          this.ws.send(jstr({ type: "tool_result", requestId: msg.requestId, payload }));
+        if (delay) setTimeout(reply, delay); else reply();
       }
     };
     this.ws.on("message", this._handler);
@@ -408,6 +412,137 @@ async function main() {
     check("state_load 不存在 NOT_FOUND",
       !res.ok && res.error && res.error.code === "NOT_FOUND",
       jstr(res));
+
+    // 8g. Batch 1 参数名/文档对齐
+    // BUG-28/BUG-45: 描述里的 source 与实现里的 signer_code 都要认
+    const SIGNER = "(input) => ({ sig: String(input.a) + '-' + String(input.b) })";
+    res = await ctlCall(ctl, "daemon.verify_signer", {
+      source: SIGNER,
+      samples: [{ id: "s1", input: { a: 1, b: 2 }, expected: { sig: "1-2" } }],
+    });
+    check("BUG-28 verify_signer 收 source 别名",
+      res.ok && res.data && res.data.pass_rate === 1, jstr(res));
+    res = await ctlCall(ctl, "daemon.verify_signer", {
+      signer_code: SIGNER,
+      samples: [{ id: "s1", input: { a: 1, b: 2 }, expected: { sig: "1-2" } }],
+    });
+    check("BUG-28 verify_signer 仍收 signer_code",
+      res.ok && res.data && res.data.pass_rate === 1, jstr(res));
+    // UX-56: 全挂还 ok=true 是误导
+    res = await ctlCall(ctl, "daemon.verify_signer", {
+      source: SIGNER,
+      samples: [{ id: "s1", input: { a: 1, b: 2 }, expected: { sig: "WRONG" } }],
+    });
+    check("UX-56 全部样本失败返回 VERIFY_FAILED",
+      !res.ok && res.error && res.error.code === "VERIFY_FAILED", jstr(res));
+    // UX-109: 只给 calls 走 dry_run —— 回算出的值，且不谎报 pass_rate
+    res = await ctlCall(ctl, "daemon.verify_signer", {
+      source: SIGNER, calls: [{ args: [{ a: 7, b: 8 }] }],
+    });
+    check("UX-109 calls 走 dry_run 并回算出的值",
+      res.ok && res.data && res.data.mode === "dry_run"
+      && res.data.pass_rate === undefined
+      && ((res.data.results || [])[0] || {}).computed.sig === "7-8",
+      jstr(res));
+    res = await ctlCall(ctl, "daemon.verify_signer", { samples: [] });
+    check("verify_signer 缺 source 报 BAD_ARGS",
+      !res.ok && res.error && res.error.code === "BAD_ARGS", jstr(res));
+    // UX-85: daemon 侧工具漏了前缀，错误里要直接给出正确名字
+    res = await ctlCall(ctl, "state_list", {});
+    check("UX-85 无前缀调 daemon 工具给出 daemon. 提示",
+      !res.ok && res.error && res.error.code === "UNKNOWN_TOOL"
+      && /daemon\.state_list/.test(res.error.message), jstr(res));
+    // 两侧同名的 status/download 不改路由，仍旧转发扩展
+    res = await ctlCall(ctl, "status", {});
+    check("UX-85 同名工具 status 仍走扩展",
+      !res.ok && res.error
+      && ["NO_EXTENSION", "DISCONNECTED"].includes(res.error.code), jstr(res));
+    // BUG-26/UX-57: 断言字段别名经 ctl 链路同样生效
+    res = await ctlCall(ctl, "daemon.har_assert", {
+      har: { log: { entries: [] } },
+      assertions: [{ type: "min_requests", min: 0 }],
+    });
+    check("BUG-26 har_assert 收 min 别名",
+      res.ok && res.data && res.data.passed === 1, jstr(res));
+
+    // 8h. Batch 2/3
+    // UX-173: 空断言集不能算"全过"
+    res = await ctlCall(ctl, "daemon.har_assert", {
+      har: { log: { entries: [] } }, assertions: [],
+    });
+    check("UX-173 空断言集报 BAD_ARGS",
+      !res.ok && res.error && res.error.code === "BAD_ARGS", jstr(res));
+    // UX-204: har 传 JSON 字符串原来静默当成空 HAR，断言全过
+    res = await ctlCall(ctl, "daemon.har_assert", {
+      har: jstr({ log: { entries: [
+        { request: { method: "GET", url: "https://x.test/api/data" },
+          response: { status: 200, content: { text: "{}" } } },
+      ] } }),
+      assertions: [{ type: "request_exists", url_pattern: "/api/data" }],
+    });
+    check("UX-204 har 传 JSON 字符串也能解析",
+      res.ok && res.data && res.data.ok === true && res.data.passed === 1, jstr(res));
+    res = await ctlCall(ctl, "daemon.har_assert", {
+      har: "{not json", assertions: [{ type: "min_requests", count: 1 }],
+    });
+    check("UX-204 坏 JSON 报 BAD_HAR",
+      !res.ok && res.error && res.error.code === "BAD_HAR", jstr(res));
+    // data.ok 是判定位（外层 ok 只表示跑完了）
+    res = await ctlCall(ctl, "daemon.har_assert", {
+      har: { log: { entries: [] } },
+      assertions: [{ type: "min_requests", count: 5 }],
+    });
+    check("har_assert 判定在 data.ok",
+      res.ok && res.data.ok === false && res.data.failed === 1, jstr(res));
+    // UX-172: 非法 format 不能静默回退 python
+    res = await ctlCall(ctl, "daemon.har_to_replay", {
+      har: { log: { entries: [] } }, format: "ruby",
+    });
+    check("UX-172 har_to_replay 非法 format 报 BAD_ARGS",
+      !res.ok && res.error.code === "BAD_ARGS"
+      && /python\|curl\|node/.test(res.error.message), jstr(res));
+    // UX-186: 会话库删除
+    res = await ctlCall(ctl, "daemon.state_delete", { name: "ghost" });
+    check("UX-186 state_delete 不存在报 NOT_FOUND",
+      !res.ok && res.error.code === "NOT_FOUND", jstr(res));
+    res = await ctlCall(ctl, "daemon.state_delete", {});
+    check("UX-186 state_delete 缺 name 报 BAD_ARGS",
+      !res.ok && res.error.code === "BAD_ARGS", jstr(res));
+    // UX-212: hook_logs 的 since 别名
+    res = await ctlCall(ctl, "daemon.hook_logs", { since: 999999, limit: 5 });
+    check("UX-212 hook_logs 收 since 别名",
+      res.ok && res.data && res.data.count === 0, jstr(res));
+
+    // UX-51: 一条慢调用不得堵死同一 ctl 连接上的后续调用。
+    // 老实现是 Promise 链串行队列 —— wait_user（最长 280s）期间 AI 什么都干不了。
+    const ext51 = new MockExtension(port);
+    await ext51.connect();
+    ext51.serve();
+    await sleep(200);
+    // 两条调用同时在飞，必须按 id 各收各的（共用 recvJson 会互相吞结果）
+    const timings = {};
+    const onResult = (data) => {
+      let m;
+      try { m = JSON.parse(data.toString()); } catch { return; }
+      if (m.type === "result" && timings[m.id]) timings[m.id].done = Date.now();
+    };
+    ctl.on("message", onResult);
+    const t0 = Date.now();
+    timings.slow51 = { sent: t0 };
+    timings.fast51 = { sent: t0 };
+    ctl.send(jstr({ type: "call", id: "slow51", name: "status", args: { slow_ms: 1500 } }));
+    await sleep(100);
+    timings.fast51.sent = Date.now();
+    ctl.send(jstr({ type: "call", id: "fast51", name: "status", args: {} }));
+    await waitFor(() => timings.slow51.done && timings.fast51.done, 8000, 50);
+    ctl.off("message", onResult);
+    const fastMs = timings.fast51.done - timings.fast51.sent;
+    const slowMs = timings.slow51.done - timings.slow51.sent;
+    check("UX-51 慢调用不阻塞后续调用",
+      fastMs >= 0 && fastMs < 800 && slowMs >= 1400,
+      `fast=${fastMs}ms slow=${slowMs}ms`);
+    ext51.stop();
+    try { ext51.ws.close(); } catch {}
 
     ctl.close();
     ctl2.close();

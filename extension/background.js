@@ -798,6 +798,9 @@ function onNetworkEvent(tabId, method, params) {
       initiator: params.initiator || null,
       timestamp: params.timestamp,
       wallTime: params.wallTime,
+      // BUG-38: wait_for network_idle 要能把"永远收不到 loadingFinished"的
+      // 僵尸请求排除掉，需要一个本地墙钟起点（wallTime 是秒且可能缺）。
+      startedAt: Date.now(),
     };
     bufferPut(tabId, params.requestId, rec);
     pushEvent("network", { tabId, phase: "request", ...truncateForEvent(rec) });
@@ -955,7 +958,13 @@ function onDownloadProgress(tabId, params) {
   const w = downloadWatchers.get(tabId);
   if (!w || params.guid !== w.guid) return;
   if (params.state === "completed") {
-    w.resolve({ state: "completed", receivedBytes: params.receivedBytes });
+    // BUG-48: 原来 resolve 不带 filename，工具读 result.filename 永远 undefined
+    w.resolve({
+      state: "completed",
+      receivedBytes: params.receivedBytes,
+      filename: w.filename,
+      url: w.url,
+    });
   } else if (params.state === "canceled") {
     w.reject(
       new ToolError("DOWNLOAD_CANCELED", "download was canceled", false),
@@ -991,7 +1000,13 @@ function onContextDestroyed(tabId, params) {
 }
 
 // 按 frame url/name 子串匹配找 iframe 的 contextId（evaluate 在指定 frame 执行用）
-function resolveFrameContextId(tabId, framePattern) {
+//
+// BUG-33/BUG-56/UX-17: 执行上下文只带 origin（"https://x.com"），不带完整
+// iframe URL。AI 拿 list_frames 里看到的 URL（"https://x.com/embed/player"）
+// 来匹配必然落空 —— 页面上明明有那个 frame，evaluate 却报 FRAME_NOT_FOUND。
+// 这里补一次 Page.getFrameTree，按【完整 URL / name / frameId】匹配到 frameId
+// 再换 contextId，origin 匹配只作兜底。
+async function resolveFrameContextId(tabId, framePattern) {
   const list = frameContexts.get(tabId);
   if (!list || !list.length) return null;
   // 默认主帧
@@ -999,10 +1014,28 @@ function resolveFrameContextId(tabId, framePattern) {
     const def = list.find((c) => c.isDefault);
     return def ? def.contextId : list[0].contextId;
   }
+  const pat = String(framePattern);
+  // 1) frame 树：完整 URL / name / frameId 子串匹配
+  try {
+    const tree = await cdpCall(tabId, "Page.getFrameTree");
+    const frames = [];
+    const walk = (n) => {
+      const f = n.frame;
+      frames.push({ id: f.id, url: f.url || "", name: f.name || "" });
+      (n.childFrames || []).forEach(walk);
+    };
+    walk(tree.frameTree);
+    for (const f of frames) {
+      if (f.url.includes(pat) || (f.name && f.name.includes(pat)) || f.id === pat) {
+        const c = list.find((x) => x.frameId === f.id);
+        if (c) return c.contextId;
+      }
+    }
+  } catch (e) {}
+  // 2) 兜底：按 context 的 origin/name 匹配（老行为）
   const c = list.find(
     (x) =>
-      (x.url && x.url.includes(framePattern)) ||
-      (x.name && x.name.includes(framePattern)),
+      (x.url && x.url.includes(pat)) || (x.name && x.name.includes(pat)),
   );
   return c ? c.contextId : null;
 }
@@ -1036,7 +1069,10 @@ const HOOK_PRESETS = {
   crypto: "hooks/crypto.js",
 };
 const FN_HOOK_TEMPLATE = "hooks/fn_hook.js";
-const FN_OPTS_SENTINEL = "/*__OWB_OPTS__*/null/*__OWB_OPTS_END__*/";
+// 占位符用正则匹配（吃掉两个标记之间的任意内容）：字面量匹配太脆，格式化器
+// 一动 fn_hook.js 的空白/分号就整体失配，hook_function 直接不可用。
+const FN_OPTS_SENTINEL_RE =
+  /\/\*__OWB_OPTS__\*\/[\s\S]*?\/\*__OWB_OPTS_END__\*\//;
 const HOOK_BINDING_NAME = "__owbReport";
 const HOOK_REGISTRY_KEY = "hookRegistry";
 
@@ -1099,13 +1135,15 @@ async function loadFnHookSource(opts) {
     );
   }
   const template = await res.text();
-  if (!template.includes(FN_OPTS_SENTINEL)) {
+  if (!FN_OPTS_SENTINEL_RE.test(template)) {
     throw new ToolError(
       "PRESET_LOAD_FAILED",
       "fn_hook.js missing OPTS sentinel",
     );
   }
-  return template.replace(FN_OPTS_SENTINEL, JSON.stringify(opts));
+  // 函数式 replace：opts 里带用户 hook_code，字符串形式会把 $& / $1 当替换模式解释
+  const json = JSON.stringify(opts);
+  return template.replace(FN_OPTS_SENTINEL_RE, () => json);
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,6 +1547,69 @@ class ToolError extends Error {
   }
 }
 
+// 原始 CDP/Chrome 错误 → AI 可操作的 ToolError。
+// 裸 CDP 错误（`{"code":-32000,...}`）一律落到 INTERNAL + retryable=true，
+// AI 会对着"永远不可能成功"的错误反复重试（UX-27/75/79/123/131/169/177/
+// 182/200/201/220/221）。这里按错误文本归类，给出正确的 code、retryable
+// 和下一步动作。所有工具经 dispatcher 统一走这条路径。
+// UX-88/222/225: 同页跑着的其他扩展会往 Debugger/Network/Runtime 里灌一大堆
+// chrome-extension:// 的脚本、请求和执行上下文。对"分析这个网站"来说全是噪声，
+// 而且经常把页面自己的东西挤出 limit。默认过滤，include_extensions 可要回。
+function isExtensionUrl(u) {
+  return /^(chrome|moz|safari-web)-extension:\/\//.test(String(u || ""));
+}
+
+// UX-76: Browser.grantPermissions 认得的权限名（CDP PermissionType 枚举）。
+// 名字打错时 CDP 收下不报错，AI 拿到 ok=true 却没有授权。
+const CDP_PERMISSIONS = new Set([
+  "accessibilityEvents", "audioCapture", "backgroundSync",
+  "backgroundFetch", "clipboardReadWrite", "clipboardSanitizedWrite",
+  "displayCapture", "durableStorage", "geolocation", "idleDetection",
+  "midi", "midiSysex", "nfc", "notifications", "paymentHandler",
+  "periodicBackgroundSync", "protectedMediaIdentifier", "sensors",
+  "storageAccess", "topLevelStorageAccess", "videoCapture",
+  "videoCapturePanTiltZoom", "wakeLockScreen", "wakeLockSystem",
+  "windowManagement",
+]);
+
+const CDP_ERROR_RULES = [
+  [/cdpCall timeout/i, "TIMEOUT", true,
+    "CDP call did not return in 30s; the page may be paused at a breakpoint " +
+    "(call resume) or blocked by a modal dialog"],
+  [/no tab with given id|no target with given id|tab was closed|no tab found/i,
+    "NO_TAB", false, "call list_tabs for live tabIds"],
+  [/cannot access|cannot be debugged|chrome:\/\/|extensions gallery|devtools:\/\//i,
+    "FORBIDDEN", false,
+    "Chrome forbids debugging this URL (chrome://, the Web Store, devtools://); " +
+    "navigate to a regular http(s) page first"],
+  [/could not find object with given id|invalid remote object id/i,
+    "BAD_ARGS", false,
+    "object_id expired (RemoteObjects die on navigation/GC); " +
+    "re-run evaluate with returnByValue:false for a fresh objectId"],
+  [/no script for id|no script with given id|cannot fetch script/i,
+    "NOT_FOUND", false,
+    "script_id is stale (script GC'd or page navigated); re-run script_list"],
+  [/was ?n[o']?t found|method not found|-32601/i, "BAD_ARGS", false,
+    "no such CDP method — check the domain and spelling"],
+  [/must be enabled|agent is not enabled|domain .* not enabled/i,
+    "BAD_ARGS", false, "enable the CDP domain first (network_start / script_list / break_*)"],
+  [/not allowed/i, "FORBIDDEN", false,
+    "chrome.debugger forbids this CDP domain from an extension"],
+  [/is not paused|not paused/i, "NOT_PAUSED", false,
+    "no active breakpoint; arm one with break_function / break_xhr first"],
+];
+
+function toToolError(e) {
+  if (e instanceof ToolError) return e;
+  const raw = String(e && e.message ? e.message : e);
+  for (const [re, code, retryable, hint] of CDP_ERROR_RULES) {
+    if (re.test(raw)) {
+      return new ToolError(code, `${raw} — ${hint}`, retryable);
+    }
+  }
+  return new ToolError("INTERNAL", raw, true);
+}
+
 async function resolveTabId(args) {
   if (args.tabId != null) return args.tabId;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1516,6 +1617,18 @@ async function resolveTabId(args) {
     throw new ToolError(
       "NO_TAB",
       "no active tab; pass tabId explicitly",
+      false,
+    );
+  }
+  // UX-64/97: 缺省落到"当前活动 tab"。多 tab 分析场景下，用户切一下窗口，
+  // 后续无 tabId 的调用就悄悄打到了另一个页面上 —— 结果看着正常，数据全错。
+  // 只在真正有歧义时报错：挂了多个 tab、而活动 tab 不在其中。
+  if (attachedTabs.size > 1 && !attachedTabs.has(tab.id)) {
+    throw new ToolError(
+      "AMBIGUOUS_TAB",
+      `no tabId given and the active tab (${tab.id}) is not one of the ` +
+        `${attachedTabs.size} attached tabs (${[...attachedTabs].join(", ")}) — ` +
+        "pass tabId explicitly so the call does not land on the wrong page",
       false,
     );
   }
@@ -1619,7 +1732,7 @@ function resolveTargetSelector(args, toolName, required = true) {
   if (hasSel && hasRef) {
     throw new ToolError(
       "BAD_ARGS",
-      `${toolName}: selector 与 ref 二选一`,
+      `${toolName}: pass either selector or ref, not both`,
       false,
     );
   }
@@ -1627,7 +1740,7 @@ function resolveTargetSelector(args, toolName, required = true) {
     if (required) {
       throw new ToolError(
         "BAD_ARGS",
-        `${toolName}: selector 或 ref 必填一个`,
+        `${toolName}: selector or ref is required (one of the two)`,
         false,
       );
     }
@@ -1642,19 +1755,40 @@ function targetNotFound(target, toolName) {
   if (target.ref) {
     throw new ToolError(
       "REF_STALE",
-      `ref ${target.ref} 不在当前文档（页面可能已导航或重渲染），重新 read_page 拿新 ref`,
+      `ref ${target.ref} is not in the current document ` +
+        "(page navigated or re-rendered); call read_page again for fresh refs",
       true,
     );
   }
   throw new ToolError("NOT_FOUND", `selector not found: ${target.selector}`);
 }
 
+// BUG-41/BUG-55 + UX-13/UX-214: document.querySelector 不穿透 shadow root，
+// 于是 read_page 看不见、click/fill 也点不到自定义元素里的按钮/输入框
+// （Web Component 站点整片不可用）。这段在页面里做广度优先的深查：
+// 先在当前 root 找，找不到就下钻每个 open shadowRoot。closed root 拿不到，
+// 这是浏览器的硬限制。同一段代码 read_page 的采集器也复用。
+const DEEP_QUERY_FN = `function __owbDeepQuery(sel, root) {
+  root = root || document;
+  const hit = root.querySelector(sel);
+  if (hit) return hit;
+  const walk = root.querySelectorAll("*");
+  for (const el of walk) {
+    if (el.shadowRoot) {
+      const inner = __owbDeepQuery(sel, el.shadowRoot);
+      if (inner) return inner;
+    }
+  }
+  return null;
+}`;
+
 // "找元素 + scrollIntoView" 的页面表达式骨架（click/fill/screenshot/mouse_click
 // 共用）：找到则执行 body 段并返回其结果，未找到返回 null（调用方转
 // NOT_FOUND / REF_STALE）。body 里可用变量：el。
 function elementSnippet(selector, body) {
   return (
-    `(() => { const el = document.querySelector(${JSON.stringify(selector)});` +
+    `(() => { ${DEEP_QUERY_FN}` +
+    ` const el = __owbDeepQuery(${JSON.stringify(selector)});` +
     ` if (!el) return null; el.scrollIntoView({ block: "center", inline: "center" });` +
     ` ${body} })()`
   );
@@ -1684,6 +1818,25 @@ const ORACLE_EXPR = `(async (fnPath, callArgs, freeze) => {
     return { ok: false, error: String((e && e.stack) || e) };
   } finally { Date.now = _dn; Math.random = _mr; }
 })`;
+
+// UX-19/148 + BUG-42: 页面内表达式把失败写在 {ok:false,error} 里，工具层却
+// 照样 ok=true —— AI 只看外层就以为调用成功了。这里把内层失败抬成工具级错误。
+function oracleResult(out, what) {
+  if (out && typeof out === "object" && out.ok === false) {
+    const msg = String(out.error || "call failed");
+    const notFn = /not a function/i.test(msg);
+    throw new ToolError(
+      notFn ? "NOT_A_FUNCTION" : "ORACLE_FAILED",
+      `oracle_call ${what}: ${msg}` +
+        (notFn
+          ? " — check the path with evaluate(\"typeof <path>\"); " +
+            "closure-scoped functions need object_id from frame_read"
+          : ""),
+      false,
+    );
+  }
+  return out;
+}
 
 const ORACLE_CALL_ON_OBJECT = `async function (opts) {
   const meta = { frozen: !!opts.freeze, dateNow: [], mathRandom: [] };
@@ -1862,15 +2015,43 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     return "generic";
   };
   const nameOf = (el) => {
-    const v = el.getAttribute("aria-label") || el.getAttribute("alt") ||
-      el.getAttribute("placeholder") || el.value || el.innerText || "";
+    // UX-105/45: 表单控件常常三个名字来源全空（无 aria-label / 无 placeholder /
+    // 无文本），AI 只看到一串同名 textbox 分不清哪个是账号哪个是密码。
+    // 补上 name/id、关联 <label>、以及外层 label 的文本。
+    let v = el.getAttribute("aria-label") || el.getAttribute("alt") ||
+      el.getAttribute("placeholder") || "";
+    if (!v && el.id) {
+      try {
+        const lab = (el.getRootNode() || document).querySelector(
+          'label[for="' + CSS.escape(el.id) + '"]');
+        if (lab) v = lab.innerText || "";
+      } catch (e) {}
+    }
+    if (!v && el.closest) {
+      const wrap = el.closest("label");
+      if (wrap) v = wrap.innerText || "";
+    }
+    if (!v) v = el.getAttribute("name") || el.getAttribute("title") || "";
+    if (!v) v = el.value || el.innerText || "";
+    if (!v) v = el.id ? "#" + el.id : "";
     return String(v).replace(/\\s+/g, " ").trim().slice(0, 80);
   };
   const nodes = [];
   let next = ${nextRef};
   let assigned = 0;
   let truncated = false;
-  const els = document.querySelectorAll(SEL);
+  // BUG-41/BUG-55 + UX-13/UX-214: querySelectorAll 不进 shadow root，
+  // Web Component 站点整片元素在快照里根本不存在。这里连 open shadow root
+  // 一起收（closed root 浏览器不给，收不到）。
+  let shadowRoots = 0;
+  const collect = (root, acc) => {
+    for (const el of root.querySelectorAll(SEL)) acc.push(el);
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) { shadowRoots++; collect(el.shadowRoot, acc); }
+    }
+    return acc;
+  };
+  const els = collect(document, []);
   for (const el of els) {
     if (nodes.length >= ${maxNodes}) { truncated = true; break; }
     const rect = el.getBoundingClientRect(); // 无布局盒 = 不可见，跳过
@@ -1878,37 +2059,104 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     const role = roleOf(el);
     const name = nameOf(el);
     let ref = null;
-    if (INTERACTIVE[role]) {
+    // UX-80: contenteditable 编辑区 role 落在 generic，原来拿不到 ref，
+    // AI 的 ref 工作流无法 fill 富文本框（只能退回 CSS selector）。
+    if (INTERACTIVE[role] || el.isContentEditable) {
       ref = el.getAttribute("data-owb-ref"); // 已有 ref 复用原值（同文档内稳定）
       if (!ref) { ref = "e" + next++; el.setAttribute("data-owb-ref", ref); assigned++; }
     }
     let line = (ref ? "@" + ref + " " : "") + role + " \\"" + name.replace(/"/g, "'") + "\\"";
     if (role === "heading") line += " level=" + el.tagName.toLowerCase().charAt(1);
+    // 下面这些补充信息任何一条抛错都不该毁掉整张快照
+    try {
+      // UX-128: checkbox/radio 显示的是 .value（往往是 "on"），不是勾没勾 ——
+      // AI 完全看不出当前选中状态。
+      if (role === "checkbox" || role === "radio" || role === "switch") {
+        line += el.checked ? " checked" : " unchecked";
+      }
+      // UX-130: date/range/color/email/... 全被压成 textbox，AI 不知道格式要求
+      if (el.tagName === "INPUT") {
+        const t = (el.getAttribute("type") || "text").toLowerCase();
+        if (t !== "text" && role === "textbox") line += " type=" + t;
+        if (el.required) line += " required";
+      }
+      // UX-129: <select> 只看得到 option 文本，看不到要 fill 进去的 value
+      if (el.tagName === "SELECT" && el.options && el.options.length) {
+        const opts = Array.from(el.options).slice(0, 12).map((o) => o.value);
+        if (opts.length) line += " values=[" + opts.join(",") + "]";
+        if (el.options.length > 12) line += "+" + (el.options.length - 12);
+      }
+      // UX-180: 链接不带 href，AI 判断不了这条链接通向哪里（也就没法决定点不点）
+      if (role === "link" && el.getAttribute("href")) {
+        let href = el.getAttribute("href");
+        try { href = new URL(href, location.href).href; } catch (e) {}
+        line += " href=" + href.slice(0, 200);
+      }
+      if (el.disabled || el.getAttribute("aria-disabled") === "true") line += " disabled";
+    } catch (e) {}
     nodes.push({ ref, role, name, line, hash: hashOf(line) });
   }
+  // UX-100: iframe 在快照里完全不出现，AI 不知道页面还有别的文档要看
+  const iframes = [...document.querySelectorAll("iframe")]
+    .map((f) => ({ src: f.getAttribute("src") || "", name: f.name || "" }))
+    .filter((f) => f.src || f.name).slice(0, 20);
   return { url: location.href, title: document.title, nodes,
-    nextRef: next, refsAssigned: assigned, truncated };
+    nextRef: next, refsAssigned: assigned, truncated,
+    shadowRoots, iframes };
 })()`;
 
 // article 的页面内提取器：简化 readability——候选根按 <p> 文本总长评分取最优，
 // 再将其 h1-h6/p/li/blockquote/pre 后代压成 markdown。不引库。
+// BUG-32/BUG-51 + UX-199 重写。旧算法把 document.body 也当候选根，而 body 的
+// <p> 文本总长天然最大，于是几乎永远选中 body；再从 body 提 li 就把导航菜单
+// （Donate / Log in / Navigation Menu）当成了正文。Wikipedia / GitHub / MDN
+// 全军覆没，HN 直接空。
+//
+// 现在：
+//   1. 候选根只取语义容器（article/main/[role=main]/常见正文类名），
+//      body 仅在一个语义根都没有时兜底；
+//   2. 评分排除 nav/header/footer/aside/form/[role=navigation] 子树里的文本，
+//      并给语义根加权 —— 样板区再长也压不过真正的正文；
+//   3. 提取时跳过样板容器和 aria-hidden 的后代；
+//   4. 提不出正文就明说（reason），不再返回一段导航冒充正文。
 const READ_PAGE_ARTICLE_EXPR = `(() => {
-  const roots = [document.body];
-  for (const el of document.querySelectorAll(
-    "article, main, [role='main'], .article, .content, .post, .rich-content")) {
-    roots.push(el);
-  }
+  const BOILER = "nav, header, footer, aside, form, [role='navigation'], " +
+    "[role='banner'], [role='contentinfo'], [role='search'], [role='complementary'], " +
+    "[aria-hidden='true'], .nav, .navbar, .menu, .sidebar, .footer, .header, " +
+    ".breadcrumb, .toc, .comment, .comments, .advert, .ads";
+  const inBoiler = (el) => !!(el.closest && el.closest(BOILER));
+  const textLen = (root) => {
+    let n = 0;
+    for (const p of root.querySelectorAll("p")) {
+      if (inBoiler(p)) continue;
+      n += String(p.innerText || "").trim().length;
+    }
+    return n;
+  };
+  const semantic = [...document.querySelectorAll(
+    "article, main, [role='main'], [itemprop='articleBody'], " +
+    ".article, .article-body, .post-content, .entry-content, .markdown-body, " +
+    ".content, .post, .rich-content")];
   let best = null, bestScore = -1;
-  for (const root of roots) {
-    if (!root) continue;
-    let score = 0;
-    for (const p of root.querySelectorAll("p")) score += String(p.innerText || "").length;
+  for (const root of semantic) {
+    // 嵌套时取内层（.content > article 这种，article 更贴近正文）
+    const score = textLen(root) * 1.25;
     if (score > bestScore) { bestScore = score; best = root; }
   }
-  if (!best) return { title: document.title, content: "" };
+  // 一个语义容器都没有时才退回 body，且此时同样排除样板
+  if (!best || bestScore <= 0) {
+    const bodyScore = document.body ? textLen(document.body) : 0;
+    if (bodyScore > bestScore) { best = document.body; bestScore = bodyScore; }
+  }
+  if (!best || bestScore <= 0) {
+    return { title: document.title, content: "", reason:
+      "no article-like content found (page is an app/listing/index, not a document) — " +
+      "use mode:snapshot for interactive elements or mode:text for raw text" };
+  }
   const fence = String.fromCharCode(96, 96, 96);
   const parts = [];
   for (const el of best.querySelectorAll("h1, h2, h3, h4, h5, h6, p, li, blockquote, pre")) {
+    if (inBoiler(el)) continue;
     const tag = el.tagName.toLowerCase();
     const text = String(el.innerText || "").trim();
     if (!text) continue;
@@ -1918,7 +2166,11 @@ const READ_PAGE_ARTICLE_EXPR = `(() => {
     else if (/^h[1-6]$/.test(tag)) parts.push("#".repeat(Number(tag.charAt(1))) + " " + text);
     else parts.push(text);
   }
-  return { title: document.title, content: parts.join("\\n\\n") };
+  const content = parts.join("\\n\\n");
+  return { title: document.title, content,
+    root: best.tagName.toLowerCase() + (best.className ? "." + String(best.className).split(/\\s+/)[0] : ""),
+    reason: content ? undefined :
+      "matched a container but it had no prose — try mode:text" };
 })()`;
 
 // mouse_click 的 AI 光标覆盖层：幂等创建 window.__owbCursor 单例。
@@ -2050,7 +2302,9 @@ const tools = {
         groupTitles[g.id] = g.title;
       }
     } catch (e) {}
-    return tabs
+    // UX-77: 包成 {tabs, count}，与 cookie_get/script_list 一致；裸数组让 AI
+    // 无法用统一模式解析（也没地方挂 count/截断标记）。
+    const out = tabs
       .filter((t) => t.id != null)
       .map((t) => ({
         tabId: t.id,
@@ -2062,17 +2316,38 @@ const tools = {
         group:
           t.groupId >= 0 ? groupTitles[t.groupId] || String(t.groupId) : null,
       }));
+    return { tabs: out, count: out.length };
   },
 
   async find_tab(args) {
-    const re = toRegExp(args.url_pattern || ".*");
+    // UX-178/BUG-31: url_pattern 必填。缺省 ".*" 会静默匹配全部 tab，
+    // AI 传错参数名（url/pattern）时以为在过滤，实际拿到整个浏览器。
+    if (!args.url_pattern) {
+      throw new ToolError(
+        "BAD_ARGS",
+        "find_tab: url_pattern is required (JS regex matched against tab URL)",
+        false,
+      );
+    }
+    const re = toRegExp(args.url_pattern);
     const tabs = await chrome.tabs.query({});
-    const hits = tabs.filter((t) => t.id != null && re.test(t.url || ""));
-    return hits.map((t) => ({ tabId: t.id, url: t.url, title: t.title }));
+    const hits = tabs
+      .filter((t) => t.id != null && re.test(t.url || ""))
+      .map((t) => ({ tabId: t.id, url: t.url, title: t.title }));
+    return { tabs: hits, count: hits.length }; // UX-77 同款包裹
   },
 
   async navigate(args) {
     if (!args.url) throw new ToolError("BAD_ARGS", "navigate: url is required");
+    // UX-203: wait_until 非法值原来静默忽略，AI 以为设了策略其实没设
+    const waitUntil = args.wait_until || args.waitUntil;
+    if (waitUntil && !["load", "domcontentloaded", "complete"].includes(waitUntil)) {
+      throw new ToolError(
+        "BAD_ARGS",
+        `navigate: bad wait_until: ${waitUntil} (valid: load|domcontentloaded|complete)`,
+        false,
+      );
+    }
     // new_tab：桥自己开的 tab 才编入 OWB 组；默认复用当前 tab（不动用户的现场）
     let tabId = null;
     let created = false;
@@ -2148,28 +2423,148 @@ const tools = {
         groupId,
       };
     }
-    return {
+    // UX-113: 超时窗口错过 "complete" 事件不等于页面没加载完——回查一次
+    // tab.status，别把已经加载好的页面报成 loadCompleted:false。
+    const settled = completed || tab.status === "complete";
+    const out = {
       tabId,
       url: tab.url,
       title: tab.title,
-      loadCompleted: completed,
+      loadCompleted: settled,
       groupId,
+    };
+    // UX-65/BUG-4: loadCompleted=false 既不是错误也没有指引，AI 只会无视它继续
+    // 操作半加载的页面。这里点明下一步。
+    if (!settled) {
+      out._hint =
+        `page not finished loading within ${args.timeout_ms || 30000}ms; ` +
+        "raise timeout_ms, or call wait_for {network_idle:true} / " +
+        "wait_for {selector} before interacting";
+    }
+    return out;
+  },
+
+  // UX-153: 只有前进导航，回退/前进/刷新都得靠 evaluate 手搓。
+  async history(args) {
+    const tabId = await resolveTabId(args);
+    const action = args.action || "back";
+    if (!["back", "forward", "reload"].includes(action)) {
+      throw new ToolError(
+        "BAD_ARGS",
+        `history: bad action: ${action} (valid: back|forward|reload)`,
+        false,
+      );
+    }
+    await ensureAttached(tabId);
+    const before = await chrome.tabs.get(tabId);
+    if (action === "reload") {
+      await chrome.tabs.reload(tabId, { bypassCache: !!args.bypass_cache });
+    } else {
+      await evaluateJs(tabId, `(() => { history.${action}(); return 1; })()`);
+    }
+    // 导航后 per-tab 快照状态失效（同 navigate）
+    readPageNextRef.delete(tabId);
+    readPageSnapshots.delete(tabId);
+    scriptRegistryMap.delete(tabId);
+    // 等一拍让 URL 落定；history.back 在同文档锚点跳转时不会触发 loading
+    const deadline = Date.now() + Math.min(args.timeout_ms || 10000, 60000);
+    let tab = before;
+    while (Date.now() < deadline) {
+      await sleep(200);
+      tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete" && (action === "reload" || tab.url !== before.url)) break;
+    }
+    return {
+      tabId,
+      action,
+      url: tab.url,
+      title: tab.title,
+      changed: tab.url !== before.url,
+      loadCompleted: tab.status === "complete",
+    };
+  },
+
+  // UX-143/230: 没有滚动工具，AI 只能 evaluate("window.scrollBy(...)")，
+  // 而裸 return 在 script 上下文里回 undefined，看着像滚动失败。
+  async scroll(args) {
+    const tabId = await resolveTabId(args);
+    await ensureAttached(tabId);
+    const target = resolveTargetSelector(args, "scroll", false);
+    let expression;
+    if (target) {
+      expression = elementSnippet(
+        target.selector,
+        `return { scrolledToElement: true, x: scrollX, y: scrollY,` +
+          ` maxY: Math.max(document.body ? document.body.scrollHeight : 0,` +
+          ` document.documentElement.scrollHeight) - innerHeight };`,
+      );
+    } else {
+      const dy = args.y != null ? Number(args.y) : args.dy != null ? Number(args.dy) : null;
+      const dx = args.x != null ? Number(args.x) : args.dx != null ? Number(args.dx) : 0;
+      const to = args.to; // "top" | "bottom"
+      expression =
+        `(() => {` +
+        (to === "bottom"
+          ? ` scrollTo(0, document.documentElement.scrollHeight);`
+          : to === "top"
+            ? ` scrollTo(0, 0);`
+            : args.absolute
+              ? ` scrollTo(${dx || 0}, ${dy == null ? 0 : dy});`
+              : ` scrollBy(${dx || 0}, ${dy == null ? 600 : dy});`) +
+        ` return { x: scrollX, y: scrollY,` +
+        ` maxY: Math.max(document.body ? document.body.scrollHeight : 0,` +
+        ` document.documentElement.scrollHeight) - innerHeight }; })()`;
+    }
+    const res = await cdpCall(tabId, "Runtime.evaluate", {
+      expression,
+      returnByValue: true,
+    });
+    const v = res.result && res.result.value;
+    if (!v && target) targetNotFound(target, "scroll");
+    // 懒加载页面滚动后内容是异步进来的；给一点时间再让 AI 去 read_page since_last
+    await sleep(Math.min(args.settle_ms || 400, 5000));
+    return {
+      tabId,
+      ...v,
+      atBottom: v && v.maxY != null ? v.y >= v.maxY - 2 : undefined,
     };
   },
 
   // 一键清场：关掉 OWB 分组的全部 tab（只动桥创建的组，不碰用户 tab）
-  async close_group() {
-    const groups = await chrome.tabGroups.query({ title: OWB_GROUP_TITLE });
+  async close_group(args = {}) {
+    // UX-124: "一键清场"只关「OWB 分析」组，task:/交接组的 tab 全留着，
+    // AI 以为清干净了。默认连 OWB 建的 task 组一起收，交接组默认不动
+    // （那是用户正在操作的现场），include_handoff 显式要才关。
+    const all = await chrome.tabGroups.query({});
+    const wanted = all.filter((g) => {
+      const t = g.title || "";
+      if (t === OWB_GROUP_TITLE) return true;
+      if (t.startsWith("task: ")) return args.include_tasks !== false;
+      if (t === HANDOFF_GROUP_TITLE) return args.include_handoff === true;
+      return false;
+    });
     let closed = 0;
-    for (const g of groups) {
+    const groups = [];
+    for (const g of wanted) {
       const tabs = await chrome.tabs.query({ groupId: g.id });
       const ids = tabs.map((t) => t.id).filter((id) => id != null);
       if (ids.length) {
         await chrome.tabs.remove(ids);
         closed += ids.length;
+        groups.push({ title: g.title, tabs: ids.length });
       }
     }
-    return { closed };
+    const handoffLeft = all.filter(
+      (g) => g.title === HANDOFF_GROUP_TITLE && args.include_handoff !== true,
+    ).length;
+    return {
+      closed,
+      groups,
+      _hint: handoffLeft
+        ? `left the "${HANDOFF_GROUP_TITLE}" group open (user is working there); ` +
+          "pass include_handoff:true to close it too"
+        : undefined,
+    };
   },
 
   async evaluate(args) {
@@ -2177,18 +2572,31 @@ const tools = {
       throw new ToolError("BAD_ARGS", "evaluate: expression is required");
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
+    // UX-58: 页面断在断点上时 Runtime.evaluate 会一直挂到 MCP 超时，AI 收到
+    // TIMEOUT retryable=true 后重试 → 再次挂住 → 死循环。先拦下来说清怎么办。
+    if (pausedState.has(tabId)) {
+      throw new ToolError(
+        "PAUSED",
+        "tab is paused at a breakpoint — evaluate would hang until timeout; " +
+          "call frame_read to inspect, then resume (or step) first",
+        false,
+      );
+    }
     // frame_pattern：在指定 iframe 的执行上下文里求值（先用 list_frames 看 frame 列表）
     let contextId = undefined;
     if (args.frame_pattern != null) {
       try {
         await cdpCall(tabId, "Runtime.enable");
       } catch (e) {}
-      contextId = resolveFrameContextId(tabId, args.frame_pattern);
+      contextId = await resolveFrameContextId(tabId, args.frame_pattern);
       if (!contextId) {
         throw new ToolError(
           "FRAME_NOT_FOUND",
-          `no iframe context matching ${JSON.stringify(args.frame_pattern)}; call list_frames first`,
-          true,
+          `no iframe execution context matching ${JSON.stringify(args.frame_pattern)} — ` +
+            "call list_frames: frames listed with contextId:null are " +
+            "cross-origin and cannot be evaluated from a page-level " +
+            "chrome.debugger session at all",
+          false,
         );
       }
     }
@@ -2207,10 +2615,40 @@ const tools = {
             : ""),
       );
     }
-    return {
-      value: res.result ? res.result.value : undefined,
-      type: res.result ? res.result.type : undefined,
-    };
+    // UX-74: returnByValue=false 时要把 objectId/description 一并回传，
+    // 否则 oracle_call 的 object_id 模式拿不到句柄，AI 只能改走 cdp 逃生舱。
+    const r = res.result || {};
+    const out = { value: r.value, type: r.type };
+    if (args.returnByValue === false) {
+      if (r.objectId !== undefined) out.objectId = r.objectId;
+      if (r.subtype !== undefined) out.subtype = r.subtype;
+      if (r.className !== undefined) out.className = r.className;
+      if (r.description !== undefined) out.description = r.description;
+    }
+    // UX-18/183/195/226/228: returnByValue 对 function / DOM 节点 / Symbol /
+    // BigInt 一律回 undefined 或 {}，AI 只看到 "空结果" 判断不了发生了什么。
+    // 补一个 description，并点明取值方式。
+    if (out.value === undefined && r.type !== "undefined") {
+      if (r.description !== undefined) out.description = r.description;
+      if (r.subtype !== undefined) out.subtype = r.subtype;
+      if (r.className !== undefined) out.className = r.className;
+      const byType = {
+        function: "functions are not serializable — return fn.toString() " +
+          "or use returnByValue:false to get an objectId",
+        bigint: "BigInt is not JSON-serializable — return String(value)",
+        symbol: "Symbol is not serializable — return value.toString()",
+        object: "DOM nodes / cyclic objects are not serializable — return " +
+          "specific fields (el.outerHTML, el.textContent, …)",
+      };
+      out._hint =
+        // UX-227: 不带 awaitPromise 求值 Promise 会拿到空对象，看着像成功
+        (r.subtype === "promise"
+          ? "expression returned a pending Promise — pass awaitPromise:true " +
+            "to get the resolved value (rejections then surface as EVAL_EXCEPTION)"
+          : byType[r.type]) ||
+        "value is not JSON-serializable; return a primitive projection instead";
+    }
+    return out;
   },
 
   async network_start(args) {
@@ -2235,11 +2673,20 @@ const tools = {
     const tabId = await resolveTabId(args);
     const re = args.url_pattern ? toRegExp(args.url_pattern) : null;
     const limit = args.limit || 100;
-    const out = [];
+    const all = [];
+    let extensionRequests = 0;
     for (const rec of getBuffer(tabId).values()) {
+      // UX-222: 其他扩展的资源请求混在抓包结果里，忙页面上会把真正的 API 挤掉
+      if (!args.include_extensions && isExtensionUrl(rec.url)) {
+        extensionRequests++;
+        continue;
+      }
       if (re && !re.test(rec.url || "")) continue;
-      out.push({
+      all.push({
         requestId: rec.requestId,
+        // UX-62: network_detail/get_initiator 收的是 request_id（snake_case），
+        // 两个名字都给，AI 不必手工转换。
+        request_id: rec.requestId,
         url: rec.url,
         method: rec.method,
         status: rec.status,
@@ -2247,19 +2694,40 @@ const tools = {
         finished: !!rec.finished,
         failed: !!rec.failed,
       });
-      if (out.length >= limit) break;
     }
-    return out;
+    // UX-175: 缓冲是 oldest-first，忙页面上刚发的 AJAX 会被 limit 截在外面。
+    // newest:true 从尾部取，AI 想看"刚刚那条请求"时不用调大 limit 捞全量。
+    const newest = !!args.newest || args.order === "newest";
+    const out = newest ? all.slice(-limit).reverse() : all.slice(0, limit);
+    // UX-61: 包成 {requests, count}，与其他工具一致（原来是裸数组）
+    return {
+      tabId,
+      requests: out,
+      count: out.length,
+      matched: all.length,
+      truncated: all.length > out.length,
+      limit,
+      buffered: getBuffer(tabId).size,
+      order: newest ? "newest-first" : "oldest-first",
+      extensionRequestsHidden: extensionRequests || undefined,
+    };
   },
 
   async network_detail(args) {
     const tabId = await resolveTabId(args);
-    const rec = getBuffer(tabId).get(args.request_id);
-    if (!rec)
+    // UX-62: 兼收 requestId（network_list 输出的 camelCase 名）
+    const reqId = args.request_id ?? args.requestId;
+    if (!reqId) {
       throw new ToolError(
-        "NOT_FOUND",
-        `request not in buffer: ${args.request_id}`,
+        "BAD_ARGS",
+        "network_detail: request_id is required (from network_list)",
+        false,
       );
+    }
+    args = { ...args, request_id: reqId };
+    const rec = getBuffer(tabId).get(reqId);
+    if (!rec)
+      throw new ToolError("NOT_FOUND", `request not in buffer: ${reqId}`);
     const detail = { ...rec };
     if (args.include_body !== false && rec.finished) {
       try {
@@ -2285,13 +2753,48 @@ const tools = {
 
   async get_initiator(args) {
     const tabId = await resolveTabId(args);
-    const rec = getBuffer(tabId).get(args.request_id);
-    if (!rec)
-      throw new ToolError(
-        "NOT_FOUND",
-        `request not in buffer: ${args.request_id}`,
-      );
-    return { requestId: rec.requestId, url: rec.url, initiator: rec.initiator };
+    // UX-62: 与 network_detail 同款，request_id / requestId 都收
+    const reqId = args.request_id ?? args.requestId;
+    // UX-191: 只能按 request_id 查，AI 手里往往只有 URL，得先 network_list
+    // 翻一遍找 id。直接支持 url / url_pattern 查最近一条。
+    if (!reqId) {
+      const pat = args.url_pattern || args.url;
+      if (!pat) {
+        throw new ToolError(
+          "BAD_ARGS",
+          "get_initiator: pass request_id (from network_list) or url/url_pattern",
+          false,
+        );
+      }
+      const re = args.url ? null : toRegExp(pat);
+      let hit = null;
+      for (const rec of getBuffer(tabId).values()) {
+        const u = rec.url || "";
+        if (re ? re.test(u) : u.includes(pat)) hit = rec; // 取最后一条 = 最近
+      }
+      if (!hit) {
+        throw new ToolError(
+          "NOT_FOUND",
+          `no buffered request matching ${pat} ` +
+            "(call network_start before the action that fires it)",
+          false,
+        );
+      }
+      return {
+        requestId: hit.requestId,
+        request_id: hit.requestId,
+        url: hit.url,
+        initiator: hit.initiator,
+      };
+    }
+    const rec = getBuffer(tabId).get(reqId);
+    if (!rec) throw new ToolError("NOT_FOUND", `request not in buffer: ${reqId}`);
+    return {
+      requestId: rec.requestId,
+      request_id: rec.requestId,
+      url: rec.url,
+      initiator: rec.initiator,
+    };
   },
 
   // ---- HAR 录制（独立于 networkBuffers 的探查缓冲）----
@@ -2459,86 +2962,105 @@ const tools = {
     if (!args.selector && !args.url) {
       throw new ToolError(
         "BAD_ARGS",
-        "download: selector 或 url 必填一个",
+        "download: selector or url is required (one of the two)",
         false,
       );
     }
     await ensureAttached(tabId);
-    try {
-      await cdpCall(tabId, "Page.enable");
-    } catch (e) {}
-    // 默认下载目录：浏览器默认 Downloads；save_path（绝对路径）可覆盖
-    const dlPath = args.save_path || "";
-    try {
-      await cdpCall(
-        tabId,
-        "Page.setDownloadBehavior",
-        dlPath
-          ? { behavior: "allow", downloadPath: dlPath }
-          : { behavior: "allow", eventsEnabled: true },
-      );
-    } catch (e) {
-      // 旧版 Chrome 仅支持 behavior+downloadPath，eventsEnabled 可能不支持
-      await cdpCall(
-        tabId,
-        "Page.setDownloadBehavior",
-        dlPath
-          ? { behavior: "allow", downloadPath: dlPath }
-          : { behavior: "default" },
-      );
-    }
-    // 登记一次性 watcher
     const timeoutMs = Math.min(args.timeout_ms || 60000, 180000);
-    const watchPromise = new Promise((resolve, reject) => {
-      const w = { resolve, reject, filename: "", url: "", guid: null };
-      downloadWatchers.set(tabId, w);
-    });
-    // 触发下载：url 直接导航，或 click selector
-    try {
-      if (args.url) {
-        await cdpCall(tabId, "Page.navigate", { url: args.url });
-      } else {
-        await tools.click({ tabId, selector: args.selector });
-      }
-    } catch (e) {
-      downloadWatchers.delete(tabId);
-      throw e;
-    }
-    // 等下载收尾
-    let result;
-    try {
-      const timer = new Promise((_, reject) =>
-        setTimeout(
+
+    // BUG-60/BUG-8: Chrome 150 把 Page.setDownloadBehavior 提到了 browser-level，
+    // chrome.debugger 只有 page-level target，三种参数组合全部报
+    // "Cannot access browser-level commands" —— download 工具整个不可用。
+    // 改走扩展自己的 chrome.downloads API（manifest 里已申请 downloads 权限），
+    // 它本来就是 SW 权限内的能力，不经过 CDP。
+    const watchDownloads = (predicate) =>
+      new Promise((resolve, reject) => {
+        let settled = false;
+        const done = (v, err) => {
+          if (settled) return;
+          settled = true;
+          chrome.downloads.onCreated.removeListener(onCreated);
+          chrome.downloads.onChanged.removeListener(onChanged);
+          clearTimeout(timer);
+          err ? reject(err) : resolve(v);
+        };
+        let watchedId = null;
+        const onCreated = (item) => {
+          if (watchedId == null && predicate(item)) watchedId = item.id;
+        };
+        const onChanged = async (delta) => {
+          if (watchedId == null || delta.id !== watchedId) return;
+          if (delta.state && delta.state.current === "complete") {
+            const [item] = await chrome.downloads.search({ id: watchedId });
+            done({
+              state: "completed",
+              filename: item ? item.filename : "",
+              url: item ? item.url : "",
+              receivedBytes: item ? item.bytesReceived : undefined,
+              mime: item ? item.mime : undefined,
+              downloadId: watchedId,
+            });
+          } else if (delta.state && delta.state.current === "interrupted") {
+            done(
+              null,
+              new ToolError(
+                "DOWNLOAD_FAILED",
+                "download was interrupted" +
+                  (delta.error ? `: ${delta.error.current}` : "") +
+                  " — the server may require auth/referer; try replaying the " +
+                  "request with daemon.replay instead",
+                false,
+              ),
+            );
+          }
+        };
+        const timer = setTimeout(
           () =>
-            reject(
+            done(
+              null,
               new ToolError(
                 "TIMEOUT",
-                `download not completed in ${timeoutMs}ms`,
+                `download not completed in ${timeoutMs}ms — the click may not ` +
+                  "have started a download (check with list_tabs / read_page), " +
+                  "or the file is large: raise timeout_ms",
                 true,
               ),
             ),
           timeoutMs,
-        ),
-      );
-      result = await Promise.race([watchPromise, timer]);
-    } finally {
-      downloadWatchers.delete(tabId);
+        );
+        chrome.downloads.onCreated.addListener(onCreated);
+        chrome.downloads.onChanged.addListener(onChanged);
+      });
+
+    let result;
+    if (args.url) {
+      // 直链：chrome.downloads.download 直接拿，连页面都不用动
+      const id = await chrome.downloads.download({
+        url: args.url,
+        filename: args.filename || undefined,
+        saveAs: false,
+      });
+      result = await watchDownloads((item) => item.id === id);
+    } else {
+      // 点击触发：先挂监听再点，避免竞态
+      const p = watchDownloads(() => true);
+      await tools.click({ tabId, selector: args.selector });
+      result = await p;
     }
-    const fullPath =
-      dlPath && result.filename
-        ? dlPath.replace(/[\\/]+$/, "") + "/" + result.filename
-        : result.filename || "(default dir)";
     pushEvent("download", {
       tabId,
       filename: result.filename,
-      url: watchPromise.url,
+      url: result.url,
     });
     return {
       tabId,
       filename: result.filename,
-      path: fullPath,
+      path: result.filename, // chrome.downloads 给的是绝对路径
       receivedBytes: result.receivedBytes,
+      mime: result.mime,
       state: result.state,
+      downloadId: result.downloadId,
     };
   },
 
@@ -2569,8 +3091,16 @@ const tools = {
     });
     // 页面内：找 input、构造 File、赋给 .files、派发 change（绕文件系统，relay 模式也能用）
     const expr = `(() => {
-      const input = document.querySelector(${JSON.stringify(args.selector)});
-      if (!input) return { ok: false, error: "selector not found" };
+      ${DEEP_QUERY_FN}
+      const input = __owbDeepQuery(${JSON.stringify(args.selector)});
+      // UX-146/147: "upload failed" 一句话把"找不到元素"和"元素不是 file input"
+      // 混在一起，AI 无从判断该改 selector 还是改目标。
+      if (!input) return { ok: false, code: "NOT_FOUND", error: "selector matched nothing" };
+      if (input.tagName !== "INPUT" || (input.type || "").toLowerCase() !== "file") {
+        return { ok: false, code: "NOT_FILE_INPUT",
+          error: "element is <" + input.tagName.toLowerCase() + ">" +
+            (input.type ? " type=" + input.type : "") + ", not <input type=file>" };
+      }
       const dt = new DataTransfer();
       for (const f of ${JSON.stringify(norm)}) {
         const bin = atob(f.base64);
@@ -2587,11 +3117,23 @@ const tools = {
       expression: expr,
       returnByValue: true,
     });
+    if (res.exceptionDetails) {
+      throw new ToolError(
+        "EVAL_EXCEPTION",
+        "upload failed: " + res.exceptionDetails.text,
+        false,
+      );
+    }
     const v = res.result && res.result.value;
     if (!v || !v.ok) {
+      const code = (v && v.code) || "UPLOAD_FAILED";
       throw new ToolError(
-        "UPLOAD_FAILED",
-        (v && v.error) || "upload failed",
+        code,
+        `upload: ${(v && v.error) || "failed"} (selector: ${args.selector})` +
+          (code === "NOT_FOUND"
+            ? " — call read_page to find the file input; note many sites hide " +
+              "it behind a styled button"
+            : ""),
         false,
       );
     }
@@ -2672,7 +3214,35 @@ const tools = {
         children: (frame.childFrames || []).map((c) => walk(c, depth + 1)),
       };
     };
-    return { tabId, main: walk(treeRes.frameTree, 0), contexts: ctxs };
+    // UX-225: 其他扩展的执行上下文混在 contexts 里，AI 会拿它们当页面 iframe
+    const pageCtxs = args.include_extensions
+      ? ctxs
+      : ctxs.filter((c) => !isExtensionUrl(c.url || c.name));
+    // UX-28: main/children 的树形结构 AI 得自己猜；补一份拍平的 frames 列表
+    const flat = [];
+    const flatten = (n) => {
+      flat.push({
+        frameId: n.frameId, url: n.url, name: n.name,
+        contextId: n.contextId, depth: n.depth,
+      });
+      (n.children || []).forEach(flatten);
+    };
+    const main = walk(treeRes.frameTree, 0);
+    flatten(main);
+    return {
+      tabId,
+      main,
+      frames: flat,
+      count: flat.length,
+      contexts: pageCtxs,
+      // BUG-40/UX-215: 跨源 iframe 在 chrome.debugger 的页面级会话里拿不到
+      // 执行上下文，evaluate frame_pattern 必然 FRAME_NOT_FOUND。
+      _hint: flat.some((f) => f.depth > 0 && f.contextId == null)
+        ? "frames with contextId:null are cross-origin — chrome.debugger's " +
+          "page-level session cannot evaluate inside them; read their content " +
+          "via network_detail on the frame's document request instead"
+        : undefined,
+    };
   },
 
   // ---- D. 环境模拟：设备/网络/地理/时区/语言/权限/UA（统一 emulate 入口）----
@@ -2682,10 +3252,38 @@ const tools = {
     await ensureAttached(tabId);
     const applied = [];
     const errs = [];
+    const notes = [];
+    // UX-210: device 是唯一被识别的视口参数名，AI 天然会写 viewport 或顶层
+    // width/height —— 原来一律静默忽略、返回 applied:[] 的假成功。
+    let device = args.device || args.viewport;
+    if (!device && (args.width != null || args.height != null)) {
+      device = {
+        width: args.width,
+        height: args.height,
+        mobile: args.mobile,
+        touch: args.touch,
+      };
+    }
     // 设备视口/触摸
-    if (args.device) {
-      const d = args.device;
+    if (device) {
+      const d = device;
       try {
+        // UX-69: 新 tab 初始 innerWidth=0（BUG-18）。在 0 视口上直接设移动
+        // metrics 会得到 980 而非目标宽度——先垫一个非零视口再设目标值。
+        let zeroViewport = false;
+        try {
+          const probe = await cdpCall(tabId, "Runtime.evaluate", {
+            expression: "innerWidth", returnByValue: true,
+          });
+          zeroViewport = !(probe.result && probe.result.value > 0);
+        } catch (e) {}
+        if (zeroViewport) {
+          await cdpCall(tabId, "Emulation.setDeviceMetricsOverride", {
+            width: 1280, height: 900, deviceScaleFactor: 1,
+            mobile: false, touch: false,
+          });
+          notes.push("viewport was 0px (fresh tab); primed to 1280x900 first");
+        }
         await cdpCall(tabId, "Emulation.setDeviceMetricsOverride", {
           width: d.width || 360,
           height: d.height || 640,
@@ -2694,6 +3292,17 @@ const tools = {
           mobile: !!d.mobile,
           touch: !!d.touch,
         });
+        // UX-26/107: mobile:true 不会让页面看到 ontouchstart，触摸检测仍失败。
+        // Emulation.setTouchEmulationEnabled 才是那一半。
+        if (d.touch || d.mobile) {
+          try {
+            await cdpCall(tabId, "Emulation.setTouchEmulationEnabled", {
+              enabled: true, maxTouchPoints: 5,
+            });
+          } catch (e) {
+            notes.push("touch emulation unavailable: " + e.message);
+          }
+        }
         emulateApplied(tabId, "device");
         applied.push("device");
       } catch (e) {
@@ -2704,11 +3313,14 @@ const tools = {
     if (args.network) {
       const n = args.network;
       try {
+        // UX-119: download/upload 传 0 本意是"完全断流"，`|| -1` 会把它变成
+        // 不限速。只有真正缺省（undefined/null）才用 -1。
+        const thr = (v) => (v === undefined || v === null ? -1 : Number(v));
         await cdpCall(tabId, "Network.emulateNetworkConditions", {
           offline: !!n.offline,
           latency: n.latency || 0,
-          downloadThroughput: n.download || -1,
-          uploadThroughput: n.upload || -1,
+          downloadThroughput: thr(n.download),
+          uploadThroughput: thr(n.upload),
         });
         emulateApplied(tabId, "network");
         applied.push("network");
@@ -2750,12 +3362,29 @@ const tools = {
         });
         emulateApplied(tabId, "locale");
         applied.push("locale");
+        // UX-60: CDP 只改 Intl，不改 navigator.language。AI 拿后者验证会误判失败。
+        notes.push(
+          "locale affects Intl APIs (DateTimeFormat/NumberFormat/Collator) only; " +
+            "navigator.language is unchanged — verify with " +
+            "Intl.DateTimeFormat().resolvedOptions().locale, not navigator.language " +
+            "(pass user_agent to also change the Accept-Language header)",
+        );
       } catch (e) {
         errs.push("locale: " + e.message);
       }
     }
     // 权限授予（notification/geolocation/camera...）
     if (Array.isArray(args.permissions) && args.permissions.length) {
+      // UX-76: 名字打错原来静默通过（CDP 收下就返回 ok），AI 以为授权成功了
+      const bad = args.permissions.filter((p) => !CDP_PERMISSIONS.has(p));
+      if (bad.length) {
+        throw new ToolError(
+          "BAD_ARGS",
+          `emulate: unknown permission(s): ${bad.join(",")} ` +
+            `(valid: ${[...CDP_PERMISSIONS].join("|")})`,
+          false,
+        );
+      }
       try {
         await cdpCall(tabId, "Browser.grantPermissions", {
           permissions: args.permissions,
@@ -2763,6 +3392,7 @@ const tools = {
         emulateApplied(tabId, "permissions");
         applied.push("permissions");
       } catch (e) {
+        // BUG-15: chrome.debugger 下 Browser 域常被拒，别报成"已授权"
         errs.push("permissions: " + e.message);
       }
     }
@@ -2775,13 +3405,52 @@ const tools = {
         });
         emulateApplied(tabId, "user_agent");
         applied.push("user_agent");
+        // BUG-43: 同一次调用里既设 UA 又设 device 时，UA override 会把移动
+        // 视口顶回去。UA 之后补设一遍 device metrics，让视口是最终状态。
+        if (device && applied.includes("device")) {
+          try {
+            await cdpCall(tabId, "Emulation.setDeviceMetricsOverride", {
+              width: device.width || 360,
+              height: device.height || 640,
+              deviceScaleFactor:
+                device.device_scale_factor != null
+                  ? device.device_scale_factor
+                  : 1,
+              mobile: !!device.mobile,
+              touch: !!device.touch,
+            });
+          } catch (e) {
+            errs.push("device re-apply after user_agent: " + e.message);
+          }
+        }
       } catch (e) {
         errs.push("user_agent: " + e.message);
       }
     }
+    // UX-210: 给了参数却一条都没生效 = 参数名不对，必须报错而不是回 ok+applied:[]
+    const known = new Set([
+      "tabId", "device", "viewport", "width", "height", "mobile", "touch",
+      "network", "geolocation", "timezone", "locale", "permissions",
+      "user_agent",
+    ]);
+    const unknown = Object.keys(args).filter((k) => !known.has(k));
+    if (!applied.length) {
+      throw new ToolError(
+        "BAD_ARGS",
+        "emulate: nothing applied — no recognized parameter" +
+          (unknown.length ? ` (unrecognized: ${unknown.join(",")})` : "") +
+          `. Valid: device{width,height,mobile,touch,device_scale_factor} ` +
+          "(alias viewport), network{offline,latency,download,upload}, " +
+          "geolocation{latitude,longitude}, timezone, locale, permissions[], user_agent" +
+          (errs.length ? `. Errors: ${errs.join("; ")}` : ""),
+        false,
+      );
+    }
     return {
       tabId,
       applied,
+      ignored: unknown.length ? unknown : undefined,
+      notes: notes.length ? notes : undefined,
       errors: errs.length ? errs : undefined,
       active: emulateState.get(tabId) ? [...emulateState.get(tabId)] : [],
     };
@@ -2792,11 +3461,18 @@ const tools = {
     const s = emulateState.get(tabId);
     if (!s) return { tabId, reset: [] };
     const reset = [];
+    const failed = [];
     for (const type of s) {
       try {
-        if (type === "device")
+        if (type === "device") {
           await cdpCall(tabId, "Emulation.clearDeviceMetricsOverride");
-        else if (type === "network") {
+          // UX-26/107 的对偶：device 生效时开过 touch emulation，这里要一起关
+          try {
+            await cdpCall(tabId, "Emulation.setTouchEmulationEnabled", {
+              enabled: false,
+            });
+          } catch (e) {}
+        } else if (type === "network") {
           // Network 重置节流：disable 再 enable（emulateNetworkConditions 无 clear）
           try {
             await cdpCall(tabId, "Network.disable");
@@ -2822,15 +3498,51 @@ const tools = {
             userAgent: "",
           });
         reset.push(type);
-      } catch (e) {}
+      } catch (e) {
+        // BUG-19: 原来 clear 失败被吞掉，仍返回 ok —— AI 以为环境已复原，
+        // 之后的截图/布局判断全建立在残留 override 上。
+        failed.push(`${type}: ${e && e.message ? e.message : e}`);
+      }
     }
     emulateState.delete(tabId);
-    return { tabId, reset };
+    const out = { tabId, reset, failed: failed.length ? failed : undefined };
+    // BUG-19/UX-152: clear 之后回读一次真实视口。relay 模式下 clear 命令可能
+    // 静默不生效，只有量一下才能发现。
+    if (reset.includes("device")) {
+      try {
+        const probe = await cdpCall(tabId, "Runtime.evaluate", {
+          expression: "innerWidth + 'x' + innerHeight",
+          returnByValue: true,
+        });
+        out.viewport = probe.result && probe.result.value;
+      } catch (e) {}
+    }
+    if (failed.length) {
+      throw new ToolError(
+        "RESET_INCOMPLETE",
+        `emulate_reset could not clear: ${failed.join("; ")} ` +
+          `(cleared: ${reset.join(",") || "none"}). ` +
+          "The tab still carries those overrides — reload the tab or " +
+          "re-attach if they must be gone.",
+        true,
+      );
+    }
+    return out;
   },
 
   async hook_preset(args) {
     const tabId = await resolveTabId(args);
     const presets = args.presets || (args.preset ? [args.preset] : ["xhr"]);
+    // UX-202: 预设名打错原来一路走到 loadPresetSource 才炸出 HTTP 404
+    const known = Object.keys(HOOK_PRESETS);
+    const bad = presets.filter((p) => !known.includes(p));
+    if (bad.length) {
+      throw new ToolError(
+        "BAD_ARGS",
+        `hook_preset: unknown preset(s): ${bad.join(",")} (valid: ${known.join("|")})`,
+        false,
+      );
+    }
     await ensureHookChannel(tabId);
     const reg = tabHookRegistry(tabId);
     const registered = [];
@@ -2859,7 +3571,19 @@ const tools = {
       await cdpCall(tabId, "Page.reload", { ignoreCache: !!args.ignoreCache });
       reloaded = true;
     }
-    return { tabId, registered, reloaded };
+    // UX-39/115 + BUG-14: reload 默认为真（不 reload hook 根本不生效），但 AI
+    // 常常不知道页面会被刷掉——表单填了一半、登录态没保存的现场就没了。
+    // reload:false 时也要说清"现在还没生效"，别让 AI 以为注册完就能收事件。
+    return {
+      tabId,
+      registered,
+      reloaded,
+      _hint: reloaded
+        ? "the page was reloaded — hooks only apply to documents created after " +
+          "registration; any in-page state was lost"
+        : "reload:false — hooks are registered but NOT active on the current " +
+          "document; they take effect on the next navigation/reload",
+    };
   },
 
   async hook_remove(args) {
@@ -2972,18 +3696,22 @@ const tools = {
               : ""),
         );
       }
-      return res.result ? res.result.value : undefined;
+      return oracleResult(res.result ? res.result.value : undefined, "object_id");
     }
     if (!args.function_path) {
       throw new ToolError(
         "BAD_ARGS",
-        "oracle_call: function_path or object_id is required",
+        "oracle_call: function_path or object_id is required " +
+          "(function_path is a dotted window path like \"app.sign\", " +
+          "not a JS expression)",
+        false,
       );
     }
     const expression =
       `${ORACLE_EXPR}(${JSON.stringify(args.function_path)}, ` +
       `${JSON.stringify(callArgs)}, ${freeze})`;
-    return evaluateJs(tabId, expression, { awaitPromise: true });
+    const out = await evaluateJs(tabId, expression, { awaitPromise: true });
+    return oracleResult(out, args.function_path);
   },
 
   // ---- 会话态快照/恢复 ----
@@ -3058,22 +3786,28 @@ const tools = {
 
   async break_xhr(args) {
     const tabId = await resolveTabId(args);
-    if (!args.url_substring) {
-      throw new ToolError("BAD_ARGS", "break_xhr: url_substring is required");
+    // UX-116: 其他工具的匹配参数都叫 url_pattern，这里叫 url_substring。
+    // 两个名字都收（语义仍是子串，不是正则）。
+    const urlSub = args.url_substring || args.url_pattern;
+    if (!urlSub) {
+      throw new ToolError(
+        "BAD_ARGS",
+        "break_xhr: url_substring is required (plain substring, not a regex)",
+        false,
+      );
     }
     await ensureDebugger(tabId);
-    await cdpCall(tabId, "DOMDebugger.setXHRBreakpoint", {
-      url: args.url_substring,
-    });
-    armedBreakpoints(tabId).add("xhr:" + args.url_substring);
-    return { tabId, armed: "xhr:" + args.url_substring };
+    await cdpCall(tabId, "DOMDebugger.setXHRBreakpoint", { url: urlSub });
+    armedBreakpoints(tabId).add("xhr:" + urlSub);
+    return { tabId, armed: "xhr:" + urlSub };
   },
 
   async break_remove(args) {
     const tabId = await resolveTabId(args);
     const armed = armedBreakpoints(tabId);
-    const targets = args.url_substring
-      ? ["xhr:" + args.url_substring]
+    const sub = args.url_substring || args.url_pattern; // UX-116 同款别名
+    const targets = sub
+      ? ["xhr:" + sub]
       : args.key
         ? [args.key]
         : [...armed];
@@ -3110,10 +3844,16 @@ const tools = {
     const tabId = await resolveTabId(args);
     const paused = pausedState.get(tabId);
     if (!paused) {
+      // UX-20: 说清"要先设断点再触发"，别让 AI 以为是暂时性故障空转重试
+      const armed = [...(armedBreakpointsMap.get(tabId) || [])];
       throw new ToolError(
         "NOT_PAUSED",
-        "page is not paused at a breakpoint",
-        true,
+        "page is not paused at a breakpoint — " +
+          (armed.length
+            ? `breakpoints are armed (${armed.join(", ")}) but nothing has hit ` +
+              "them yet; trigger the code path (click/evaluate) first"
+            : "arm one with break_function / break_xhr, then trigger the code path"),
+        false,
       );
     }
     const maxFrames = args.max_frames || 3;
@@ -3162,10 +3902,12 @@ const tools = {
     // BUG-65: guard against double-resume — Debugger.resume when not paused
     // throws an INTERNAL error that confuses AI.
     if (!pausedState.has(tabId)) {
+      // UX-20/84: 说清"没断住"和下一步，别让 AI 以为是暂时性故障反复重试
       throw new ToolError(
         "NOT_PAUSED",
-        "page is not paused at a breakpoint",
-        true,
+        "page is not paused at a breakpoint; nothing to resume " +
+          "(arm one with break_function / break_xhr, then trigger it)",
+        false,
       );
     }
     await cdpCall(tabId, "Debugger.resume");
@@ -3181,9 +3923,20 @@ const tools = {
     };
     const method = map[args.action || "over"];
     if (!method) {
+      // UX-68: 带合法值（原来 ${Object.keys(map)} 靠隐式 toString，读着像数组）
       throw new ToolError(
         "BAD_ARGS",
-        `step: action must be one of ${Object.keys(map)}`,
+        `step: bad action: ${args.action} (valid: ${Object.keys(map).join("|")})`,
+        false,
+      );
+    }
+    // UX-20: 未断住时 step 会撞裸 CDP 错误
+    if (!pausedState.has(tabId)) {
+      throw new ToolError(
+        "NOT_PAUSED",
+        "page is not paused at a breakpoint; cannot step " +
+          "(arm one with break_function / break_xhr, then trigger it)",
+        false,
       );
     }
     await cdpCall(tabId, method, {});
@@ -3201,7 +3954,16 @@ const tools = {
     } else {
       consoleStreamTabs.delete(tabId);
     }
-    return { tabId, consoleStream: on };
+    // UX-22/207: console_stream 只是开关，事件从 daemon_hook_logs 取 ——
+    // 描述里没说，AI 会去找一个并不存在的 events 工具。
+    return {
+      tabId,
+      consoleStream: on,
+      _hint: on
+        ? 'console events are polled via daemon.hook_logs({source:"console"}), ' +
+          "not pushed through this tool"
+        : undefined,
+    };
   },
 
   // ---- 宏工具：一键证据包 ----
@@ -3284,16 +4046,32 @@ const tools = {
         args[k] !== "",
     );
     if (given.length !== 1) {
+      // UX-232/141/205: wait_user 用 condition:"…"，wait_for 用四选一的具名参数。
+      // AI 常把 wait_user 的写法套到 wait_for 上，原来只报"四选一"不说错在哪。
+      const misused = ["condition", "state_", "wait_until", "event"].filter(
+        (k) => args[k] !== undefined,
+      );
       throw new ToolError(
         "BAD_ARGS",
-        "wait_for: selector/text/url_pattern/network_idle 四选一（且必给一个）",
+        "wait_for: pass exactly one of selector|text|url_pattern|network_idle" +
+          (misused.length
+            ? ` (got ${misused.join(",")} — that is wait_user's shape; ` +
+              "wait_for takes the condition as a named parameter)"
+            : given.length > 1
+              ? ` (got ${given.join(",")})`
+              : " (got none)"),
         false,
       );
     }
     const kind = given[0];
     const state = args.state || "visible";
     if (kind === "selector" && !["visible", "attached"].includes(state)) {
-      throw new ToolError("BAD_ARGS", `wait_for: bad state: ${state}`, false);
+      // UX-68: 枚举报错带合法值
+      throw new ToolError(
+        "BAD_ARGS",
+        `wait_for: bad state: ${state} (valid: visible|attached)`,
+        false,
+      );
     }
     const timeoutMs = Math.min(args.timeout_ms || 10000, 110000);
     const idleMs = args.idle_ms || 500;
@@ -3302,13 +4080,23 @@ const tools = {
     const elapsedMs = () => Date.now() - start;
 
     if (kind === "network_idle") {
-      // in-flight = buffer 里 !finished && !failed 的记录数；持续为 0 满 idle_ms 即返回
+      // BUG-38: 老实现把 buffer 里所有 !finished && !failed 都算在飞，于是
+      // WebSocket/SSE 这种长连接、以及永远收不到 loadingFinished 的后台请求，
+      // 会让 network_idle 在任何页面上都超时（example.com 也不例外）。
+      // 现在：长连接类型直接不算，且超过 stale_ms 还没收尾的请求视为僵尸。
+      const STREAMING = new Set(["websocket", "eventsource", "media", "manifest"]);
+      const staleMs = Math.max(args.stale_ms || 15000, 1000);
       await ensureNetwork(tabId);
       let idleSince = null;
       while (Date.now() < deadline) {
         let inflight = 0;
+        const now = Date.now();
         for (const rec of getBuffer(tabId).values()) {
-          if (!rec.finished && !rec.failed) inflight++;
+          if (rec.finished || rec.failed) continue;
+          if (STREAMING.has(String(rec.type || "").toLowerCase())) continue;
+          const startedMs = rec.startedAt || rec.wallTime * 1000 || 0;
+          if (startedMs && now - startedMs > staleMs) continue; // 僵尸请求
+          inflight++;
         }
         if (inflight === 0) {
           if (idleSince == null) idleSince = Date.now();
@@ -3338,7 +4126,8 @@ const tools = {
           } else {
             const expression =
               kind === "selector"
-                ? `(() => { const el = document.querySelector(${JSON.stringify(args.selector)});` +
+                ? `(() => { ${DEEP_QUERY_FN}` +
+                  ` const el = __owbDeepQuery(${JSON.stringify(args.selector)});` +
                   ` if (!el) return null;` +
                   (state === "visible"
                     ? ` const r = el.getBoundingClientRect();` +
@@ -3368,7 +4157,11 @@ const tools = {
     }
     throw new ToolError(
       "TIMEOUT",
-      `wait_for: ${kind} 条件 ${timeoutMs}ms 内未满足`,
+      // UX-2/66/112: retryable=true 不带退避指引会诱导原地死循环重试
+      `wait_for: ${kind} condition not met within ${timeoutMs}ms — ` +
+        "do NOT retry with the same timeout_ms; either raise it " +
+        "(max 110000), verify the condition is reachable " +
+        "(read_page / network_list), or trigger the action that satisfies it",
       true,
     );
   },
@@ -3379,7 +4172,12 @@ const tools = {
     const tabId = await resolveTabId(args);
     const mode = args.mode || "snapshot";
     if (!["snapshot", "article", "text"].includes(mode)) {
-      throw new ToolError("BAD_ARGS", `read_page: bad mode: ${mode}`, false);
+      // UX-68: 枚举报错带合法值
+      throw new ToolError(
+        "BAD_ARGS",
+        `read_page: bad mode: ${mode} (valid: snapshot|article|text)`,
+        false,
+      );
     }
     const maxChars = Math.max(args.max_chars || 20000, 100);
     await ensureAttached(tabId);
@@ -3403,16 +4201,21 @@ const tools = {
         title: "",
         content: "",
       };
+      const full = v.content || "";
       return {
         tabId,
         mode,
         title: v.title,
-        content:
-          v.content.length > maxChars
-            ? v.content.slice(0, maxChars)
-            : v.content,
-        length: v.content.length,
-        truncated: v.content.length > maxChars,
+        // UX-104/198/36: 三种模式的正文字段名各不相同（content/text/nodes），
+        // AI 得按模式切字段。统一附一份 text 别名，字段名不再是陷阱。
+        content: full.length > maxChars ? full.slice(0, maxChars) : full,
+        text: full.length > maxChars ? full.slice(0, maxChars) : full,
+        length: full.length,
+        truncated: full.length > maxChars,
+        // UX-138: 截断了却不说截了多少
+        omitted: full.length > maxChars ? full.length - maxChars : undefined,
+        root: v.root,
+        reason: v.reason, // BUG-51/UX-199: 空正文要说明原因，不是静默空串
       };
     }
 
@@ -3465,10 +4268,27 @@ const tools = {
       url: v.url,
       title: v.title,
       lines,
+      // UX-198/36/104: 三模式字段名不同（lines/content/text），AI 必须按模式
+      // 切字段。统一附 text 别名。
+      text: lines,
       nodes,
+      count: nodes.length,
       truncated,
+      // UX-121/6: truncated=true 不说被截了多少，AI 无从判断要不要调大 max_nodes
+      totalNodes: v.nodes ? v.nodes.length : nodes.length,
+      omittedNodes:
+        v.truncated || nodes.length < (v.nodes || []).length
+          ? "raise max_nodes (default 400, max 2000) or narrow with since_last"
+          : undefined,
       refsAssigned: v.refsAssigned,
+      // UX-214: 快照里有多少内容来自 shadow DOM（0 = 该页没用 Web Component）
+      shadowRoots: v.shadowRoots || undefined,
+      // UX-100: iframe 的存在必须让 AI 知道，否则找不到的元素永远找不到
+      iframes: v.iframes && v.iframes.length ? v.iframes : undefined,
       ...(stats ? { stats } : {}),
+      // UX-218/32: since_last 的增删统计藏在 stats 里，顶层看不到
+      ...(stats ? { added: stats.added, changed: stats.changed,
+                    removed: stats.removed, unchanged: stats.unchanged } : {}),
     };
   },
 
@@ -3499,7 +4319,7 @@ const tools = {
     if (!args.title) {
       throw new ToolError(
         "BAD_ARGS",
-        "task_context: title 必填（清任务用 action: clear）",
+        "task_context: title is required (use action: clear to end a task)",
         false,
       );
     }
@@ -3513,12 +4333,14 @@ const tools = {
 
   async mouse_click(args) {
     const tabId = await resolveTabId(args);
-    const target = resolveTargetSelector(args, "mouse_click");
+    // UX-231: canvas/地图/画布上要按坐标点，原来强制 selector|ref
+    const hasCoords = args.x != null && args.y != null;
+    const target = resolveTargetSelector(args, "mouse_click", !hasCoords);
     const button = args.button || "left";
     if (!["left", "right", "middle"].includes(button)) {
       throw new ToolError(
         "BAD_ARGS",
-        `mouse_click: bad button: ${button}`,
+        `mouse_click: bad button: ${button} (valid: left|right|middle)`,
         false,
       );
     }
@@ -3527,18 +4349,23 @@ const tools = {
       2,
     );
     await ensureAttached(tabId);
-    // 元素中心点（视口坐标）：scrollIntoView 后取 getBoundingClientRect
-    const found = await cdpCall(tabId, "Runtime.evaluate", {
-      expression: elementSnippet(
-        target.selector,
-        `const r = el.getBoundingClientRect();` +
-          ` return { x: r.x + r.width / 2, y: r.y + r.height / 2,` +
-          ` tag: el.tagName, text: String(el.innerText || el.value || "").slice(0, 80) };`,
-      ),
-      returnByValue: true,
-    });
-    const v = found.result && found.result.value;
-    if (!v) targetNotFound(target, "mouse_click");
+    let v;
+    if (target) {
+      // 元素中心点（视口坐标）：scrollIntoView 后取 getBoundingClientRect
+      const found = await cdpCall(tabId, "Runtime.evaluate", {
+        expression: elementSnippet(
+          target.selector,
+          `const r = el.getBoundingClientRect();` +
+            ` return { x: r.x + r.width / 2, y: r.y + r.height / 2,` +
+            ` tag: el.tagName, text: String(el.innerText || el.value || "").slice(0, 80) };`,
+        ),
+        returnByValue: true,
+      });
+      v = found.result && found.result.value;
+      if (!v) targetNotFound(target, "mouse_click");
+    } else {
+      v = { x: Number(args.x), y: Number(args.y), tag: null, text: null };
+    }
     const x = v.x,
       y = v.y;
     // BUG-35: bring tab to front — cursor animation uses requestAnimationFrame
@@ -3584,7 +4411,7 @@ const tools = {
       x,
       y,
       button,
-      clicked: target.ref || target.selector,
+      clicked: target ? target.ref || target.selector : `(${x},${y})`,
       ...(v.tag ? { tag: v.tag } : {}),
       ...(v.text ? { text: v.text } : {}),
     };
@@ -3617,21 +4444,22 @@ const tools = {
     if (!["url_change", "selector", "text"].includes(condition)) {
       throw new ToolError(
         "BAD_ARGS",
-        `wait_user: bad condition: ${condition}`,
+        // UX-68: 枚举报错带合法值
+        `wait_user: bad condition: ${condition} (valid: url_change|selector|text)`,
         false,
       );
     }
     if (condition === "selector" && !args.selector) {
       throw new ToolError(
         "BAD_ARGS",
-        "wait_user: condition=selector 时 selector 必填",
+        "wait_user: selector is required when condition=selector",
         false,
       );
     }
     if (condition === "text" && !args.text) {
       throw new ToolError(
         "BAD_ARGS",
-        "wait_user: condition=text 时 text 必填",
+        "wait_user: text is required when condition=text",
         false,
       );
     }
@@ -3689,7 +4517,12 @@ const tools = {
     }
     throw new ToolError(
       "TIMEOUT",
-      `wait_user: ${condition} 条件 ${timeoutMs}ms 内未满足`,
+      // UX-102/111/179: 同上，外加"用户可能压根没看到交接提示"这条真实原因
+      `wait_user: ${condition} condition not met within ${timeoutMs}ms — ` +
+        "the user may not have acted yet; do NOT retry immediately. " +
+        "Check the tab with read_page/screenshot, call handoff again with a " +
+        "clearer reason, or raise timeout_ms (also raise the MCP timeout " +
+        "param to timeout_ms/1000 + 10)",
       true,
     );
   },
@@ -3704,9 +4537,16 @@ const tools = {
         "script_patch: url_pattern is required (CDP glob)",
       );
     }
-    const type = args.patch_type || "prepend";
+    // UX-78: 兼收 type 别名。原来传 type:"proxy_probe" 会被静默当成默认
+    // prepend——AI 拿到 ok=true 却没得到想要的行为（假成功同类）。
+    const type = args.patch_type || args.type || "prepend";
     if (!["prepend", "proxy_probe"].includes(type)) {
-      throw new ToolError("BAD_ARGS", `script_patch: bad patch_type: ${type}`);
+      // UX-68: 枚举报错必须带合法值，否则 AI 只能试错
+      throw new ToolError(
+        "BAD_ARGS",
+        `script_patch: bad patch_type: ${type} (valid: prepend|proxy_probe)`,
+        false,
+      );
     }
     if (type === "prepend" && !args.code) {
       throw new ToolError(
@@ -3752,18 +4592,24 @@ const tools = {
         "watch_script: url_pattern is required (CDP glob)",
       );
     }
-    const action = args.action || "notify";
+    // UX-83: 兼收 event 别名（工具名叫 watch_script，AI 惯性传 event）
+    const action = args.action || args.event || "notify";
     if (action === "patch") {
       // 声明式"命中即改写"等价于直接注册 Fetch 改写
       return await tools.script_patch({
         tabId,
         url_pattern: args.url_pattern,
-        patch_type: args.patch_type || "proxy_probe",
+        patch_type: args.patch_type || args.type || "proxy_probe",
         code: args.code,
       });
     }
     if (action !== "notify") {
-      throw new ToolError("BAD_ARGS", `watch_script: bad action: ${action}`);
+      // UX-68: 带合法值
+      throw new ToolError(
+        "BAD_ARGS",
+        `watch_script: bad action: ${action} (valid: notify|patch)`,
+        false,
+      );
     }
     await ensureNetwork(tabId);
     let list = scriptWatchers.get(tabId);
@@ -3850,7 +4696,9 @@ const tools = {
       if (!managed) {
         throw new ToolError(
           "FORBIDDEN",
-          `close_tab: tab ${tabId} 不在 OWB 管理的分组（「${OWB_GROUP_TITLE}」/「${HANDOFF_GROUP_TITLE}」/「task: 」前缀），拒绝关闭；确认要关请传 force: true`,
+          `close_tab: tab ${tabId} is not in an OWB-managed group ` +
+            `("${OWB_GROUP_TITLE}" / "${HANDOFF_GROUP_TITLE}" / "task: " prefix); ` +
+            "refusing to close a user tab — pass force: true to override",
           false,
         );
       }
@@ -3858,7 +4706,16 @@ const tools = {
     try {
       await chrome.tabs.remove(tabId);
     } catch (e) {
-      throw new ToolError("BAD_TAB", `close_tab: ${e.message}`, false);
+      // UX-177: force 模式下不存在的 tab 会漏出原始 Chrome 错误
+      const msg = String(e && e.message ? e.message : e);
+      throw new ToolError(
+        "BAD_TAB",
+        /no tab with id/i.test(msg)
+          ? `close_tab: no tab with id ${tabId} (already closed?) — ` +
+            "call list_tabs for live tabIds"
+          : `close_tab: ${msg}`,
+        false,
+      );
     }
     return { tabId, closed: true };
   },
@@ -3913,20 +4770,62 @@ const tools = {
       });
       const rect = res.result && res.result.value;
       if (!rect) targetNotFound(target, "screenshot");
+      // UX-12: 0 宽/高元素传给 CDP 会回一句原始协议错误，AI 看不懂
+      if (!(rect.width > 0 && rect.height > 0)) {
+        throw new ToolError(
+          "ELEMENT_NOT_VISIBLE",
+          `screenshot: ${target.selector} has zero size ` +
+            `(${rect.width}x${rect.height}) — it is hidden or not laid out; ` +
+            "scroll it into view or wait_for {state:'visible'} first",
+          true,
+        );
+      }
       params.clip = { ...rect, scale: 1 };
     }
     const shot = await cdpCall(tabId, "Page.captureScreenshot", params);
-    return { tabId, format, data: shot.data, dataLength: shot.data.length };
+    return {
+      tabId,
+      format,
+      data: shot.data,
+      dataLength: shot.data.length,
+      // UX-96: base64 在 data 字段，不是 base64 字段 —— 返回里点一句
+      encoding: "base64",
+    };
   },
 
   // 逃生舱：任意 CDP 方法直通，新能力不用等扩展发版。
   // 高危方法（Fetch.enable 跳过 fail-safe 等）由调用方自负。
   async cdp(args) {
     const tabId = await resolveTabId(args);
-    if (!args.method)
-      throw new ToolError("BAD_ARGS", "cdp: method is required");
+    if (!args.method) {
+      throw new ToolError("BAD_ARGS", "cdp: method is required", false);
+    }
     await ensureAttached(tabId);
     const result = await cdpCall(tabId, args.method, args.params || {});
+    // UX-79: chrome.debugger 对某些域（Security/Target…）返回空/undefined 而不
+    // 抛错，工具照样 ok=true —— AI 拿到 {ok:false} 却没有 error 可读。
+    if (result === undefined || result === null) {
+      throw new ToolError(
+        "CDP_EMPTY",
+        `cdp: ${args.method} returned no result — the domain is likely not ` +
+          "reachable from chrome.debugger (Browser/Target/Security are " +
+          "commonly blocked) or needs its domain enabled first",
+        false,
+      );
+    }
+    // UX-134: Runtime.evaluate 经逃生舱调用时，异常藏在 result.exceptionDetails
+    // 里而工具仍报 ok=true。把它抬到工具层。
+    if (result.exceptionDetails) {
+      throw new ToolError(
+        "EVAL_EXCEPTION",
+        `cdp ${args.method}: ` +
+          result.exceptionDetails.text +
+          (result.exceptionDetails.exception
+            ? `: ${result.exceptionDetails.exception.description || ""}`
+            : ""),
+        false,
+      );
+    }
     return { tabId, method: args.method, result };
   },
 
@@ -3937,19 +4836,67 @@ const tools = {
     const res = await cdpCall(tabId, "Runtime.evaluate", {
       expression: elementSnippet(
         target.selector,
-        `el.click();` +
-          ` return { tag: el.tagName, text: String(el.innerText || el.value || "").slice(0, 80) };`,
+        // BUG-24: disabled 元素 .click() 是 no-op，原来照样返回 ok=true
+        `if (el.disabled || el.getAttribute("aria-disabled") === "true") {` +
+          `   return { __disabled: true, tag: el.tagName };` +
+          ` }` +
+          ` const urlBefore = location.href;` +
+          ` el.click();` +
+          ` return { tag: el.tagName, urlBefore,` +
+          `   text: String(el.innerText || el.value || "").slice(0, 80) };`,
       ),
       returnByValue: true,
     });
+    // UX-81: 不看 exceptionDetails，任何 JS 异常都会被误报成 REF_STALE/NOT_FOUND
+    if (res.exceptionDetails) {
+      throw new ToolError(
+        "EVAL_EXCEPTION",
+        `click failed on ${target.selector}: ` +
+          res.exceptionDetails.text +
+          (res.exceptionDetails.exception
+            ? `: ${res.exceptionDetails.exception.description || ""}`
+            : ""),
+        false,
+      );
+    }
     const v = res.result && res.result.value;
     if (!v) targetNotFound(target, "click");
-    return {
+    if (v.__disabled) {
+      throw new ToolError(
+        "ELEMENT_DISABLED",
+        `click: ${target.selector} is disabled — the click would be a no-op ` +
+          "(fill the required fields first, or wait_for the element to enable)",
+        true,
+      );
+    }
+    // UX-46: click 成功 ≠ 发生导航。AI 用"url 变了"判断成功会误判（站点可能
+    // 新开 tab、被拦截、或走 SPA 路由）。这里直接给结论。
+    let urlAfter = v.urlBefore;
+    try {
+      const after = await cdpCall(tabId, "Runtime.evaluate", {
+        expression: "location.href",
+        returnByValue: true,
+      });
+      urlAfter = (after.result && after.result.value) || urlAfter;
+    } catch (e) {}
+    const navigated = urlAfter !== v.urlBefore;
+    const out = {
       tabId,
       clicked: target.selector,
       ...(target.ref ? { ref: target.ref } : {}),
-      ...v,
+      tag: v.tag,
+      text: v.text,
+      navigated,
+      url: urlAfter,
     };
+    if (!navigated) {
+      out._hint =
+        "the click dispatched but the URL did not change — this is normal for " +
+        "in-page actions; if you expected navigation it may have opened a new " +
+        "tab (list_tabs), been intercepted, or be an SPA route change " +
+        "(use wait_for {url_pattern} or read_page since_last to confirm)";
+    }
+    return out;
   },
 
   async fill(args) {
@@ -3961,19 +4908,72 @@ const tools = {
         target.selector,
         `el.focus();` +
           ` const value = ${JSON.stringify(String(args.value != null ? args.value : ""))};` +
-          ` if (el.isContentEditable) { el.textContent = value; }` +
-          ` else {` +
-          `   const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : el.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;` +
-          `   Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);` + // native setter 绕 React 受控组件
+          ` const type = (el.getAttribute("type") || "").toLowerCase();` +
+          // BUG-23: checkbox/radio 没有可写的 value 语义，写 value 是静默无效；
+          // 这类元素要动 .checked。
+          ` if (el.tagName === "INPUT" && (type === "checkbox" || type === "radio")) {` +
+          `   const want = !/^(false|0|off|no|unchecked|)$/i.test(value);` +
+          `   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked").set;` +
+          `   setter.call(el, want);` +
+          `   el.dispatchEvent(new Event("input", { bubbles: true }));` +
+          `   el.dispatchEvent(new Event("change", { bubbles: true }));` +
+          `   return { tag: el.tagName, type, checked: el.checked, value: el.value };` +
           ` }` +
+          ` if (el.isContentEditable) {` +
+          `   el.textContent = value;` +
+          `   el.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));` +
+          `   el.dispatchEvent(new Event("change", { bubbles: true }));` +
+          `   return { tag: el.tagName, contentEditable: true, value: el.textContent };` +
+          ` }` +
+          // UX-99: 不可填元素（div/span/a…）原来落到 NOT_FOUND，AI 一头雾水
+          ` const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype` +
+          `   : el.tagName === "SELECT" ? HTMLSelectElement.prototype` +
+          `   : el.tagName === "INPUT" ? HTMLInputElement.prototype : null;` +
+          ` if (!proto) { return { __notFillable: true, tag: el.tagName, role: el.getAttribute("role") }; }` +
+          ` Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);` + // native setter 绕 React 受控组件
           ` el.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));` +
           ` el.dispatchEvent(new Event("change", { bubbles: true }));` +
-          ` return { tag: el.tagName, value };`,
+          // 回读：<select> 传了不存在的 option 时 value 会保持原值 —— 假成功
+          ` return { tag: el.tagName, type, value, actual: el.value };`,
       ),
       returnByValue: true,
     });
+    // UX-81: fill 不查 exceptionDetails，任何 JS 异常都变成误导性的 REF_STALE
+    if (res.exceptionDetails) {
+      throw new ToolError(
+        "EVAL_EXCEPTION",
+        `fill failed on ${target.selector}: ` +
+          res.exceptionDetails.text +
+          (res.exceptionDetails.exception
+            ? `: ${res.exceptionDetails.exception.description || ""}`
+            : ""),
+        false,
+      );
+    }
     const v = res.result && res.result.value;
     if (!v) targetNotFound(target, "fill");
+    if (v.__notFillable) {
+      throw new ToolError(
+        "NOT_FILLABLE",
+        `fill: ${target.selector} is a <${String(v.tag).toLowerCase()}>` +
+          (v.role ? ` (role=${v.role})` : "") +
+          " — not an input/textarea/select and not contenteditable. " +
+          "Use click for buttons/links, or target the inner editable element.",
+        false,
+      );
+    }
+    // BUG-34 同类：<select> 传不存在的 option 会静默保持原值
+    if (v.actual !== undefined && v.actual !== v.value) {
+      throw new ToolError(
+        "FILL_REJECTED",
+        `fill: ${target.selector} kept "${v.actual}" instead of "${v.value}"` +
+          (v.tag === "SELECT"
+            ? " — <select> only accepts an existing option value; " +
+              "call read_page to list the options"
+            : " — the page rejected or rewrote the value"),
+        false,
+      );
+    }
     return {
       tabId,
       filled: target.selector,
@@ -3990,7 +4990,19 @@ const tools = {
     try {
       await cdpCall(tabId, "Page.bringToFront");
     } catch (e) {}
-    if (args.text != null && args.text !== "") {
+    // UX-31/167: text 和 keys 同时给时另一个被静默丢弃，AI 以为两段都发了
+    const hasText = args.text != null && args.text !== "";
+    const hasKeys = args.keys != null && String(args.keys).trim() !== "";
+    if (hasText && hasKeys) {
+      throw new ToolError(
+        "BAD_ARGS",
+        "send_keys: pass either text or keys, not both " +
+          "(text goes through Input.insertText, keys through real key events; " +
+          "call the tool twice if you need both)",
+        false,
+      );
+    }
+    if (hasText) {
       await cdpCall(tabId, "Input.insertText", { text: String(args.text) });
       return { tabId, inserted: String(args.text).length };
     }
@@ -3999,7 +5011,11 @@ const tools = {
       .split(/\s+/)
       .filter(Boolean);
     if (!keys.length) {
-      throw new ToolError("BAD_ARGS", "send_keys: text 或 keys 必填一个");
+      throw new ToolError(
+        "BAD_ARGS",
+        "send_keys: text or keys is required (one of the two)",
+        false,
+      );
     }
     const KEYMAP = {
       Enter: { vk: 13, text: "\r" },
@@ -4015,20 +5031,69 @@ const tools = {
       ArrowUp: { vk: 38 },
       ArrowRight: { vk: 39 },
       ArrowDown: { vk: 40 },
+      // UX-117: Space 一直不在表里，"按空格"这种最普通的操作做不了
+      Space: { vk: 32, text: " ", code: "Space" },
+      // UX-117: F1-F12
+      ...Object.fromEntries(
+        Array.from({ length: 12 }, (_, i) => [
+          "F" + (i + 1),
+          { vk: 112 + i, code: "F" + (i + 1) },
+        ]),
+      ),
     };
-    for (const k of keys) {
-      const def = KEYMAP[k];
+    // UX-165/30: 修饰键组合（Ctrl+A / Meta+C / Shift+Tab）完全不支持，
+    // 全选、复制、反向 Tab 这些基本交互都做不出来。
+    const MODBIT = { ctrl: 2, control: 2, alt: 1, shift: 8, meta: 4, cmd: 4, command: 4 };
+    const codeOf = (ch) => {
+      if (/^[a-z]$/i.test(ch)) return "Key" + ch.toUpperCase();
+      if (/^[0-9]$/.test(ch)) return "Digit" + ch;
+      return ch;
+    };
+    const pressed = [];
+    for (const combo of keys) {
+      const parts = combo.split("+");
+      const keyName = parts.pop();
+      let modifiers = 0;
+      for (const m of parts) {
+        const bit = MODBIT[m.toLowerCase()];
+        if (!bit) {
+          throw new ToolError(
+            "BAD_ARGS",
+            `send_keys: unknown modifier: ${m} ` +
+              "(valid: Ctrl|Alt|Shift|Meta, e.g. \"Ctrl+a\" or \"Shift+Tab\")",
+            false,
+          );
+        }
+        modifiers |= bit;
+      }
+      let def = KEYMAP[keyName];
+      // UX-166: 单字符键（a-z / 0-9）不被支持，AI 只能退回 text 模式，
+      // 但 text 走 insertText 不产生真实按键事件（快捷键/热键场景失效）。
+      if (!def && keyName.length === 1) {
+        const upper = keyName.toUpperCase();
+        def = {
+          vk: upper.charCodeAt(0),
+          text: modifiers & ~8 ? undefined : keyName, // 带 Ctrl/Alt/Meta 时不产字符
+          code: codeOf(keyName),
+          key: keyName,
+        };
+      }
       if (!def) {
         throw new ToolError(
           "BAD_ARGS",
-          `unknown key: ${k}（支持 ${Object.keys(KEYMAP).join(" ")}；自由文本用 text 参数）`,
+          `send_keys: unknown key: ${keyName} ` +
+            `(named keys: ${Object.keys(KEYMAP).join(" ")}; ` +
+            "single characters and Ctrl+/Alt+/Shift+/Meta+ combos also work; " +
+            "use the text param for free-form typing)",
+          false,
         );
       }
       const base = {
-        key: k,
-        code: k,
+        key: def.key || keyName,
+        code: def.code || keyName,
         windowsVirtualKeyCode: def.vk,
         nativeVirtualKeyCode: def.vk,
+        modifiers,
       };
       await cdpCall(tabId, "Input.dispatchKeyEvent", {
         type: def.text ? "keyDown" : "rawKeyDown",
@@ -4039,8 +5104,9 @@ const tools = {
         type: "keyUp",
         ...base,
       });
+      pressed.push(combo);
     }
-    return { tabId, pressed: keys };
+    return { tabId, pressed };
   },
 
   // ---- Cookie 基础件（cookie_get/cookie_set）----
@@ -4061,7 +5127,11 @@ const tools = {
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
     if (!args.name || args.value === undefined) {
-      throw new ToolError("BAD_ARGS", "cookie_set: name 和 value 必填");
+      throw new ToolError(
+        "BAD_ARGS",
+        "cookie_set: name and value are required",
+        false,
+      );
     }
     const params = { name: args.name, value: String(args.value) };
     for (const k of [
@@ -4075,6 +5145,45 @@ const tools = {
     ]) {
       if (args[k] !== undefined) params[k] = args[k];
     }
+    // UX-94: CDP 静默丢弃非法 sameSite（返回 success:true 但 cookie 没这属性）
+    if (params.sameSite !== undefined) {
+      if (!["Strict", "Lax", "None"].includes(params.sameSite)) {
+        throw new ToolError(
+          "BAD_ARGS",
+          `cookie_set: bad sameSite: ${params.sameSite} (valid: Strict|Lax|None)`,
+          false,
+        );
+      }
+    }
+    // UX-206: expires 必须是 Unix 秒（double）。ISO 字符串直传会撞 CDP
+    // "BINDINGS: double value expected" 的 INTERNAL 错误——这里先归一化。
+    if (params.expires !== undefined) {
+      let exp = params.expires;
+      if (typeof exp === "string") {
+        const ms = Date.parse(exp);
+        if (Number.isNaN(ms)) {
+          throw new ToolError(
+            "BAD_ARGS",
+            `cookie_set: bad expires: ${exp} ` +
+              "(Unix seconds, or a Date-parseable string)",
+            false,
+          );
+        }
+        exp = ms / 1000;
+      }
+      exp = Number(exp);
+      if (!Number.isFinite(exp)) {
+        throw new ToolError(
+          "BAD_ARGS",
+          `cookie_set: bad expires: ${params.expires} (Unix seconds)`,
+          false,
+        );
+      }
+      params.expires = exp;
+    } else if (args.expirationDate !== undefined) {
+      // chrome.cookies API 的字段名，AI 常混用
+      params.expires = Number(args.expirationDate);
+    }
     if (!params.url && !params.domain) {
       const tab = await chrome.tabs.get(tabId);
       params.url = tab.url;
@@ -4083,7 +5192,10 @@ const tools = {
     if (!res.success) {
       throw new ToolError(
         "BAD_ARGS",
-        "cookie_set: Network.setCookie 拒绝（检查 url/domain/sameSite 组合）",
+        "cookie_set: Network.setCookie rejected the cookie " +
+          "(check the url/domain/sameSite combination; " +
+          "sameSite=None requires secure=true)",
+        false,
       );
     }
     return { tabId, success: true };
@@ -4092,7 +5204,9 @@ const tools = {
   async cookie_delete(args) {
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
-    if (!args.name) throw new ToolError("BAD_ARGS", "cookie_delete: name 必填");
+    if (!args.name) {
+      throw new ToolError("BAD_ARGS", "cookie_delete: name is required", false);
+    }
     const params = { name: args.name };
     for (const k of ["url", "domain", "path"]) {
       if (args[k] !== undefined) params[k] = args[k];
@@ -4101,8 +5215,37 @@ const tools = {
       const tab = await chrome.tabs.get(tabId);
       params.url = tab.url;
     }
-    await cdpCall(tabId, "Network.deleteCookies", params);
-    return { tabId, deleted: args.name };
+    // BUG-52: cookie_get 回的 domain 带前导点（".example.com"），原样传回
+    // Network.deleteCookies 匹配不上，删除静默失败（返回 ok，cookie 还在）。
+    // 两种写法都删一遍。
+    const variants = [params];
+    if (params.domain && params.domain.startsWith(".")) {
+      variants.push({ ...params, domain: params.domain.slice(1) });
+    } else if (params.domain) {
+      variants.push({ ...params, domain: "." + params.domain });
+    }
+    for (const p of variants) {
+      await cdpCall(tabId, "Network.deleteCookies", p);
+    }
+    // 回读确认：删不掉要说出来，别报假成功
+    let remaining = [];
+    try {
+      const check = await cdpCall(tabId, "Network.getCookies", {
+        urls: params.url ? [params.url] : undefined,
+      });
+      remaining = (check.cookies || []).filter((c) => c.name === args.name);
+    } catch (e) {}
+    if (remaining.length) {
+      throw new ToolError(
+        "DELETE_FAILED",
+        `cookie_delete: "${args.name}" still present after delete ` +
+          `(domain=${remaining.map((c) => c.domain).join(",")}, ` +
+          `path=${remaining.map((c) => c.path).join(",")}) — ` +
+          "pass the exact domain/path from cookie_get",
+        false,
+      );
+    }
+    return { tabId, deleted: args.name, verified: true };
   },
 
   // ---- 脚本源码感知（枚举全部 JS 含 eval/VM + 拉源码 + 关键词定位）----
@@ -4116,11 +5259,32 @@ const tools = {
     const reg = scriptRegistryMap.get(tabId) || new Map();
     const re = args.url_pattern ? toRegExp(args.url_pattern) : null;
     const out = [];
+    let extensionScripts = 0;
     for (const s of reg.values()) {
+      // UX-88: Debugger 会把同页运行的【其他扩展】的 content script 一起登记，
+      // 在真实站点上常常淹没页面自己的脚本。默认剔除，include_extensions 可要回。
+      if (!args.include_extensions && isExtensionUrl(s.url)) {
+        extensionScripts++;
+        continue;
+      }
       if (re && !re.test(s.url || "")) continue;
       out.push(s);
     }
-    return { tabId, count: out.length, scripts: out };
+    // UX-82: script_patch 注册的活动改写在任何工具里都查不到，AI 无法审计
+    const patches = (fetchPatchTabs.get(tabId) || []).map((p) => ({
+      id: p.id, pattern: p.pattern, type: p.type,
+    }));
+    const watchers = (scriptWatchers.get(tabId) || []).map((w) => ({
+      id: w.id, pattern: w.pattern, action: "notify",
+    }));
+    return {
+      tabId,
+      count: out.length,
+      scripts: out,
+      patches,
+      watchers,
+      extensionScriptsHidden: extensionScripts || undefined,
+    };
   },
 
   async script_source(args) {
@@ -4128,7 +5292,7 @@ const tools = {
     if (!args.script_id) {
       throw new ToolError(
         "BAD_ARGS",
-        "script_source: script_id 必填（script_list 获取）",
+        "script_source: script_id is required (get one from script_list)",
       );
     }
     await ensureDebugger(tabId);
@@ -4148,20 +5312,31 @@ const tools = {
 
   async search_code(args) {
     const tabId = await resolveTabId(args);
-    if (!args.query) throw new ToolError("BAD_ARGS", "search_code: query 必填");
+    if (!args.query) {
+      throw new ToolError("BAD_ARGS", "search_code: query is required", false);
+    }
     await ensureDebugger(tabId);
     const reg = scriptRegistryMap.get(tabId) || new Map();
     const re = args.url_pattern ? toRegExp(args.url_pattern) : null;
     const limit = Math.min(args.limit || 50, 200);
     const matches = [];
+    let extensionScripts = 0;
     for (const s of reg.values()) {
       if (matches.length >= limit) break;
+      // UX-88: 不过滤时，HN 上搜 "fetch"、GitHub 上搜 "token" 命中的 10 条
+      // 全部来自别的扩展的注入脚本，页面自己的代码一条都排不上。
+      if (!args.include_extensions && isExtensionUrl(s.url)) {
+        extensionScripts++;
+        continue;
+      }
       if (re && !re.test(s.url || "")) continue;
       try {
         const res = await cdpCall(tabId, "Debugger.searchInContent", {
           scriptId: s.scriptId,
           query: args.query,
           caseSensitive: !!args.case_sensitive,
+          // UX-193: is_regex 从来没往下传，query 一直按字面量搜
+          isRegex: !!(args.is_regex ?? args.isRegex),
         });
         for (const m of res.result || []) {
           matches.push({
@@ -4226,7 +5401,7 @@ const tools = {
     }
     throw new ToolError(
       "BAD_ARGS",
-      "break_function: function_path 或 (url_pattern + line_number) 必填一组",
+      "break_function: pass either function_path or (url_pattern + line_number)",
     );
   },
 };
@@ -4273,14 +5448,9 @@ async function onMessage(msg) {
     const data = await handler(args);
     send({ type: "tool_result", requestId, payload: { ok: true, data } });
   } catch (e) {
-    const err =
-      e instanceof ToolError
-        ? { code: e.code, message: e.message, retryable: e.retryable }
-        : {
-            code: "INTERNAL",
-            message: String(e && e.message ? e.message : e),
-            retryable: true,
-          };
+    // 统一归类：裸 CDP 错误在这里变成带 code/retryable/下一步的可操作错误
+    const te = toToolError(e);
+    const err = { code: te.code, message: te.message, retryable: te.retryable };
     send({
       type: "tool_result",
       requestId,

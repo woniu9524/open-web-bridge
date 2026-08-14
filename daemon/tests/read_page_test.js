@@ -158,5 +158,44 @@ check("max_nodes 截断",
   r5.nodes.length === 3 && r5.truncated === true,
   `nodes=${r5.nodes.length} truncated=${r5.truncated}`);
 
+// ---- 场景 4：UX-80 contenteditable 也要拿到 ref ----
+// role 落在 generic（不在 INTERACTIVE 表里），靠 el.isContentEditable 兜底，
+// 否则富文本编辑区在 ref 工作流里完全不可寻址。
+const ce = makeEl("div", { contenteditable: "true" }, { innerText: "正文编辑区" });
+ce.isContentEditable = true;
+const plainDiv = makeEl("div", { role: "presentation" }, { innerText: "装饰块" });
+const r6 = runSnapshot([ce, plainDiv], 1);
+const ceNode = r6.nodes.find((x) => x.name === "正文编辑区") || {};
+const plainNode = r6.nodes.find((x) => x.name === "装饰块") || {};
+check("UX-80 contenteditable 分到 ref",
+  ceNode.ref === "e1" && ce.getAttribute("data-owb-ref") === "e1",
+  JSON.stringify(ceNode));
+check("UX-80 普通非交互元素仍不分 ref",
+  plainNode.ref === null, JSON.stringify(plainNode));
+
+// ---- 场景 5：行内补充信息（checked / href / type / disabled / values）----
+const cbOn = makeEl("input", { type: "checkbox", "aria-label": "订阅" });
+cbOn.checked = true;
+const cbOff = makeEl("input", { type: "checkbox", "aria-label": "退订" });
+cbOff.checked = false;
+const mail = makeEl("input", { type: "email", "aria-label": "邮箱" });
+mail.required = true;
+const linkHref = makeEl("a", { href: "/detail?id=7" }, { innerText: "详情" });
+const btnOff = makeEl("button", {}, { innerText: "提交" });
+btnOff.disabled = true;
+const r7 = runSnapshot([cbOn, cbOff, mail, linkHref, btnOff], 1);
+const lineOf = (n) => (r7.nodes.find((x) => x.name === n) || {}).line || "";
+check("UX-128 checkbox 显示 checked", / checked$/.test(lineOf("订阅")), lineOf("订阅"));
+check("UX-128 未勾显示 unchecked", / unchecked$/.test(lineOf("退订")), lineOf("退订"));
+check("UX-130 input type + required", /type=email required/.test(lineOf("邮箱")), lineOf("邮箱"));
+check("UX-180 链接带 href", /href=.*\/detail\?id=7/.test(lineOf("详情")), lineOf("详情"));
+check("BUG-24 disabled 元素标注", / disabled$/.test(lineOf("提交")), lineOf("提交"));
+
+// ---- 场景 6：UX-105 表单控件靠 name 兜底命名 ----
+const bare = makeEl("input", { type: "text", name: "username" });
+const r8 = runSnapshot([bare], 1);
+check("UX-105 无 label 的输入框用 name 兜底",
+  (r8.nodes[0] || {}).name === "username", JSON.stringify(r8.nodes[0]));
+
 console.log(`\n${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);
