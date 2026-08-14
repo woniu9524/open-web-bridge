@@ -256,17 +256,35 @@ async function autostartDaemon() {
   return false;
 }
 
+// 扩展的 MV3 service worker 会被浏览器回收，WS 随之断开；扩展侧靠 30s 周期的
+// alarm 唤醒重连。这个空窗里的调用会拿到 NO_EXTENSION / DISCONNECTED——
+// 217 站连续跑动中实测掉线 6 次，直接打掉 2 个站点的结果。
+// 掉线是瞬时且能自愈的，在 CLI 这一层透明重试即可：daemon 侧「立即失败」的
+// 语义不动（测试依赖它），AI 也不必自己写重试逻辑。
+const TRANSIENT_EXT_ERRORS = new Set(["NO_EXTENSION", "DISCONNECTED"]);
+const EXT_RETRY_DELAYS_MS = [1500, 4000, 10000, 20000];
+
 async function callWithAutostart(ctl, name, args, timeout, autostart) {
+  let res;
   try {
-    return await ctl.call(name, args, timeout);
+    res = await ctl.call(name, args, timeout);
   } catch (e) {
     const refused = /ECONNREFUSED|ctl disconnected/.test(String(e && e.message));
     if (!refused || !autostart) throw e;
     if (!(await autostartDaemon())) {
       throw new Error(`daemon 拉起失败：手动运行 node ${path.join("owb-daemon", "src", "server.js")} 看报错`);
     }
-    return ctl.call(name, args, timeout);
+    res = await ctl.call(name, args, timeout);
   }
+  for (const delay of EXT_RETRY_DELAYS_MS) {
+    if (res.ok || !res.error || !TRANSIENT_EXT_ERRORS.has(res.error.code)) break;
+    process.stderr.write(
+      `[owb] 扩展暂时不可达（${res.error.code}），${delay / 1000}s 后重试…\n`,
+    );
+    await new Promise((r) => setTimeout(r, delay));
+    res = await ctl.call(name, args, timeout);
+  }
+  return res;
 }
 
 // ---------------------------------------------------------------------------
