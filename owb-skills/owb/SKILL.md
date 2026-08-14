@@ -357,7 +357,11 @@ base64 灌进你的上下文。任何工具返回超过 60KB 会被截断并附 
 
 共同根因：Chrome 对隐藏窗口里的页面做资源节流（`requestAnimationFrame`
 不触发、媒体缓冲暂停），这是浏览器的省电设计，不是 OWB 的故障，也没有
-CDP 层面的绕过方法。**凡是页面看起来"该动的没动"——动画卡住、视频不转、
+CDP 层面的绕过方法——试过 `Emulation.setFocusEmulationEnabled`，能把
+`document.visibilityState` 骗成 `"visible"`，但 2048 的棋盘还是不出来：
+这个开关只改 JS 能读到的属性值（给"测试我的页面在隐藏时表现对不对"这种
+场景用的），改不了 Chrome 内部真正的渲染节流，没有必要再往这个方向试。
+**凡是页面看起来"该动的没动"——动画卡住、视频不转、
 游戏没反应、按键点击了却没有任何视觉变化**，先 `owb eval
 'document.visibilityState'` 查一下，是 `"hidden"` 就提醒用户把浏览器窗口
 切到前台，而不是反复重试或断定工具坏了。
