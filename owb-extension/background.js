@@ -3265,13 +3265,21 @@ const tools = {
 
     let result;
     if (args.url) {
-      // 直链：chrome.downloads.download 直接拿，连页面都不用动
-      const id = await chrome.downloads.download({
+      // BUG-98: 直链分支原来先 await download() 拿到 id，再拿 id 去挂监听——
+      // 小文件（甚至 example.com 首页这种几 KB 的 HTML）几乎瞬间下完，
+      // onCreated/onChanged 很可能在监听器挂上之前就已经触发过了，
+      // watchDownloads 等一个已经发生过的事件，直接硬等到超时。旁边点击
+      // 分支的注释早就写明白了这个坑（"先挂监听再点，避免竞态"），
+      // 但同样的修法没有搬到这个分支来。改成一样的顺序：先挂通配监听，
+      // 再发起下载——不用等 id 才能匹配，反正这次调用期间不会有别的下载
+      // 并发触发。
+      const p = watchDownloads(() => true);
+      await chrome.downloads.download({
         url: args.url,
         filename: args.filename || undefined,
         saveAs: false,
       });
-      result = await watchDownloads((item) => item.id === id);
+      result = await p;
     } else {
       // 点击触发：先挂监听再点，避免竞态
       const p = watchDownloads(() => true);

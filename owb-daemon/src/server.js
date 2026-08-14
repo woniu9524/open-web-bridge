@@ -983,9 +983,16 @@ export class Bridge {
         bodyBytes: data.bodyBytes || 0, tabIds: data.tabIds || null,
       } };
     }
-    // ---- E1 下载编排：扩展 download(save_path=work/downloads 绝对路径) → 返回落盘路径 ----
+    // ---- E1 下载编排：扩展 download → work/downloads/ ----
     if (name === "download") {
       const dlDirAbs = this.store._abs("downloads");
+      // BUG-99: 这里传的 save_path 其实用不上——chrome.downloads.download()
+      // 的 filename 参数只能是相对 Chrome 自己配置的下载目录的相对路径，
+      // 扩展那边压根没读 save_path（也读不了，API 不支持存到任意绝对路径）。
+      // 文件实际落在用户真实的系统下载目录，不是这里以为的 work/downloads/。
+      // 保留这个字段传给扩展没有坏处（万一以后扩展真支持了），但落盘位置
+      // 不能再假装是 dlDirAbs——下面用 copy 把文件搬进 work/downloads/，
+      // 不动用户真实下载目录里的原文件（不做静默删除）。
       const callArgs = { save_path: dlDirAbs };
       if (args.tabId != null) callArgs.tabId = args.tabId;
       if (args.url) callArgs.url = args.url;
@@ -994,11 +1001,36 @@ export class Bridge {
       const res = await this.call_tool("download", callArgs, 180);
       if (!res.ok) return res;
       const data = res.data || {};
+      let sandboxedPath = null;
+      let copyErr = null;
+      if (data.path && fs.existsSync(data.path)) {
+        const dest = path.join(dlDirAbs, path.basename(data.path));
+        // Windows 上文件刚写完时常被杀软/索引服务短暂锁一下，立刻 copy 偶发
+        // EBUSY/EPERM；退避重试几次，比一次失败就放弃更可靠。
+        for (const delayMs of [0, 200, 500]) {
+          if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+          try {
+            fs.copyFileSync(data.path, dest);
+            sandboxedPath = dest;
+            copyErr = null;
+            break;
+          } catch (e) {
+            copyErr = e.message;
+          }
+        }
+      }
       return { ok: true, data: {
         filename: data.filename || null,
-        path: data.path || null,
+        path: sandboxedPath || data.path || null,
+        originalPath: data.path || null,
         receivedBytes: data.receivedBytes != null ? data.receivedBytes : null,
-        dir: `downloads/${data.filename || ""}`,
+        dir: sandboxedPath
+          ? `downloads/${path.basename(sandboxedPath)}`
+          : null,
+        note: sandboxedPath
+          ? undefined
+          : "could not copy into work/downloads/ (" + (copyErr || "file missing") +
+            "); file is only at originalPath (your system Downloads folder)",
       } };
     }
     // ---- C7: HAR → 重放脚本（python/curl/node）----

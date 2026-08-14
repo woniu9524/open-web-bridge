@@ -671,3 +671,58 @@ CSS 隐藏"，跟直接 `eval document.visibilityState` 查到的 `"hidden"` 对
 成功（文件确实进了 `input.files`，name/size/type 都对得上）、selector 上传
 依旧成功（向后兼容）、坏 ref 报可重试 `REF_STALE`、坏 selector 报不可重试
 `NOT_FOUND`，两种错误都带上了"很多站点把 input 藏起来"的提示。
+
+### BUG-98 · `download --url` 直链分支监听器挂晚了，小文件必现超时 🔴 高影响
+
+**现象**：`owb file fetch --args '{"url":"https://example.com/"}'`
+（daemon 侧直链下载，映射到扩展的 `download` 工具）对着一个几百字节的
+页面稳定 60 秒超时，报"the click may not have started a download"——但这
+条路径根本不涉及点击。
+
+**根因**：扩展 `download()` 里，点击触发分支的注释写着"先挂监听再点，
+避免竞态"，`watchDownloads(() => true)` 确实排在 `tools.click(...)` 之前；
+但直链分支反过来——先 `await chrome.downloads.download(...)` 拿到 `id`，
+再拿这个 `id` 去挂 `onCreated`/`onChanged` 监听。文件越小下载越快，
+`onCreated`→`onChanged(complete)` 很可能在监听器挂上之前就已经触发完毕，
+`watchDownloads` 等一个已经发生过的事件，白等到超时——**同一份代码里，
+一条分支已经修过这个坑，另一条分支的相同结构没有跟着改**。
+
+**修复**：直链分支改成跟点击分支一样的顺序——先挂通配监听（`() => true`，
+本次调用期间不会有别的下载并发），再发起 `chrome.downloads.download()`。
+不再依赖下载返回的 `id` 做匹配。
+
+**验证**：`https://example.com/`（559 字节）修复前稳定 60s 超时；修复后
+1.37 秒完成，`receivedBytes` 对得上页面实际大小。
+
+### BUG-99 · 下载文件其实落在用户系统下载目录，`dir` 字段却拼出一个不存在的路径 🟠 中影响
+
+**现象**：`daemon.download`（`owb file fetch` / `owb download`）的编排代码
+构造了 `save_path` 传给扩展，返回时还拼了个 `dir: "downloads/${filename}"`
+——看起来像是文件已经落进了 daemon 自己的 `work/downloads/` 沙盒目录。
+实际上文件在用户真实的系统下载目录（`C:\Users\...\Downloads\`），
+`data.filename` 本身就是这个绝对路径，拼出来的 `dir` 字段是
+`"downloads/C:\Users\Administrator\Downloads\下载 (1).htm"`——半个相对
+路径接一个绝对路径，指向一个根本不存在的位置，谁拿这个字段去读文件都会
+`ENOENT`。
+
+**根因**：`chrome.downloads.download()` 的 `filename` 参数本来就只能是
+相对 Chrome 自己配置的下载目录的相对路径——这个 API 设计上不允许扩展把
+文件写到任意绝对路径（浏览器的安全限制），所以扩展侧压根没读也读不了
+daemon 传过去的 `save_path`。daemon 那边的编排代码看起来是照着"文件会
+落进 work/downloads/"这个假设写的，但这个假设从一开始就不可能通过这层
+API 实现。
+
+**修复**：不再假装能让扩展直接存到指定目录。扩展下载完成后返回真实的
+绝对路径，daemon 侧用 `fs.copyFileSync` 把文件复制一份进
+`work/downloads/`，`dir`/`path` 字段指向复制后的真实位置，另外新增
+`originalPath` 字段说明文件在用户系统下载目录里还留了一份原件（不做
+静默删除，改动用户真实文件夹里的东西需要用户自己决定）。复制失败时
+`note` 字段带上具体错误原因，`path` 兜底回落到原始位置，不会让调用方
+拿到一个不存在的路径。
+
+复制加了 0/200/500ms 的退避重试——刚下载完的文件在 Windows 上偶尔会被
+杀毒/索引服务短暂锁住，立刻复制会 EBUSY/EPERM；这是实测复现到的（同一份
+代码几秒后手动重跑就成功），不是猜测。
+
+**验证**：`https://example.com/` 修复前 `dir` 字段指向不存在路径；修复后
+文件确实出现在 `work/downloads/`，`dir`/`path` 字段可以直接拿去读文件。
