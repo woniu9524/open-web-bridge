@@ -169,6 +169,27 @@ owb eval 'JSON.stringify([...document.querySelectorAll(".item")].slice(0,20).map
 外层容器和内层元素会各匹配一次，同一条数据出现两遍。实测抓地震列表时就这么
 重复了。用一个**足够具体**的选择器，拿到结果先看条数对不对。
 
+### 拖拽 / 画布绘图（canvas、看板、滑块）
+
+`click` / `click-mouse` 都是"落点即抬"，模拟不了拖拽——canvas 画图、看板卡片
+拖动排序、滑块、图片裁剪框都需要真正的 mousedown → 移动 → mouseup 序列。
+`owb cdp` 逃生舱直发三条 `Input.dispatchMouseEvent` 就够，实测在 Excalidraw
+上画矩形一次成功：
+
+```bash
+owb cdp --args '{"method":"Input.dispatchMouseEvent","params":
+  {"type":"mousePressed","x":300,"y":250,"button":"left","buttons":1,"clickCount":1}}'
+owb cdp --args '{"method":"Input.dispatchMouseEvent","params":
+  {"type":"mouseMoved","x":500,"y":400,"button":"left","buttons":1}}'
+owb cdp --args '{"method":"Input.dispatchMouseEvent","params":
+  {"type":"mouseReleased","x":500,"y":400,"button":"left","buttons":0,"clickCount":1}}'
+```
+
+⚠️ 中间的 `mouseMoved` 必须带 `buttons:1`（表示左键仍按住），否则页面收到的是
+"没按键的移动"，很多拖拽实现靠这个字段判断是否在拖——漏了这个参数，视觉上
+光标动了但元素纹丝不动。canvas 画图这类场景 `owb page` 的语义快照看不到
+任何东西（canvas 内容不是 DOM），只能靠 `owb shot` 截图确认画没画上。
+
 ### 慢站提速
 
 `open` 默认等页面完全加载（所有图片、脚本）。只是要读内容的话，
