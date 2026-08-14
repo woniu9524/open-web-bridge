@@ -2283,8 +2283,19 @@ const READ_PAGE_ARTICLE_EXPR = `(() => {
   }
   const fence = String.fromCharCode(96, 96, 96);
   const parts = [];
-  for (const el of best.querySelectorAll("h1, h2, h3, h4, h5, h6, p, li, blockquote, pre")) {
+  // BUG-102: 食谱站常见 <li><p>2 pounds chicken wings</p></li> 这种嵌套——
+  // p 和 li 都在选择器里，querySelectorAll 会把外层 li 和内层 p 各当一条
+  // 分别拿一次 innerText，实测每条食材原样重复一遍。跳过"祖先里已经有一个
+  // 同样在选择器命中范围内的元素"的候选，只留最外层那个（它的 innerText
+  // 本来就包含内层 p 的全部文字，格式化成列表项时不会丢东西）。
+  const CONTENT_SEL = "h1, h2, h3, h4, h5, h6, p, li, blockquote, pre";
+  for (const el of best.querySelectorAll(CONTENT_SEL)) {
     if (inBoiler(el)) continue;
+    let nestedInMatch = false;
+    for (let p = el.parentElement; p && p !== best; p = p.parentElement) {
+      if (p.matches(CONTENT_SEL)) { nestedInMatch = true; break; }
+    }
+    if (nestedInMatch) continue;
     const tag = el.tagName.toLowerCase();
     const text = String(el.innerText || "").trim();
     if (!text) continue;
