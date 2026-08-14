@@ -382,15 +382,14 @@ function dropRedundant(data) {
       `HAR body (${n} entries) not printed — it belongs on disk, not in stdout. ` +
       'Next time use "owb har save" instead of "har stop" (save includes stop).';
   }
-  if (typeof out.lines === "string") {
-    if (out.text === out.lines) delete out.text;
-    // nodes[].line 逐条重复 lines 的内容；ref/role/name 也都已在行里
-    if (Array.isArray(out.nodes) && out.nodes.length) {
-      out._nodesOmitted = out.nodes.length;
-      delete out.nodes;
-    }
-  } else if (typeof out.content === "string" && out.text === out.content) {
-    delete out.text; // article 模式：content 与 text 同值
+  // ⚠️ 只删 nodes，**不要删 text 别名**。text 是扩展侧刻意加的统一字段
+  // （三种模式正文分别叫 lines/content/text，别名让调用方不必按模式切字段）；
+  // 删掉它等于撤销一个有意的可用性设计，还会悄悄打断依赖它的调用方 ——
+  // 本轮就把自己的扫描脚本读成了「正文 0 字」，差点误判为提取功能回归。
+  // nodes[].line 逐条重复 lines 的内容，ref/role/name 也都已在行里，才是真冗余。
+  if (typeof out.lines === "string" && Array.isArray(out.nodes) && out.nodes.length) {
+    out._nodesOmitted = out.nodes.length;
+    delete out.nodes;
   }
   return out;
 }

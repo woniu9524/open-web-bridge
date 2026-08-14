@@ -73,7 +73,7 @@ for (let i = startIdx; i < sites.length; i++) {
 
     // 3. 正文提取（内容站才有意义，但全测——看非内容站会不会误报）
     const art = await owb(["page", "--tab", String(tabId), "--mode", "article", "--compact"]);
-    const artText = art.data && (art.data.markdown || art.data.text || "");
+    const artText = art.data && (art.data.content || art.data.text || art.data.markdown || "");
     rec.article = {
       ms: art.ms,
       ok: !art.errCode,
