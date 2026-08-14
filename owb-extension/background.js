@@ -5175,6 +5175,18 @@ const tools = {
   async fill(args) {
     const tabId = await resolveTabId(args);
     const target = resolveTargetSelector(args, "fill");
+    // BUG-94: value 缺失（调用方拼错参数名、或 CLI 用法错误漏传）时，下面的表达式
+    // 会把 `args.value != null ? args.value : ""` 悄悄当成清空字段处理——字段
+    // 被清空、change 事件正常触发、fill 报 filled:true/actual:""，看起来完全
+    // 正常，调用方以为自己填成功了。区分"显式传空串清空字段"（合法）和
+    // "根本没传 value"（几乎总是调用方的错）：只拒后者。
+    if (args.value === undefined || args.value === null) {
+      throw new ToolError(
+        "BAD_ARGS",
+        'fill: value is required (pass value:"" to explicitly clear the field)',
+        false,
+      );
+    }
     await ensureAttached(tabId);
     const res = await cdpCall(tabId, "Runtime.evaluate", {
       expression: elementSnippet(

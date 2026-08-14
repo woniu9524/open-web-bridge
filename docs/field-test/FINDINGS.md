@@ -566,3 +566,23 @@ resolve——反正页面不可见也没人会看到"跳过"而非"滑过去"的
 拿回控制权而不是硬等 30s。修复前后实测：monkey-patch 掉 rAF 后，调用耗时从
 30000ms+超时降到 992ms；rAF 正常时耗时 658ms（动画路径未受影响，说明兜底
 计时器没有拖慢正常情况）。
+
+### BUG-94 · `fill` 缺 value 时静默清空字段并报成功 🔴 高影响（假成功）
+
+**现象**：`owb fill @e16` 少传 value（或调用方把参数名拼错，比如传了
+`text` 而不是 `value`——用 `owb call fill --args` 直调时尤其容易犯，位置参数
+形式的 `owb fill @ref "文字"` 不会踩这个坑）时，工具照样返回
+`filled:true, actual:"", value:""`——字段被静默清空、`input`/`change`
+事件正常派发，看起来完全成功，实际上 AI 原本想填的内容根本没填进去。
+
+**实测复现**：在 OpenStreetMap 搜索框上 `owb call fill --args
+'{"ref":"e16","text":"oops"}'`（漏传 value）后，返回 `filled:true`，
+但搜索框实际是空的。
+
+**根因**：`fill()` 里 `const value = args.value != null ? args.value : ""`
+——`args.value` 缺失时直接兜底成空串，当作"合法地清空字段"处理，跟"调用方
+真的想清空字段"（应该允许，也是常见需求）区分不开。
+
+**修复**：显式拒绝 `args.value === undefined/null`，报 `BAD_ARGS`
+并提示"要清空字段请传 `value:\"\"`"——把"没传"和"传了空串"分开，前者是
+调用错误，后者是合法操作，两者不该共用同一条静默兜底路径。
