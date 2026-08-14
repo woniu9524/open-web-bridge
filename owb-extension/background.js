@@ -2087,6 +2087,17 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
       const wrap = el.closest("label");
       if (wrap) v = wrap.innerText || "";
     }
+    // BUG-104: <input type="submit|button|reset"> 的可见文字来自 value 属性
+    // （HTML 就是这么渲染的——<input type="submit" value="Calculate"> 按钮上
+    // 显示"Calculate"），跟普通 <input type="text"> 的 value 是"用户填的内容、
+    // 不能当标签"完全是两回事。下面这条通用 fallback 链把 name 排在 value
+    // 前面对文本框是对的，对这三种类型的 input 是反的——实测一个 BMI 计算器，
+    // "Calculate" 按钮的 name="x"、value="Calculate"，原来的顺序会让 AI 看到
+    // 一个叫"x"的按钮，根本猜不出它是算按钮，只能盲点。这三种类型提前拿 value。
+    if (!v && el.tagName === "INPUT") {
+      const bt = (el.getAttribute("type") || "").toLowerCase();
+      if (bt === "submit" || bt === "button" || bt === "reset") v = el.value || "";
+    }
     if (!v) v = el.getAttribute("name") || el.getAttribute("title") || "";
     if (!v) v = el.value || el.innerText || "";
     // BUG-70: innerText 遵循 CSS 可见性——元素在 visibility:hidden 的容器里

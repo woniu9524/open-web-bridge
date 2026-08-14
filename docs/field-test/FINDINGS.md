@@ -912,3 +912,26 @@ false`）能改动底层 DOM 属性、但触发不了应用自己的状态更新
 这个判别方法写进 SKILL.md："`click` 报成功但没有预期效果 → 换 `click-mouse`
 重试"，同时提醒 `checked`/`aria-*` 这类底层属性不能单独作为"选中成功"的
 证据，需要看视觉或功能性副作用确认。
+
+### BUG-104 · `<input type="submit">` 按钮的可见文字被 name 属性挤掉，AI 看到的是内部字段名 🟠 中影响
+
+**现象**：calculator.net 的 BMI 计算器上，绿色"Calculate"按钮在快照里显示成
+`@e14 button "x"`——"x"是这个表单字段的 `name` 属性（提交表单时用的内部
+标识，用户从来看不到），真正显示在按钮上的文字"Calculate"来自 `value`
+属性，快照里完全没体现。AI 看着一个叫"x"的按钮，猜不出它是干什么的。
+
+**根因**：`nameOf()` 的兜底顺序是"...→ name/title → value/innerText"——对
+`<input type="text">` 这种排序是对的（`value` 是用户填进去的内容，不能当
+标签，`name` 好歹是个还算有意义的兜底）。但 `<input type="submit">`/
+`type="button"`/`type="reset"` 这三种恰好相反：`value` **就是**按钮上显示
+的文字（`<input type="submit" value="Calculate">` 浏览器就是这么渲染的），
+`name` 只是表单提交用的内部字段名，跟按钮功能没有语义关系。同一套 name-
+优先-于-value 的兜底顺序，套在这三种类型上正好用反了。
+
+**修复**：在通用兜底链之前，单独判断这三种 `input type`，直接用 `value`
+（不看 `name`）。其余所有类型（text/search/email/checkbox/radio/…）沿用
+原来的顺序，不受影响。
+
+**验证**：BMI 计算器上，修复前 `@e14 button "x"`，修复后 `@e14 button
+"Calculate"`；同一页面的普通文本框（age/height/weight 输入框）修复前后都
+正确显示 `name` 属性作为兜底名字（"cage"/"cheightfeet"等），没有被误伤。
