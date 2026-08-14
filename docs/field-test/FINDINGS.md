@@ -529,3 +529,40 @@ checkVisibilityCSS: true })` 检查（Chrome 105+ 原生 API，顺着祖先链�
 visibility/display/content-visibility/opacity，不用手写祖先遍历）。命中的
 计入新计数器 `skippedHidden`，**不**并进 `skippedNoRect`——后者会触发"后台
 tab 未渲染，前台化重试"的逻辑，混进去会导致误判重试。
+
+### BUG-93 · `click-mouse` 在窗口失去系统焦点时永久挂起到 30s 超时 🔴 高影响
+
+**现象**：`owb click-mouse` 在真实多窗口环境下（Chrome 开了不止一个窗口，
+被操作的窗口当前不是操作系统前台窗口）稳定复现：每次调用都挂满 30 秒后报
+`TIMEOUT: cdpCall timeout: Runtime.evaluate`。同一个 tab 上 `click`（非真实
+鼠标）、`eval`、`page` 全部秒回——只有 `click-mouse` 会挂，说明不是页面主线程
+卡住，是这条工具链路自己的问题。
+
+**根因**：`click-mouse` 为了让操作对用户可见，会在真实鼠标事件之前跑一段
+贝塞尔曲线光标移动动画，动画由 `requestAnimationFrame` 驱动、返回的 Promise
+**只在 rAF 回调里 resolve**。而 `requestAnimationFrame` 在
+`document.visibilityState === "hidden"` 时根本不会被调度执行——不是变慢，是
+完全不触发。已有的 BUG-35 修复（调用前 `Page.bringToFront`）只解决"tab 在自己
+窗口内不是激活页"这一种隐藏成因；它管不到"窗口本身没有操作系统级焦点"这层
+（被其他窗口挡住、在后台等），而这种情况下页面同样是 `visibilityState:hidden`。
+实测确认：`document.hasFocus()` 为 true 但 `visibilityState` 为 `"hidden"`
+——CDP 的 `Page.bringToFront` 只挪了 Chrome 内部的激活标签位，管不到系统级
+窗口层。rAF 一旦不触发，`moveTo` 的 Promise 永远 pending，上层 `await` 直接
+硬挂到 CDP 30s 超时。
+
+**复现方式**：把 `window.requestAnimationFrame` monkey-patch 成空函数（模拟
+"排了队但永远不执行回调"的效果，与隐藏页面的真实行为一致）后调用
+`click-mouse`——稳定复现 30s 挂起。
+
+**为什么重要**：这直接命中 OWB 的核心场景——"AI 在后台驱动你的真实浏览器，
+你去做别的事"。用户一旦切到别的窗口（几乎是必然会发生的），当前实现下所有
+`click-mouse` 调用都会以 30s 为周期挂起，而不是报错或降级，AI 完全不知道
+发生了什么，只会看到"超时，可重试"然后死循环重试、每次再挂 30s。
+
+**修复**：给 `moveTo` 加一道兜底计时器（`setTimeout(finish, duration + 300)`），
+和 rAF 动画赛跑，谁先到谁 resolve。rAF 正常时按原计划播完动画（~450ms内完成，
+不受影响）；rAF 不触发时兜底计时器在 `duration+300ms` 内跳到终点位置并
+resolve——反正页面不可见也没人会看到"跳过"而非"滑过去"的差异，但调用方能
+拿回控制权而不是硬等 30s。修复前后实测：monkey-patch 掉 rAF 后，调用耗时从
+30000ms+超时降到 992ms；rAF 正常时耗时 658ms（动画路径未受影响，说明兜底
+计时器没有拖慢正常情况）。

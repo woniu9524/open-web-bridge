@@ -2340,8 +2340,27 @@ const CURSOR_OVERLAY_EXPR = `(() => {
       const cx = (fromX + x) / 2 - (dy / dist) * off;
       const cy = (fromY + y) / 2 + (dx / dist) * off;
       let start = null;
+      let done = false;
       return new Promise((resolve) => {
+        // BUG-93: requestAnimationFrame 在 visibilityState=hidden 的页面里永远
+        // 不触发——不是"没有 rAF"，是 rAF 排了队但浏览器不给这个隐藏页面执行
+        // 时机。OS 窗口被其他窗口挡住/未聚焦就是这种状态，调用方已经
+        // Page.bringToFront 过（那只解决"tab 在自己窗口里不是激活页"），管不到
+        // 窗口本身没有系统焦点这层。原来 resolve 只在 stepFn 里调用，rAF 不来
+        // 这个 promise 永远 pending，上层 await 直接硬挂到 30s CDP 超时。这里
+        // 加一道兜底计时器：到点了不管动画有没有跑完，直接跳到终点位置并
+        // resolve——反正页面看不见，跳不跳都没有视觉差异，但能让调用方拿回
+        // 控制权。
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(watchdog);
+          state.x = x; state.y = y; apply();
+          resolve({ x: state.x, y: state.y });
+        };
+        const watchdog = setTimeout(finish, dur + 300);
         const stepFn = (ts) => {
+          if (done) return;
           if (ts == null) ts = Date.now();
           if (start == null) start = ts;
           const t = Math.min((ts - start) / dur, 1);
@@ -2350,7 +2369,7 @@ const CURSOR_OVERLAY_EXPR = `(() => {
           state.x = u * u * fromX + 2 * u * e * cx + e * e * x;
           state.y = u * u * fromY + 2 * u * e * cy + e * e * y;
           apply();
-          if (t >= 1) { resolve({ x: state.x, y: state.y }); return; }
+          if (t >= 1) { finish(); return; }
           requestAnimationFrame(stepFn);
         };
         requestAnimationFrame(stepFn);
