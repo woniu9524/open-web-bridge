@@ -11,7 +11,8 @@ Bash 调用即可，无需任何客户端配置。
 
 ## 前提
 
-`owb` 是仓库 `daemon/` 下的 bin。用户已 `npm install` 后，用以下任一方式调用：
+`owb` 是 open-web-bridge 仓库 `daemon/` 下的 bin（源码 `daemon/src/cli.js`）。
+用户已 `npm install` 后，用以下任一方式调用：
 
 - `node <仓库>/daemon/src/cli.js <命令>`（始终可用）
 - `owb <命令>`（若已 `npm link` 或全局装）

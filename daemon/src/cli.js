@@ -4,7 +4,7 @@
  *
  * 设计：
  *   - 任何能跑 shell 的 agent（Claude Code / Kimi Code / Codex …）直接调用，
- *     零客户端配置；配套 skill 见仓库 .claude/skills/owb/SKILL.md。
+ *     零客户端配置；配套 skill 见仓库 skills/owb/SKILL.md。
  *   - 79 个桥工具收敛为「高频顶层动词 + 12 个命令组」，`owb help` 渐进披露。
  *   - daemon 未启动时自动拉起（--no-autostart 关闭），用户从「装完就能用」开始。
  *
@@ -341,7 +341,7 @@ function printHelp(groupName) {
       out.push(`  owb ${name.padEnd(22)} ${spec.desc}`);
     }
   } else {
-    out.push("owb — 让 AI agent 驱动你的真实浏览器（详细流程见 skill：.claude/skills/owb/SKILL.md）");
+    out.push("owb — 让 AI agent 驱动你的真实浏览器（详细流程见 skill：skills/owb/SKILL.md）");
     out.push("");
     out.push("  owb                    自检：daemon/扩展连接状态");
     out.push("  owb help <组>          组内命令详情");

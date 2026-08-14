@@ -51,8 +51,29 @@ node daemon/src/cli.js click @e5             # 引用 ref 操作
 node daemon/src/cli.js help                  # 12 个命令组，79 个工具
 ```
 
-`npm link`（或全局装）后可直接 `owb <命令>`。仓库自带 skill（`.claude/skills/owb/`）
-教 Claude Code 典型流程；对 agent 说一句「打开知乎搜一下 XXX」就能看到它干活。
+`npm link`（或全局装）后可直接 `owb <命令>`。
+
+装 skill（可选，推荐）——让 agent 一上手就知道怎么用，不靠猜：
+
+```bash
+cp -r skills/owb ~/.claude/skills/          # Claude Code：全局装
+cp -r skills/owb <你的项目>/.claude/skills/  # 或只在某个项目里装
+```
+
+其他 agent 把 `skills/owb/SKILL.md` 内容并入你的规则/系统提示即可（纯 markdown，
+无专有格式）。装好后对 agent 说一句「打开知乎搜一下 XXX」就能看到它干活。
+
+## 目录结构
+
+```
+open-web-bridge/
+├── daemon/       Node 包：owb CLI（agent 接入面）+ 本地 daemon + 测试
+├── extension/    MV3 Chrome 扩展（浏览器加载这个目录）
+├── relay/        可选：Cloudflare Workers 公网中转（远程控制用）
+└── skills/owb/   交付物：给 AI agent 装的 skill
+```
+
+运行时产物（分析归档、登录态、HAR）落在 `work/`，已 gitignore。
 
 ## 中转模式（远程控制，可选）
 
