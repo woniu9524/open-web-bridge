@@ -867,3 +867,30 @@ li, blockquote, pre")`，这个选择器同时包含 `li` 和 `p`。食谱站的
 16074 字符）；修复后每条恰好一次（13751 字符，去掉的 2323 字符正好是
 重复部分）。额外拿 Wikipedia "Chicken soup" 词条回归，抽取结果正常、
 无截断异常，确认修复没有误伤没有嵌套问题的健康页面。
+
+### BUG-103 · `net start` 显式调用时可能不清空缓冲区，混进不相关站点的历史请求 🟠 中影响
+
+**现象**：正常顺序操作——浏览了几个不相关站点（其间多次 `wait
+network_idle`），换到目标站点后显式 `net start` 开始抓包、跑一个请求、
+`net list` 查看——列表里混进了**几分钟前另一个站点**的图片请求，不是这次
+真正想抓的数据。实测复现：`net start` 之前在 IMDb 上用过
+`wait --network-idle true`，之后换到 httpbin.org 显式 `net start` 抓包，
+`net list` 返回的却是 IMDb 的海报图请求。
+
+**根因**：`network_start` 判断"要不要清空缓冲区"的条件原来是`!wasEnabled`
+——只有这个 tab **之前完全没启用过** Network 域时才清空。但 `ensureNetwork`
+这个内部函数不止 `net start` 一处调用，`wait_for network_idle`（skill 里
+明确推荐常用的等待方式）也会顺带调用它，把 tab 标成"已启用"——**这是用户
+完全无感知的副作用**。等用户真正显式调用 `net start` 想开一段干净的抓包时，
+因为 `wasEnabled` 已经是 `true`（拜早先某次 `wait network_idle` 所赐），
+缓冲区不会被清空，历史请求原样留着。
+
+**修复**：不再看"Network 域是不是已经因为某个内部原因开着"这个实现细节，
+只看调用方有没有显式传 `clear:false`——默认清空，这才匹配"我现在主动喊
+`net start`，就是要开始一段新的抓包"这个用户意图。需要跨多次 `net start`
+保留历史的场景，用 `clear:false` 主动要。
+
+**验证**：完整复现原有问题的操作序列（IMDb 上 `wait network_idle` → 换到
+httpbin.org → 显式 `net start` → 发一个请求 → `net list`）；修复前列表里
+混着 IMDb 的图片请求，修复后只有 httpbin.org 这次请求本身（一条 JSON
+fetch + 一个页面自带的 SVG 图标），干净利落。

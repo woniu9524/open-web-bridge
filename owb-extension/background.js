@@ -2897,10 +2897,20 @@ const tools = {
   },
 
   async network_start(args) {
+    // BUG-103: 原来只在"这个 tab 之前没开过 Network.enable"时才清空缓冲区
+    // （`!wasEnabled`）——但 `ensureNetwork` 不是只有这里调用，`wait_for
+    // network_idle`（skill 里明确推荐常用）也会顺带把同一个 tab 标记成
+    // "已启用"，属于用户完全没感知到的副作用。实测：先若干次 `wait
+    // network_idle` 浏览了好几个不相关站点，再显式 `net start` 想开一段
+    // 干净的抓包——因为 `wasEnabled` 已经是 true，缓冲区没有被清，
+    // `net list` 混进了那些不相关站点的历史请求（还真实复现到了：net
+    // start 之后 list 出来的是几分钟前 IMDb 的图片请求，不是这次要抓的
+    // 站点）。`net start` 是用户主动发起的"我现在要开始抓包"，语义上就该
+    // 给一段干净的开始，不该被内部实现细节（Network 域是不是已经因为别的
+    // 原因开着）绑住。改成只看调用方是否显式传了 `clear:false`。
     const tabId = await resolveTabId(args);
-    const wasEnabled = networkEnabledTabs.has(tabId);
     await ensureNetwork(tabId);
-    if (!wasEnabled && args.clear !== false)
+    if (args.clear !== false)
       networkBuffers.set(tabId, new Map());
     return { tabId, capturing: true };
   },
