@@ -90,8 +90,11 @@ owb page --since-last true
 | 模式 | 用在哪 | 返回字段 |
 |---|---|---|
 | `owb page`（默认 snapshot） | 要**操作**页面：找按钮、填表、点链接 | `lines` |
-| `owb page --mode article` | **文章页**读正文，输出干净 markdown | `content`/`text` |
+| `owb page --mode article` | **文章页**读正文，输出干净 markdown | `content` |
 | `owb page --mode text` | 列表页、结构不规则的页面，要全部文字 | `text` |
+
+💡 **三种模式都有 `text` 字段**——它是各模式主字段的别名。写脚本处理输出时
+优先读 `text`，就不用按模式切字段名。
 
 ⚠️ **列表页/论坛首页用 article 会返回 0 字**——它们本来就没有"正文"，这是正确行为
 不是故障（V2EX、牛客、各种榜单页都是如此）。空返回时看 `reason` 字段，会说明原因。
