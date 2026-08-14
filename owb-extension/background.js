@@ -798,6 +798,10 @@ function onNetworkEvent(tabId, method, params) {
       status: params.response.status,
       responseHeaders: params.response.headers,
       mimeType: params.response.mimeType,
+      // BUG-66: 细粒度阶段耗时（DNS/连接/TLS/TTFB），排查慢请求的关键
+      timing: params.response.timing || undefined,
+      fromCache: !!params.response.fromDiskCache,
+      remoteAddress: params.response.remoteIPAddress || undefined,
     });
     // watch_script notify：命中即推事件（覆盖懒加载脚本）
     const watchers = scriptWatchers.get(tabId);
@@ -819,7 +823,14 @@ function onNetworkEvent(tabId, method, params) {
     return;
   }
   if (method === "Network.loadingFinished") {
-    bufferPut(tabId, params.requestId, { finished: true });
+    // BUG-66: CDP 在这里就给了传输体积与结束时刻，原来只记了 finished 布尔，
+    // 于是「哪个请求最慢/最重」——性能排查的头号问题——在列表里无从回答，
+    // 只能对每条请求单独 network_detail（几百条时不可行）。
+    bufferPut(tabId, params.requestId, {
+      finished: true,
+      finishedAt: Date.now(),
+      encodedDataLength: params.encodedDataLength,
+    });
     return;
   }
   if (method === "Network.loadingFailed") {
@@ -2708,11 +2719,24 @@ const tools = {
         type: rec.type,
         finished: !!rec.finished,
         failed: !!rec.failed,
+        // BUG-66: 耗时与体积直接进列表——性能排查不必对每条再 network_detail
+        durationMs:
+          rec.finishedAt && rec.startedAt
+            ? rec.finishedAt - rec.startedAt
+            : undefined,
+        size: rec.encodedDataLength,
+        fromCache: rec.fromCache || undefined,
       });
     }
+    // BUG-66: 按耗时/体积排序，一条命令回答「最慢的是谁」「谁最占带宽」
+    const sortKey = args.sort_by === "duration" ? "durationMs"
+      : args.sort_by === "size" ? "size" : null;
+    if (sortKey) all.sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
     // UX-175: 缓冲是 oldest-first，忙页面上刚发的 AJAX 会被 limit 截在外面。
     // newest:true 从尾部取，AI 想看"刚刚那条请求"时不用调大 limit 捞全量。
-    const newest = !!args.newest || args.order === "newest";
+    // sort_by 与 newest 语义冲突（排序后再从尾部取 = 拿到最快/最小的几条，
+    // 与「按耗时排序」的意图完全相反），排序优先。
+    const newest = !sortKey && (!!args.newest || args.order === "newest");
     const out = newest ? all.slice(-limit).reverse() : all.slice(0, limit);
     // UX-61: 包成 {requests, count}，与其他工具一致（原来是裸数组）
     return {
@@ -2723,7 +2747,9 @@ const tools = {
       truncated: all.length > out.length,
       limit,
       buffered: getBuffer(tabId).size,
-      order: newest ? "newest-first" : "oldest-first",
+      order: sortKey
+        ? `${args.sort_by}-desc`
+        : newest ? "newest-first" : "oldest-first",
       extensionRequestsHidden: extensionRequests || undefined,
       // BUG-65: 剔除了多少条无身份记录（抓包起晚了/跨了 reload）。
       // 数量大说明该在导航前就 network_start，否则前半段请求已经错过。

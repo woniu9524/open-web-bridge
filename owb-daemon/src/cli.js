@@ -71,7 +71,7 @@ const GROUPS = {
   net: {
     "net start": { ctl: "network_start", desc: "开始抓包" },
     "net stop": { ctl: "network_stop", desc: "停止抓包" },
-    "net list": { ctl: "network_list", desc: "列出已捕获请求（可过滤）" },
+    "net list": { ctl: "network_list", desc: "列出已捕获请求；--sort-by duration|size 找最慢/最重，--url-pattern 过滤" },
     "net detail": { ctl: "network_detail", desc: "单条请求全量（头 + body）" },
     "net initiator": { ctl: "get_initiator", desc: "请求发起调用栈" },
     "net capture": { ctl: "capture_request", desc: "宏工具：触发动作并捕获目标请求" },
