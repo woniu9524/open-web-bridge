@@ -820,3 +820,26 @@ undefined`）。
 `hiddenContentNote`（分别提示"抓到 3 字符但容器里有约 17533 字符不可见"、
 "读到 2476 字符但页面里有约 30665 字符不可见"）；Wikipedia 量子计算词条
 和 GitHub 仓库首页两个健康对照页均无误报。
+
+## 观察到但暂不处理：eBay 的反爬诱饵文字
+
+搜索结果页 `text` 模式抓出一段 `derosnopS`——倒过来拼是"Sponsored"。查了
+对应元素：`<span aria-hidden="true" style="color: transparent !important">
+derosnopS</span>`——文字颜色和背景完全一致（人眼看不见），还标了
+`aria-hidden="true"`（屏幕阅读器也跳过）。这是专门放给爬虫看的诱饵：
+不区分可见性、只无脑抓 `textContent`/`innerText` 的工具会把这段垃圾文字
+当正文，`innerText` 恰好不认"文字颜色透明"这件事（它认 `display:none`/
+`visibility:hidden`，不认 `color`），所以确实会读到。
+
+**没有立刻修**：修的话需要新增"颜色透明也算不可见"的判断，加进
+`text`/`article` 两种模式的抽取逻辑——但这个信号不能只看 `color:
+transparent`，无障碍常见的"仅屏幕阅读器可读"内容（`.sr-only` 一类）不会
+用这个技巧（标准做法是 `position:absolute` 挪出可视区域 + 裁剪，不是
+调透明色，因为透明色文字理论上还能被选中/高亮，业界不这么做无障碍内容），
+理论上两者可以区分，但没有经过大范围站点验证前贸然改，有误伤其他站点
+合法用法的风险。记录下来留个坐标，真要修：`aria-hidden="true"` +
+`color` alpha 通道为 0 同时成立时才跳过，比单独任一条件更保守。
+
+**影响可控**：这类诱饵文字目前观察到的都是短小的乱码词（"derosnopS"这种），
+掺进 `text` 模式输出里显眼但不构成误导——AI 大概率会把它当噪音跳过，
+不像 BUG-101 那种整篇文章读不出来的程度，暂不视为需要立即修复的问题。
