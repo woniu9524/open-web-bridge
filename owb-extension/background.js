@@ -4489,10 +4489,27 @@ const tools = {
         }
       } catch (e) {}
       if (!renderNote) {
-        renderNote =
-          `page has ${v.candidates || 0} candidate elements but all were skipped ` +
-          "for zero layout boxes — the tab is likely not rendering (background tab, " +
-          "or content hidden by CSS). Activate the tab and retry.";
+        // BUG-96: bringToFront 只能把 tab 切成它自己窗口里的激活页，管不到
+        // Chrome 窗口本身有没有操作系统级焦点——重试已经做过、失败了，原来的
+        // "Activate the tab and retry" 建议听起来像还有没试过的招，实际上
+        // 刚试过。查一下 visibilityState，分清"重试后依然 hidden（大概率是
+        // 窗口没有系统焦点，用户要切过去，重试没用）"和"重试后已经 visible
+        // 但还是没元素（大概率是页面真的空/内容被 CSS 隐藏）"，给出对应
+        // 的下一步而不是笼统一句话。
+        let stillHidden = null;
+        try {
+          stillHidden = (await evaluateJs(tabId, "document.visibilityState")) === "hidden";
+        } catch (e) {}
+        renderNote = stillHidden
+          ? `page has ${v.candidates || 0} candidate elements but all were skipped ` +
+            "for zero layout boxes, and the tab is still visibilityState=hidden after " +
+            "bringToFront + retry — this usually means the Chrome *window* itself " +
+            "doesn't have OS-level focus (covered by another window), which " +
+            "bringToFront cannot fix. Retrying won't help; ask the user to switch to " +
+            "that browser window."
+          : `page has ${v.candidates || 0} candidate elements but all were skipped ` +
+            "for zero layout boxes — content is likely hidden by CSS or the page is " +
+            "genuinely near-empty (also check for a bot-block/interstitial response).";
       }
     }
     readPageNextRef.set(tabId, v.nextRef);

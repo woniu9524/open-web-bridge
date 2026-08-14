@@ -623,3 +623,26 @@ resolve——反正页面不可见也没人会看到"跳过"而非"滑过去"的
 之后），不再跟已存在的 `@e1` 冲突，且计数器清零的现象本身依然在（
 `performance.timeOrigin` 差值仍是几十秒前，证明触发条件没变，是下游吸收
 了这次误判）。
+
+### BUG-96 · 快照全空时的 `renderNote` 建议在窗口未聚焦场景下站不住脚 🟡 低影响
+
+**现象**：在携程（触发了对方的反自动化拦截，页面被替换成 `whaleguard
+block` 一行字）上快照返回空，`renderNote` 说"the tab is likely not
+rendering...Activate the tab and retry"——但这条建议隐含"还有招没使"，实际上
+`Page.bringToFront` + 重试**已经**在返回这条消息之前做过、而且失败了。
+根因还是这次探索里反复碰到的同一件事：Chrome 窗口本身没有操作系统级焦点时
+（被别的窗口挡住），`bringToFront` 只能把 tab 切到它自己窗口内的激活位，
+救不回真正的 `visibilityState`。旧文案对"重试已经做过且没用"和"还没重试"
+不做区分，AI 看到"retry"容易在同一条死路上反复重试。
+
+**修复**：`bringToFront`+重试仍然失败后，多查一次 `document.
+visibilityState`。依然是 `hidden` 就直说根因（窗口没有系统焦点，重试没用，
+该提醒用户切过去那个浏览器窗口）；不是 `hidden` 才维持原来"内容被 CSS
+隐藏或页面本来就空"的笼统提示，并补一句提醒顺带排查反爬拦截页。
+
+**过程插曲**：第一版实现里 `evaluateJs()` 返回值已经是拆包后的裸值（内部
+`return res.result ? res.result.value : undefined`），我却又按 `res.result.
+value` 的老套路多拆了一层，导致 `stillHidden` 永远算不出真值、恒定走"未隐藏"
+分支——用真实还在 `hidden` 状态的携程 tab 验证时立刻穿帮（消息给成了"内容被
+CSS 隐藏"，跟直接 `eval document.visibilityState` 查到的 `"hidden"` 对不上）。
+提醒自己：改之前该去看被调函数已经在哪一层拆包，不能凭记忆套用别处的写法。
