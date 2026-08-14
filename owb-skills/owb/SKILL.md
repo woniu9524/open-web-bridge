@@ -350,6 +350,10 @@ base64 灌进你的上下文。任何工具返回超过 60KB 会被截断并附 
 - play2048.co：棋盘上的方块（`requestAnimationFrame` 驱动 + worker 渲染）
   一个都不生成，按方向键完全没反应，`document.querySelectorAll(".tile")`
   持续为 0
+- claude.com 官方博客：`--mode article/text` 只读到页头页脚导航，正文一个
+  字都没有——真实原因是正文段落用了"滚动淡入"动画，一直
+  `visibility:hidden`，触发动画的机制卡住了没跑（这条工具侧已经加了
+  `hiddenContentNote` 自动提示，遇到别的类似情况可以照这个思路排查）
 
 共同根因：Chrome 对隐藏窗口里的页面做资源节流（`requestAnimationFrame`
 不触发、媒体缓冲暂停），这是浏览器的省电设计，不是 OWB 的故障，也没有
