@@ -57,7 +57,11 @@ function relayUrlOf(cfg) {
 }
 
 async function loadConfig() {
-  const stored = await chrome.storage.local.get(["wsUrl", "relayUrl", "relayToken"]);
+  const stored = await chrome.storage.local.get([
+    "wsUrl",
+    "relayUrl",
+    "relayToken",
+  ]);
   config.wsUrl = stored.wsUrl || DEFAULT_CONFIG.wsUrl;
   config.relayUrl = stored.relayUrl || "";
   config.relayToken = stored.relayToken || "";
@@ -203,7 +207,7 @@ function connect() {
     helloAcked = false;
     relayPaired = false;
     failSafeFetchAll(); // 红线级：防 Fetch 拦截卡死用户页面
-    scheduleDeadman();  // 死开关：daemon 长时间不可达则全面 detach
+    scheduleDeadman(); // 死开关：daemon 长时间不可达则全面 detach
     scheduleReconnect();
   };
   ws.onerror = () => {
@@ -333,7 +337,21 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 function cdpCall(tabId, method, params = {}) {
-  return chrome.debugger.sendCommand({ tabId }, method, params);
+  // BUG-46: timeout race — a single hanging CDP response would permanently
+  // deadlock the SW. 30s is generous for all known CDP methods. If this
+  // fires, the caller gets a rejection instead of an infinite hang.
+  const _ms = 30000;
+  let timer;
+  return Promise.race([
+    chrome.debugger.sendCommand({ tabId }, method, params),
+    new Promise((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(new Error("cdpCall timeout: " + method + " (" + _ms + "ms)")),
+        _ms,
+      );
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 // Runtime.evaluate 公共封装：EVAL_EXCEPTION 统一构造 + returnByValue 取值。
@@ -350,7 +368,7 @@ async function evaluateJs(tabId, expression, opts = {}) {
       res.exceptionDetails.text +
         (res.exceptionDetails.exception
           ? `: ${res.exceptionDetails.exception.description || ""}`
-          : "")
+          : ""),
     );
   }
   return res.result ? res.result.value : undefined;
@@ -369,7 +387,9 @@ const MAX_BUFFER_PER_TAB = 500;
 async function ensureNetwork(tabId) {
   await ensureAttached(tabId);
   if (networkEnabledTabs.has(tabId)) return;
-  await cdpCall(tabId, "Network.enable", { maxTotalBufferSize: 50 * 1024 * 1024 });
+  await cdpCall(tabId, "Network.enable", {
+    maxTotalBufferSize: 50 * 1024 * 1024,
+  });
   networkEnabledTabs.add(tabId);
 }
 
@@ -410,7 +430,11 @@ const recorderOrigins = new Map();
 function recorderAccepts(rec, url, resourceType) {
   if (rec.urlFilter && !rec.urlFilter.test(url)) return false;
   if (rec.excludeFilter && rec.excludeFilter.test(url)) return false;
-  if (rec.resourceTypes && resourceType && !rec.resourceTypes.has(String(resourceType).toLowerCase())) {
+  if (
+    rec.resourceTypes &&
+    resourceType &&
+    !rec.resourceTypes.has(String(resourceType).toLowerCase())
+  ) {
     return false;
   }
   return true;
@@ -437,7 +461,11 @@ function feedRecorder(tabId, method, params) {
   StatsBuilder.processEvent(stats, { method, params });
 
   // loadingFinished：主动拉 response body（受护栏约束）
-  if (method === "Network.loadingFinished" && rec.includeBodies && !rec.bodyCapped) {
+  if (
+    method === "Network.loadingFinished" &&
+    rec.includeBodies &&
+    !rec.bodyCapped
+  ) {
     const requestId = params.requestId;
     const entry = stats.entries[requestId];
     if (entry) {
@@ -501,7 +529,12 @@ async function feedRecorderScreenshot(tabId, reason, url) {
       format: "jpeg",
       quality: 40,
     });
-    rec.frames.push({ ts: Date.now() / 1000, reason, url, dataUrl: "data:image/jpeg;base64," + data });
+    rec.frames.push({
+      ts: Date.now() / 1000,
+      reason,
+      url,
+      dataUrl: "data:image/jpeg;base64," + data,
+    });
   } catch (e) {}
 }
 
@@ -535,7 +568,9 @@ async function snapshotCookies(tabId, origin) {
   try {
     const res = await cdpCall(tabId, "Network.getCookies", { urls: [origin] });
     return res.cookies || [];
-  } catch (e) { return []; }
+  } catch (e) {
+    return [];
+  }
 }
 
 // diff 两份 cookie 快照：added/changed/removed
@@ -545,7 +580,8 @@ function diffCookies(start, end) {
     for (const c of list) m[c.name + "|" + (c.domain || "")] = c.value || "";
     return m;
   };
-  const a = mapOf(start || []), b = mapOf(end || []);
+  const a = mapOf(start || []),
+    b = mapOf(end || []);
   const out = { added: [], changed: [], removed: [] };
   for (const k of Object.keys(b)) {
     if (!(k in a)) out.added.push(k);
@@ -566,18 +602,27 @@ async function finalizeRecorder(tabId, rec, title) {
   }
   // 关闭录制专用域（不动 networkEnabledTabs：探查缓冲可能仍要用）
   if (rec.captureStorage) {
-    try { await cdpCall(tabId, "DOMStorage.disable"); } catch (e) {}
+    try {
+      await cdpCall(tabId, "DOMStorage.disable");
+    } catch (e) {}
   }
-  const tabTitle = title || (function () {
-    try { return new URL(rec.url).host; } catch (e) { return rec.url; }
-  })();
+  const tabTitle =
+    title ||
+    (function () {
+      try {
+        return new URL(rec.url).host;
+      } catch (e) {
+        return rec.url;
+      }
+    })();
   return buildRecorderPage(rec, tabId, tabTitle);
 }
 
 // 停所有活动 recorder，合并为多 page HAR
 async function stopAllRecorders(title) {
   const pages = [];
-  let totalEntries = 0, totalBodyBytes = 0;
+  let totalEntries = 0,
+    totalBodyBytes = 0;
   const tabIds = [...recorders.keys()];
   for (const tabId of tabIds) {
     const rec = recorders.get(tabId);
@@ -597,8 +642,11 @@ async function stopAllRecorders(title) {
     const page = har.log.pages[i];
     if (page) {
       page._recording = {
-        tabId, startedAt: rec.startedAt, endedAt: new Date().toISOString(),
-        bodyBytes: rec.bodyBytes, bodyCapped: rec.bodyCapped,
+        tabId,
+        startedAt: rec.startedAt,
+        endedAt: new Date().toISOString(),
+        bodyBytes: rec.bodyBytes,
+        bodyCapped: rec.bodyCapped,
         console: rec.captureConsole ? rec.consoleLog : undefined,
         storageChanges: rec.captureStorage ? rec.storageChanges : undefined,
         frames: rec.captureScreenshots ? rec.frames : undefined,
@@ -611,9 +659,23 @@ async function stopAllRecorders(title) {
     recorders.delete(tabId);
     recorderSkipped.delete(tabId);
     recorderOrigins.delete(tabId);
-    pushEvent("record", { tabId, phase: "stop", entries: pages[i] ? pages[i].rec ? Object.keys(pages[i].rec.stats.entries).length : 0 : 0 });
+    pushEvent("record", {
+      tabId,
+      phase: "stop",
+      entries: pages[i]
+        ? pages[i].rec
+          ? Object.keys(pages[i].rec.stats.entries).length
+          : 0
+        : 0,
+    });
   }
-  return { tabIds, recording: false, entries: totalEntries, bodyBytes: totalBodyBytes, har };
+  return {
+    tabIds,
+    recording: false,
+    entries: totalEntries,
+    bodyBytes: totalBodyBytes,
+    har,
+  };
 }
 
 function statusOf(tabId, rec) {
@@ -697,7 +759,9 @@ function onConsoleEvent(tabId, method, params) {
       type: params.type,
       args: (params.args || [])
         .slice(0, 10)
-        .map((a) => (a.value !== undefined ? a.value : a.description || a.type)),
+        .map((a) =>
+          a.value !== undefined ? a.value : a.description || a.type,
+        ),
     };
   } else {
     const e = params.entry || {}; // Log.entryAdded
@@ -792,16 +856,29 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     return;
   }
   // 录制：主帧导航 → 视觉时间线截图
-  if (method === "Page.frameNavigated" && params.frame && params.frame.parentId === "0") {
+  if (
+    method === "Page.frameNavigated" &&
+    params.frame &&
+    params.frame.parentId === "0"
+  ) {
+    // BUG-1/2/53/59: 主帧导航 → 清零 per-tab 状态，防跨页 ref 污染、假 removed、
+    // 旧脚本残留。新页面 ref 从 e1 重编，since_last 首次返回全 added（正确语义）。
+    readPageNextRef.delete(tabId);
+    readPageSnapshots.delete(tabId);
+    scriptRegistryMap.delete(tabId);
     feedRecorderScreenshot(tabId, "navigation", params.frame.url || null);
     return;
   }
   // 下载：downloadWillBegin + downloadProgress → 一次性 watcher resolve
-  if (method === "Page.downloadWillBegin") return onDownloadBegin(tabId, params);
-  if (method === "Page.downloadProgress") return onDownloadProgress(tabId, params);
+  if (method === "Page.downloadWillBegin")
+    return onDownloadBegin(tabId, params);
+  if (method === "Page.downloadProgress")
+    return onDownloadProgress(tabId, params);
   // 执行上下文：iframe 的 contextId 登记（list_frames / frame 定向 evaluate 用）
-  if (method === "Runtime.executionContextCreated") return onContextCreated(tabId, params);
-  if (method === "Runtime.executionContextDestroyed") return onContextDestroyed(tabId, params);
+  if (method === "Runtime.executionContextCreated")
+    return onContextCreated(tabId, params);
+  if (method === "Runtime.executionContextDestroyed")
+    return onContextDestroyed(tabId, params);
   // Fetch 域脚本改写（async fire-and-forget，内部异常自吞并放行）
   if (method === "Fetch.requestPaused") {
     handleFetchPaused(tabId, params);
@@ -825,11 +902,24 @@ function onDomStorageEvent(tabId, method, params) {
   if (origin && sid.securityOrigin && sid.securityOrigin !== origin) return;
   const isLocalStorage = !!sid.isLocalStorage;
   if (method === "DOMStorage.domStorageItemAdded") {
-    feedRecorderStorage(tabId, isLocalStorage, { op: "add", key: params.key, value: params.newValue });
+    feedRecorderStorage(tabId, isLocalStorage, {
+      op: "add",
+      key: params.key,
+      value: params.newValue,
+    });
   } else if (method === "DOMStorage.domStorageItemUpdated") {
-    feedRecorderStorage(tabId, isLocalStorage, { op: "update", key: params.key, oldValue: params.oldValue, value: params.newValue });
+    feedRecorderStorage(tabId, isLocalStorage, {
+      op: "update",
+      key: params.key,
+      oldValue: params.oldValue,
+      value: params.newValue,
+    });
   } else if (method === "DOMStorage.domStorageItemRemoved") {
-    feedRecorderStorage(tabId, isLocalStorage, { op: "remove", key: params.key, oldValue: params.oldValue });
+    feedRecorderStorage(tabId, isLocalStorage, {
+      op: "remove",
+      key: params.key,
+      oldValue: params.oldValue,
+    });
   } else if (method === "DOMStorage.domStorageItemsCleared") {
     feedRecorderStorage(tabId, isLocalStorage, { op: "clear" });
   }
@@ -867,7 +957,9 @@ function onDownloadProgress(tabId, params) {
   if (params.state === "completed") {
     w.resolve({ state: "completed", receivedBytes: params.receivedBytes });
   } else if (params.state === "canceled") {
-    w.reject(new ToolError("DOWNLOAD_CANCELED", "download was canceled", false));
+    w.reject(
+      new ToolError("DOWNLOAD_CANCELED", "download was canceled", false),
+    );
   }
 }
 
@@ -875,7 +967,10 @@ function onContextCreated(tabId, params) {
   const ctx = params.context || {};
   if (!ctx.id || !ctx.auxData) return;
   let list = frameContexts.get(tabId);
-  if (!list) { list = []; frameContexts.set(tabId, list); }
+  if (!list) {
+    list = [];
+    frameContexts.set(tabId, list);
+  }
   // 去重（同 contextId 不重复登记）
   if (!list.some((c) => c.contextId === ctx.id)) {
     list.push({
@@ -904,7 +999,11 @@ function resolveFrameContextId(tabId, framePattern) {
     const def = list.find((c) => c.isDefault);
     return def ? def.contextId : list[0].contextId;
   }
-  const c = list.find((x) => (x.url && x.url.includes(framePattern)) || (x.name && x.name.includes(framePattern)));
+  const c = list.find(
+    (x) =>
+      (x.url && x.url.includes(framePattern)) ||
+      (x.name && x.name.includes(framePattern)),
+  );
   return c ? c.contextId : null;
 }
 
@@ -918,7 +1017,10 @@ const emulateState = new Map();
 
 function emulateApplied(tabId, type) {
   let s = emulateState.get(tabId);
-  if (!s) { s = new Set(); emulateState.set(tabId, s); }
+  if (!s) {
+    s = new Set();
+    emulateState.set(tabId, s);
+  }
   s.add(type);
 }
 
@@ -991,11 +1093,17 @@ async function loadPresetSource(name) {
 async function loadFnHookSource(opts) {
   const res = await fetch(chrome.runtime.getURL(FN_HOOK_TEMPLATE));
   if (!res.ok) {
-    throw new ToolError("PRESET_LOAD_FAILED", `${FN_HOOK_TEMPLATE}: HTTP ${res.status}`);
+    throw new ToolError(
+      "PRESET_LOAD_FAILED",
+      `${FN_HOOK_TEMPLATE}: HTTP ${res.status}`,
+    );
   }
   const template = await res.text();
   if (!template.includes(FN_OPTS_SENTINEL)) {
-    throw new ToolError("PRESET_LOAD_FAILED", "fn_hook.js missing OPTS sentinel");
+    throw new ToolError(
+      "PRESET_LOAD_FAILED",
+      "fn_hook.js missing OPTS sentinel",
+    );
   }
   return template.replace(FN_OPTS_SENTINEL, JSON.stringify(opts));
 }
@@ -1067,8 +1175,13 @@ async function readScopeProperties(tabId, objectId, limit) {
       continue;
     }
     if (v.type === "string") {
-      out[p.name] = v.value.length > 300 ? v.value.slice(0, 300) + "…" : v.value;
-    } else if (v.type === "number" || v.type === "boolean" || v.type === "undefined") {
+      out[p.name] =
+        v.value.length > 300 ? v.value.slice(0, 300) + "…" : v.value;
+    } else if (
+      v.type === "number" ||
+      v.type === "boolean" ||
+      v.type === "undefined"
+    ) {
       out[p.name] = v.value;
     } else if (v.type === "object" && v.subtype === "null") {
       out[p.name] = null;
@@ -1076,7 +1189,8 @@ async function readScopeProperties(tabId, objectId, limit) {
       out[p.name] = `[function ${(v.description || "").slice(0, 80)}]`;
     } else {
       out[p.name] =
-        `[${v.className || v.type}] ` + String(v.description || "").slice(0, 120);
+        `[${v.className || v.type}] ` +
+        String(v.description || "").slice(0, 120);
     }
   }
   return out;
@@ -1125,7 +1239,10 @@ async function rebuildFetchPatterns(tabId) {
     return;
   }
   await cdpCall(tabId, "Fetch.enable", {
-    patterns: patches.map((p) => ({ urlPattern: p.pattern, requestStage: "Response" })),
+    patterns: patches.map((p) => ({
+      urlPattern: p.pattern,
+      requestStage: "Response",
+    })),
   });
 }
 
@@ -1201,13 +1318,17 @@ async function handleFetchPaused(tabId, params) {
 
   try {
     if (!patch || !isScript) {
-      await cdpCall(tabId, "Fetch.continueRequest", { requestId: params.requestId });
+      await cdpCall(tabId, "Fetch.continueRequest", {
+        requestId: params.requestId,
+      });
       return;
     }
     const bodyRes = await cdpCall(tabId, "Fetch.getResponseBody", {
       requestId: params.requestId,
     });
-    const original = bodyRes.base64Encoded ? decodeBase64(bodyRes.body) : bodyRes.body;
+    const original = bodyRes.base64Encoded
+      ? decodeBase64(bodyRes.body)
+      : bodyRes.body;
     const patched = applyScriptPatch(original, patch);
     pushEvent("script", {
       tabId,
@@ -1226,7 +1347,9 @@ async function handleFetchPaused(tabId, params) {
   } catch (e) {
     // 改写失败一律放行，宁可漏插桩不可卡页面
     try {
-      await cdpCall(tabId, "Fetch.continueRequest", { requestId: params.requestId });
+      await cdpCall(tabId, "Fetch.continueRequest", {
+        requestId: params.requestId,
+      });
     } catch (e2) {}
   } finally {
     pending.delete(params.requestId);
@@ -1251,26 +1374,53 @@ function failSafeFetchAll() {
 // ---------------------------------------------------------------------------
 
 const ENV_PROBES_A = [
-  "navigator.userAgent", "navigator.appVersion", "navigator.platform",
-  "navigator.vendor", "navigator.language", "navigator.hardwareConcurrency",
-  "navigator.deviceMemory", "navigator.maxTouchPoints", "navigator.webdriver",
-  "navigator.cookieEnabled", "navigator.onLine", "navigator.doNotTrack",
-  "navigator.pdfViewerEnabled", "navigator.plugins.length",
-  "navigator.mimeTypes.length", "navigator.userAgentData",
-  "navigator.connection", "navigator.permissions", "navigator.mediaDevices",
+  "navigator.userAgent",
+  "navigator.appVersion",
+  "navigator.platform",
+  "navigator.vendor",
+  "navigator.language",
+  "navigator.hardwareConcurrency",
+  "navigator.deviceMemory",
+  "navigator.maxTouchPoints",
+  "navigator.webdriver",
+  "navigator.cookieEnabled",
+  "navigator.onLine",
+  "navigator.doNotTrack",
+  "navigator.pdfViewerEnabled",
+  "navigator.plugins.length",
+  "navigator.mimeTypes.length",
+  "navigator.userAgentData",
+  "navigator.connection",
+  "navigator.permissions",
+  "navigator.mediaDevices",
 ];
 
 const ENV_PROBES_B = [
-  "screen.width", "screen.height", "screen.availWidth", "screen.availHeight",
-  "screen.colorDepth", "screen.pixelDepth",
-  "window.devicePixelRatio", "window.innerWidth", "window.innerHeight",
-  "window.outerWidth", "window.outerHeight", "window.screenX", "window.screenY",
+  "screen.width",
+  "screen.height",
+  "screen.availWidth",
+  "screen.availHeight",
+  "screen.colorDepth",
+  "screen.pixelDepth",
+  "window.devicePixelRatio",
+  "window.innerWidth",
+  "window.innerHeight",
+  "window.outerWidth",
+  "window.outerHeight",
+  "window.screenX",
+  "window.screenY",
 ];
 
 const ENV_PROBES_C = [
-  "document.readyState", "document.visibilityState", "document.hidden",
-  "document.characterSet", "document.referrer", "document.compatMode",
-  "document.hasFocus", "performance.timeOrigin", "performance.timing",
+  "document.readyState",
+  "document.visibilityState",
+  "document.hidden",
+  "document.characterSet",
+  "document.referrer",
+  "document.compatMode",
+  "document.hasFocus",
+  "performance.timeOrigin",
+  "performance.timing",
   "performance.navigation",
 ];
 
@@ -1363,7 +1513,11 @@ async function resolveTabId(args) {
   if (args.tabId != null) return args.tabId;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || tab.id == null) {
-    throw new ToolError("NO_TAB", "no active tab; pass tabId explicitly", false);
+    throw new ToolError(
+      "NO_TAB",
+      "no active tab; pass tabId explicitly",
+      false,
+    );
   }
   return tab.id;
 }
@@ -1409,7 +1563,10 @@ async function ensureTaskGroup(tabId) {
   // 优先复用记忆里的 groupId（同任务跨多次 navigate 不重复建组）
   if (currentTask.groupId != null) {
     try {
-      await chrome.tabs.group({ tabIds: [tabId], groupId: currentTask.groupId });
+      await chrome.tabs.group({
+        tabIds: [tabId],
+        groupId: currentTask.groupId,
+      });
       return currentTask.groupId;
     } catch (e) {
       currentTask.groupId = null; // 组已被用户关掉/失效，降级重建
@@ -1445,7 +1602,11 @@ function toRegExp(pattern, flags = "i") {
   try {
     return new RegExp(pattern, flags);
   } catch (e) {
-    throw new ToolError("BAD_PATTERN", `invalid url_pattern: ${e.message}`, false);
+    throw new ToolError(
+      "BAD_PATTERN",
+      `invalid url_pattern: ${e.message}`,
+      false,
+    );
   }
 }
 
@@ -1456,11 +1617,19 @@ function resolveTargetSelector(args, toolName, required = true) {
   const hasSel = !!args.selector;
   const hasRef = args.ref != null && String(args.ref) !== "";
   if (hasSel && hasRef) {
-    throw new ToolError("BAD_ARGS", `${toolName}: selector 与 ref 二选一`, false);
+    throw new ToolError(
+      "BAD_ARGS",
+      `${toolName}: selector 与 ref 二选一`,
+      false,
+    );
   }
   if (!hasSel && !hasRef) {
     if (required) {
-      throw new ToolError("BAD_ARGS", `${toolName}: selector 或 ref 必填一个`, false);
+      throw new ToolError(
+        "BAD_ARGS",
+        `${toolName}: selector 或 ref 必填一个`,
+        false,
+      );
     }
     return null;
   }
@@ -1474,7 +1643,7 @@ function targetNotFound(target, toolName) {
     throw new ToolError(
       "REF_STALE",
       `ref ${target.ref} 不在当前文档（页面可能已导航或重渲染），重新 read_page 拿新 ref`,
-      true
+      true,
     );
   }
   throw new ToolError("NOT_FOUND", `selector not found: ${target.selector}`);
@@ -1890,7 +2059,8 @@ const tools = {
         active: t.active,
         windowId: t.windowId,
         attached: attachedTabs.has(t.id),
-        group: t.groupId >= 0 ? groupTitles[t.groupId] || String(t.groupId) : null,
+        group:
+          t.groupId >= 0 ? groupTitles[t.groupId] || String(t.groupId) : null,
       }));
   },
 
@@ -1930,6 +2100,13 @@ const tools = {
       }, args.timeout_ms || 30000);
     });
     if (!created) await chrome.tabs.update(tabId, { url: args.url });
+    // BUG-1/2/53/59: reset per-tab state on navigation. The CDP
+    // Page.frameNavigated handler also does this, but only fires when
+    // Page.enable was called. Since read_page / navigate don't always
+    // enable Page, we reset here to guarantee refs restart from e1.
+    readPageNextRef.delete(tabId);
+    readPageSnapshots.delete(tabId);
+    scriptRegistryMap.delete(tabId);
     let groupId = null;
     if (created) {
       try {
@@ -1943,7 +2120,41 @@ const tools = {
     }
     const completed = await loaded;
     const tab = await chrome.tabs.get(tabId);
-    return { tabId, url: tab.url, title: tab.title, loadCompleted: completed, groupId };
+    // BUG-66: detect chrome-error:// page (invalid URL, DNS failure, etc.)
+    // Previously returned ok=true loadCompleted=true for these, giving AI
+    // false success on unreachable pages. chrome.tabs.get().url may still
+    // show the requested URL, so also check location.href in-page.
+    let isChromeError = tab.url && tab.url.startsWith("chrome-error://");
+    if (!isChromeError && completed) {
+      try {
+        const evRes = await cdpCall(tabId, "Runtime.evaluate", {
+          expression: "location.href",
+          returnByValue: true,
+        });
+        const actualUrl = evRes.result && evRes.result.value;
+        if (actualUrl && actualUrl.startsWith("chrome-error://")) {
+          isChromeError = true;
+        }
+      } catch (e) {}
+    }
+    if (isChromeError) {
+      return {
+        tabId,
+        url: args.url,
+        title: "",
+        loadCompleted: false,
+        navigationError:
+          "page failed to load (chrome-error) — check URL validity and network",
+        groupId,
+      };
+    }
+    return {
+      tabId,
+      url: tab.url,
+      title: tab.title,
+      loadCompleted: completed,
+      groupId,
+    };
   },
 
   // 一键清场：关掉 OWB 分组的全部 tab（只动桥创建的组，不碰用户 tab）
@@ -1962,17 +2173,23 @@ const tools = {
   },
 
   async evaluate(args) {
-    if (!args.expression) throw new ToolError("BAD_ARGS", "evaluate: expression is required");
+    if (!args.expression)
+      throw new ToolError("BAD_ARGS", "evaluate: expression is required");
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
     // frame_pattern：在指定 iframe 的执行上下文里求值（先用 list_frames 看 frame 列表）
     let contextId = undefined;
     if (args.frame_pattern != null) {
-      try { await cdpCall(tabId, "Runtime.enable"); } catch (e) {}
+      try {
+        await cdpCall(tabId, "Runtime.enable");
+      } catch (e) {}
       contextId = resolveFrameContextId(tabId, args.frame_pattern);
       if (!contextId) {
-        throw new ToolError("FRAME_NOT_FOUND",
-          `no iframe context matching ${JSON.stringify(args.frame_pattern)}; call list_frames first`, true);
+        throw new ToolError(
+          "FRAME_NOT_FOUND",
+          `no iframe context matching ${JSON.stringify(args.frame_pattern)}; call list_frames first`,
+          true,
+        );
       }
     }
     const res = await cdpCall(tabId, "Runtime.evaluate", {
@@ -1987,17 +2204,21 @@ const tools = {
         res.exceptionDetails.text +
           (res.exceptionDetails.exception
             ? `: ${res.exceptionDetails.exception.description || ""}`
-            : "")
+            : ""),
       );
     }
-    return { value: res.result ? res.result.value : undefined, type: res.result ? res.result.type : undefined };
+    return {
+      value: res.result ? res.result.value : undefined,
+      type: res.result ? res.result.type : undefined,
+    };
   },
 
   async network_start(args) {
     const tabId = await resolveTabId(args);
     const wasEnabled = networkEnabledTabs.has(tabId);
     await ensureNetwork(tabId);
-    if (!wasEnabled && args.clear !== false) networkBuffers.set(tabId, new Map());
+    if (!wasEnabled && args.clear !== false)
+      networkBuffers.set(tabId, new Map());
     return { tabId, capturing: true };
   },
 
@@ -2034,14 +2255,23 @@ const tools = {
   async network_detail(args) {
     const tabId = await resolveTabId(args);
     const rec = getBuffer(tabId).get(args.request_id);
-    if (!rec) throw new ToolError("NOT_FOUND", `request not in buffer: ${args.request_id}`);
+    if (!rec)
+      throw new ToolError(
+        "NOT_FOUND",
+        `request not in buffer: ${args.request_id}`,
+      );
     const detail = { ...rec };
     if (args.include_body !== false && rec.finished) {
       try {
-        const body = await cdpCall(tabId, "Network.getResponseBody", { requestId: args.request_id });
+        const body = await cdpCall(tabId, "Network.getResponseBody", {
+          requestId: args.request_id,
+        });
         // 全量 body（daemon WS 已调到 64MB 帧）；max_body 兜底防超大响应撑爆 agent 上下文
         const max = Math.max(args.max_body || 500000, 1000);
-        detail.body = body.body.length > max ? body.body.slice(0, max) + "…(truncated)" : body.body;
+        detail.body =
+          body.body.length > max
+            ? body.body.slice(0, max) + "…(truncated)"
+            : body.body;
         detail.bodyLength = body.body.length;
         detail.truncated = body.body.length > max;
         detail.base64Encoded = body.base64Encoded;
@@ -2056,7 +2286,11 @@ const tools = {
   async get_initiator(args) {
     const tabId = await resolveTabId(args);
     const rec = getBuffer(tabId).get(args.request_id);
-    if (!rec) throw new ToolError("NOT_FOUND", `request not in buffer: ${args.request_id}`);
+    if (!rec)
+      throw new ToolError(
+        "NOT_FOUND",
+        `request not in buffer: ${args.request_id}`,
+      );
     return { requestId: rec.requestId, url: rec.url, initiator: rec.initiator };
   },
 
@@ -2067,7 +2301,9 @@ const tools = {
     await ensureNetwork(tabId); // 复用 attach + Network.enable
     const tab = await chrome.tabs.get(tabId);
     let origin = null;
-    try { origin = new URL(tab.url).origin; } catch (e) {}
+    try {
+      origin = new URL(tab.url).origin;
+    } catch (e) {}
     const rec = {
       stats: new Stats(tab.url),
       tabId,
@@ -2075,14 +2311,26 @@ const tools = {
       startedAt: new Date().toISOString(),
       includeBodies: args.include_bodies !== false,
       bodyBytes: 0,
-      maxBodyBytes: Math.max(0, args.max_body_bytes != null ? args.max_body_bytes : 5 * 1024 * 1024),
-      maxTotalBodyBytes: Math.max(0, args.max_total_body_bytes != null ? args.max_total_body_bytes : 100 * 1024 * 1024),
+      maxBodyBytes: Math.max(
+        0,
+        args.max_body_bytes != null ? args.max_body_bytes : 5 * 1024 * 1024,
+      ),
+      maxTotalBodyBytes: Math.max(
+        0,
+        args.max_total_body_bytes != null
+          ? args.max_total_body_bytes
+          : 100 * 1024 * 1024,
+      ),
       bodyCapped: false,
       // 过滤（白/黑名单 + resource_type）
       urlFilter: args.url_pattern ? toRegExp(args.url_pattern) : null,
-      excludeFilter: args.exclude_pattern ? toRegExp(args.exclude_pattern) : null,
-      resourceTypes: Array.isArray(args.resource_types) && args.resource_types.length
-        ? new Set(args.resource_types.map((t) => String(t).toLowerCase())) : null,
+      excludeFilter: args.exclude_pattern
+        ? toRegExp(args.exclude_pattern)
+        : null,
+      resourceTypes:
+        Array.isArray(args.resource_types) && args.resource_types.length
+          ? new Set(args.resource_types.map((t) => String(t).toLowerCase()))
+          : null,
       // 增强流
       captureConsole: args.capture_console !== false,
       captureScreenshots: !!args.capture_screenshots,
@@ -2101,22 +2349,35 @@ const tools = {
     recorderOrigins.set(tabId, origin);
     // 启用增强域：Page.enable（导航截图）+ DOMStorage.enable（storage 流）+
     // Runtime/Log.enable（console 归档）。已启用过的重复调用无副作用。
-    try { await cdpCall(tabId, "Page.enable"); } catch (e) {}
+    try {
+      await cdpCall(tabId, "Page.enable");
+    } catch (e) {}
     if (rec.captureStorage) {
-      try { await cdpCall(tabId, "DOMStorage.enable"); } catch (e) {}
+      try {
+        await cdpCall(tabId, "DOMStorage.enable");
+      } catch (e) {}
     }
     if (rec.captureConsole) {
-      try { await cdpCall(tabId, "Runtime.enable"); } catch (e) {}
-      try { await cdpCall(tabId, "Log.enable"); } catch (e) {}
+      try {
+        await cdpCall(tabId, "Runtime.enable");
+      } catch (e) {}
+      try {
+        await cdpCall(tabId, "Log.enable");
+      } catch (e) {}
     }
     // cookie 起始快照（stop 时 diff）
     rec._cookiesStart = await snapshotCookies(tabId, origin);
     pushEvent("record", { tabId, phase: "start", url: tab.url });
-    return { tabId, recording: true, url: tab.url, filters: {
-      url_pattern: rec.urlFilter ? rec.urlFilter.source : null,
-      exclude_pattern: rec.excludeFilter ? rec.excludeFilter.source : null,
-      resource_types: rec.resourceTypes ? [...rec.resourceTypes] : null,
-    } };
+    return {
+      tabId,
+      recording: true,
+      url: tab.url,
+      filters: {
+        url_pattern: rec.urlFilter ? rec.urlFilter.source : null,
+        exclude_pattern: rec.excludeFilter ? rec.excludeFilter.source : null,
+        resource_types: rec.resourceTypes ? [...rec.resourceTypes] : null,
+      },
+    };
   },
 
   async record_stop(args) {
@@ -2132,21 +2393,46 @@ const tools = {
       // 单 recorder：直接取它的 tabId
       const onlyTabId = recorders.keys().next().value;
       const rec = recorders.get(onlyTabId);
-      const { har, entries } = await finalizeRecorder(onlyTabId, rec, args.title);
+      const { har, entries } = await finalizeRecorder(
+        onlyTabId,
+        rec,
+        args.title,
+      );
       recorders.delete(onlyTabId);
       recorderSkipped.delete(onlyTabId);
       recorderOrigins.delete(onlyTabId);
-      pushEvent("record", { tabId: onlyTabId, phase: "stop", entries, bodyBytes: rec.bodyBytes });
-      return { tabId: onlyTabId, recording: false, entries, bodyBytes: rec.bodyBytes, har };
+      pushEvent("record", {
+        tabId: onlyTabId,
+        phase: "stop",
+        entries,
+        bodyBytes: rec.bodyBytes,
+      });
+      return {
+        tabId: onlyTabId,
+        recording: false,
+        entries,
+        bodyBytes: rec.bodyBytes,
+        har,
+      };
     }
     const tabId = await resolveTabId(args);
     const rec = recorders.get(tabId);
-    if (!rec) throw new ToolError("NOT_RECORDING", `tab ${tabId} is not recording`, false);
+    if (!rec)
+      throw new ToolError(
+        "NOT_RECORDING",
+        `tab ${tabId} is not recording`,
+        false,
+      );
     const { har, entries } = await finalizeRecorder(tabId, rec, args.title);
     recorders.delete(tabId);
     recorderSkipped.delete(tabId);
     recorderOrigins.delete(tabId);
-    pushEvent("record", { tabId, phase: "stop", entries, bodyBytes: rec.bodyBytes });
+    pushEvent("record", {
+      tabId,
+      phase: "stop",
+      entries,
+      bodyBytes: rec.bodyBytes,
+    });
     return { tabId, recording: false, entries, bodyBytes: rec.bodyBytes, har };
   },
 
@@ -2171,19 +2457,35 @@ const tools = {
   async download(args) {
     const tabId = await resolveTabId(args);
     if (!args.selector && !args.url) {
-      throw new ToolError("BAD_ARGS", "download: selector 或 url 必填一个", false);
+      throw new ToolError(
+        "BAD_ARGS",
+        "download: selector 或 url 必填一个",
+        false,
+      );
     }
     await ensureAttached(tabId);
-    try { await cdpCall(tabId, "Page.enable"); } catch (e) {}
+    try {
+      await cdpCall(tabId, "Page.enable");
+    } catch (e) {}
     // 默认下载目录：浏览器默认 Downloads；save_path（绝对路径）可覆盖
     const dlPath = args.save_path || "";
     try {
-      await cdpCall(tabId, "Page.setDownloadBehavior",
-        dlPath ? { behavior: "allow", downloadPath: dlPath } : { behavior: "allow", eventsEnabled: true });
+      await cdpCall(
+        tabId,
+        "Page.setDownloadBehavior",
+        dlPath
+          ? { behavior: "allow", downloadPath: dlPath }
+          : { behavior: "allow", eventsEnabled: true },
+      );
     } catch (e) {
       // 旧版 Chrome 仅支持 behavior+downloadPath，eventsEnabled 可能不支持
-      await cdpCall(tabId, "Page.setDownloadBehavior",
-        dlPath ? { behavior: "allow", downloadPath: dlPath } : { behavior: "default" });
+      await cdpCall(
+        tabId,
+        "Page.setDownloadBehavior",
+        dlPath
+          ? { behavior: "allow", downloadPath: dlPath }
+          : { behavior: "default" },
+      );
     }
     // 登记一次性 watcher
     const timeoutMs = Math.min(args.timeout_ms || 60000, 180000);
@@ -2206,20 +2508,45 @@ const tools = {
     let result;
     try {
       const timer = new Promise((_, reject) =>
-        setTimeout(() => reject(new ToolError("TIMEOUT", `download not completed in ${timeoutMs}ms`, true)), timeoutMs));
+        setTimeout(
+          () =>
+            reject(
+              new ToolError(
+                "TIMEOUT",
+                `download not completed in ${timeoutMs}ms`,
+                true,
+              ),
+            ),
+          timeoutMs,
+        ),
+      );
       result = await Promise.race([watchPromise, timer]);
     } finally {
       downloadWatchers.delete(tabId);
     }
-    const fullPath = dlPath && result.filename ? dlPath.replace(/[\\/]+$/, "") + "/" + result.filename : result.filename || "(default dir)";
-    pushEvent("download", { tabId, filename: result.filename, url: watchPromise.url });
-    return { tabId, filename: result.filename, path: fullPath, receivedBytes: result.receivedBytes, state: result.state };
+    const fullPath =
+      dlPath && result.filename
+        ? dlPath.replace(/[\\/]+$/, "") + "/" + result.filename
+        : result.filename || "(default dir)";
+    pushEvent("download", {
+      tabId,
+      filename: result.filename,
+      url: watchPromise.url,
+    });
+    return {
+      tabId,
+      filename: result.filename,
+      path: fullPath,
+      receivedBytes: result.receivedBytes,
+      state: result.state,
+    };
   },
 
   // ---- E2. 文件上传（页面内 DataTransfer + File，无需文件系统）----
 
   async upload(args) {
-    if (!args.selector) throw new ToolError("BAD_ARGS", "upload: selector is required", false);
+    if (!args.selector)
+      throw new ToolError("BAD_ARGS", "upload: selector is required", false);
     if (!Array.isArray(args.files) || !args.files.length) {
       throw new ToolError("BAD_ARGS", "upload: files array required", false);
     }
@@ -2228,9 +2555,17 @@ const tools = {
     // 校验 + 归一化文件项
     const norm = args.files.map((f) => {
       if (!f || !f.name || f.base64 == null) {
-        throw new ToolError("BAD_ARGS", "upload: each file needs {name, base64}", false);
+        throw new ToolError(
+          "BAD_ARGS",
+          "upload: each file needs {name, base64}",
+          false,
+        );
       }
-      return { name: String(f.name), base64: String(f.base64), mime: f.mime || "application/octet-stream" };
+      return {
+        name: String(f.name),
+        base64: String(f.base64),
+        mime: f.mime || "application/octet-stream",
+      };
     });
     // 页面内：找 input、构造 File、赋给 .files、派发 change（绕文件系统，relay 模式也能用）
     const expr = `(() => {
@@ -2248,10 +2583,17 @@ const tools = {
       input.dispatchEvent(new Event("change", { bubbles: true }));
       return { ok: true, count: input.files.length };
     })()`;
-    const res = await cdpCall(tabId, "Runtime.evaluate", { expression: expr, returnByValue: true });
+    const res = await cdpCall(tabId, "Runtime.evaluate", {
+      expression: expr,
+      returnByValue: true,
+    });
     const v = res.result && res.result.value;
     if (!v || !v.ok) {
-      throw new ToolError("UPLOAD_FAILED", (v && v.error) || "upload failed", false);
+      throw new ToolError(
+        "UPLOAD_FAILED",
+        (v && v.error) || "upload failed",
+        false,
+      );
     }
     return { tabId, filesSet: v.count };
   },
@@ -2261,10 +2603,35 @@ const tools = {
   async print_pdf(args) {
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
+
+    // BUG-64: validate paperFormat — invalid values used to silently pass through
+    // to Chrome, giving AI false success.
+    const PAPER_FORMATS = [
+      "Letter",
+      "Legal",
+      "Tabloid",
+      "Ledger",
+      "A0",
+      "A1",
+      "A2",
+      "A3",
+      "A4",
+      "A5",
+      "A6",
+    ];
+    const paperFormat = args.format || "A4";
+    if (!PAPER_FORMATS.includes(paperFormat)) {
+      throw new ToolError(
+        "BAD_ARGS",
+        `print_pdf: format must be one of ${PAPER_FORMATS.join(", ")} (got: ${paperFormat})`,
+        false,
+      );
+    }
+
     const opts = {
       landscape: !!args.landscape,
       printBackground: args.print_background !== false,
-      paperFormat: args.format || "A4",
+      paperFormat,
       marginTop: args.margin_top != null ? args.margin_top : 0.4,
       marginBottom: args.margin_bottom != null ? args.margin_bottom : 0.4,
       marginLeft: args.margin_left != null ? args.margin_left : 0.4,
@@ -2272,7 +2639,12 @@ const tools = {
       preferCSSPageSize: !!args.prefer_css_page_size,
     };
     const { data } = await cdpCall(tabId, "Page.printToPDF", opts);
-    return { tabId, format: opts.paperFormat, data, size: data ? data.length : 0 };
+    return {
+      tabId,
+      format: opts.paperFormat,
+      data,
+      size: data ? data.length : 0,
+    };
   },
 
   // ---- E4. iframe / 执行上下文（list_frames + frame 定向 evaluate）----
@@ -2280,7 +2652,9 @@ const tools = {
   async list_frames(args) {
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
-    try { await cdpCall(tabId, "Runtime.enable"); } catch (e) {}
+    try {
+      await cdpCall(tabId, "Runtime.enable");
+    } catch (e) {}
     const treeRes = await cdpCall(tabId, "Page.getFrameTree");
     const ctxs = frameContexts.get(tabId) || [];
     // frame 树 + 各 frame 的 contextId（若有）
@@ -2313,12 +2687,18 @@ const tools = {
       const d = args.device;
       try {
         await cdpCall(tabId, "Emulation.setDeviceMetricsOverride", {
-          width: d.width || 360, height: d.height || 640,
-          deviceScaleFactor: d.device_scale_factor != null ? d.device_scale_factor : 1,
-          mobile: !!d.mobile, touch: !!d.touch,
+          width: d.width || 360,
+          height: d.height || 640,
+          deviceScaleFactor:
+            d.device_scale_factor != null ? d.device_scale_factor : 1,
+          mobile: !!d.mobile,
+          touch: !!d.touch,
         });
-        emulateApplied(tabId, "device"); applied.push("device");
-      } catch (e) { errs.push("device: " + e.message); }
+        emulateApplied(tabId, "device");
+        applied.push("device");
+      } catch (e) {
+        errs.push("device: " + e.message);
+      }
     }
     // 网络节流
     if (args.network) {
@@ -2330,8 +2710,11 @@ const tools = {
           downloadThroughput: n.download || -1,
           uploadThroughput: n.upload || -1,
         });
-        emulateApplied(tabId, "network"); applied.push("network");
-      } catch (e) { errs.push("network: " + e.message); }
+        emulateApplied(tabId, "network");
+        applied.push("network");
+      } catch (e) {
+        errs.push("network: " + e.message);
+      }
     }
     // 地理位置覆盖
     if (args.geolocation) {
@@ -2341,40 +2724,67 @@ const tools = {
           longitude: args.geolocation.longitude || 0,
           accuracy: args.geolocation.accuracy || 100,
         });
-        emulateApplied(tabId, "geolocation"); applied.push("geolocation");
-      } catch (e) { errs.push("geolocation: " + e.message); }
+        emulateApplied(tabId, "geolocation");
+        applied.push("geolocation");
+      } catch (e) {
+        errs.push("geolocation: " + e.message);
+      }
     }
     // 时区
     if (args.timezone) {
       try {
-        await cdpCall(tabId, "Emulation.setTimezoneOverride", { timezoneId: args.timezone });
-        emulateApplied(tabId, "timezone"); applied.push("timezone");
-      } catch (e) { errs.push("timezone: " + e.message); }
+        await cdpCall(tabId, "Emulation.setTimezoneOverride", {
+          timezoneId: args.timezone,
+        });
+        emulateApplied(tabId, "timezone");
+        applied.push("timezone");
+      } catch (e) {
+        errs.push("timezone: " + e.message);
+      }
     }
     // 语言
     if (args.locale) {
       try {
-        await cdpCall(tabId, "Emulation.setLocaleOverride", { locale: args.locale });
-        emulateApplied(tabId, "locale"); applied.push("locale");
-      } catch (e) { errs.push("locale: " + e.message); }
+        await cdpCall(tabId, "Emulation.setLocaleOverride", {
+          locale: args.locale,
+        });
+        emulateApplied(tabId, "locale");
+        applied.push("locale");
+      } catch (e) {
+        errs.push("locale: " + e.message);
+      }
     }
     // 权限授予（notification/geolocation/camera...）
     if (Array.isArray(args.permissions) && args.permissions.length) {
       try {
-        await cdpCall(tabId, "Browser.grantPermissions", { permissions: args.permissions });
-        emulateApplied(tabId, "permissions"); applied.push("permissions");
-      } catch (e) { errs.push("permissions: " + e.message); }
+        await cdpCall(tabId, "Browser.grantPermissions", {
+          permissions: args.permissions,
+        });
+        emulateApplied(tabId, "permissions");
+        applied.push("permissions");
+      } catch (e) {
+        errs.push("permissions: " + e.message);
+      }
     }
     // UA 覆盖
     if (args.user_agent) {
       try {
-        await cdpCall(tabId, "Emulation.setUserAgentOverride",
-          { userAgent: args.user_agent, acceptLanguage: args.locale || undefined });
-        emulateApplied(tabId, "user_agent"); applied.push("user_agent");
-      } catch (e) { errs.push("user_agent: " + e.message); }
+        await cdpCall(tabId, "Emulation.setUserAgentOverride", {
+          userAgent: args.user_agent,
+          acceptLanguage: args.locale || undefined,
+        });
+        emulateApplied(tabId, "user_agent");
+        applied.push("user_agent");
+      } catch (e) {
+        errs.push("user_agent: " + e.message);
+      }
     }
-    return { tabId, applied, errors: errs.length ? errs : undefined,
-             active: emulateState.get(tabId) ? [...emulateState.get(tabId)] : [] };
+    return {
+      tabId,
+      applied,
+      errors: errs.length ? errs : undefined,
+      active: emulateState.get(tabId) ? [...emulateState.get(tabId)] : [],
+    };
   },
 
   async emulate_reset(args) {
@@ -2384,17 +2794,33 @@ const tools = {
     const reset = [];
     for (const type of s) {
       try {
-        if (type === "device") await cdpCall(tabId, "Emulation.clearDeviceMetricsOverride");
+        if (type === "device")
+          await cdpCall(tabId, "Emulation.clearDeviceMetricsOverride");
         else if (type === "network") {
           // Network 重置节流：disable 再 enable（emulateNetworkConditions 无 clear）
-          try { await cdpCall(tabId, "Network.disable"); } catch (e) {}
-          await cdpCall(tabId, "Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
-        }
-        else if (type === "geolocation") await cdpCall(tabId, "Emulation.clearGeolocationOverride");
-        else if (type === "timezone") await cdpCall(tabId, "Emulation.setTimezoneOverride", { timezoneId: "" });
-        else if (type === "locale") await cdpCall(tabId, "Emulation.setLocaleOverride", { locale: "" });
-        else if (type === "permissions") await cdpCall(tabId, "Browser.resetPermissions");
-        else if (type === "user_agent") await cdpCall(tabId, "Emulation.setUserAgentOverride", { userAgent: "" });
+          try {
+            await cdpCall(tabId, "Network.disable");
+          } catch (e) {}
+          await cdpCall(tabId, "Network.emulateNetworkConditions", {
+            offline: false,
+            latency: 0,
+            downloadThroughput: -1,
+            uploadThroughput: -1,
+          });
+        } else if (type === "geolocation")
+          await cdpCall(tabId, "Emulation.clearGeolocationOverride");
+        else if (type === "timezone")
+          await cdpCall(tabId, "Emulation.setTimezoneOverride", {
+            timezoneId: "",
+          });
+        else if (type === "locale")
+          await cdpCall(tabId, "Emulation.setLocaleOverride", { locale: "" });
+        else if (type === "permissions")
+          await cdpCall(tabId, "Browser.resetPermissions");
+        else if (type === "user_agent")
+          await cdpCall(tabId, "Emulation.setUserAgentOverride", {
+            userAgent: "",
+          });
         reset.push(type);
       } catch (e) {}
     }
@@ -2410,12 +2836,18 @@ const tools = {
     const registered = [];
     for (const name of presets) {
       if (reg.has(name)) {
-        registered.push({ preset: name, identifier: reg.get(name), already: true });
+        registered.push({
+          preset: name,
+          identifier: reg.get(name),
+          already: true,
+        });
         continue;
       }
       const source = await loadPresetSource(name);
       const { identifier } = await cdpCall(
-        tabId, "Page.addScriptToEvaluateOnNewDocument", { source }
+        tabId,
+        "Page.addScriptToEvaluateOnNewDocument",
+        { source },
       );
       reg.set(name, identifier);
       registered.push({ preset: name, identifier });
@@ -2433,13 +2865,16 @@ const tools = {
   async hook_remove(args) {
     const tabId = await resolveTabId(args);
     const reg = tabHookRegistry(tabId);
-    const names = args.presets || (args.preset ? [args.preset] : [...reg.keys()]);
+    const names =
+      args.presets || (args.preset ? [args.preset] : [...reg.keys()]);
     const removed = [];
     for (const name of names) {
       const identifier = reg.get(name);
       if (!identifier) continue;
       try {
-        await cdpCall(tabId, "Page.removeScriptToEvaluateOnNewDocument", { identifier });
+        await cdpCall(tabId, "Page.removeScriptToEvaluateOnNewDocument", {
+          identifier,
+        });
       } catch (e) {
         // debugger session 已失效（detach）时移除会报错，登记照删
       }
@@ -2463,17 +2898,26 @@ const tools = {
   async hook_function(args) {
     const tabId = await resolveTabId(args);
     if (!args.function_path) {
-      throw new ToolError("BAD_ARGS", "hook_function: function_path is required");
+      throw new ToolError(
+        "BAD_ARGS",
+        "hook_function: function_path is required",
+      );
     }
     const position = args.position || "after";
     if (!["before", "after", "replace"].includes(position)) {
-      throw new ToolError("BAD_ARGS", `hook_function: bad position: ${position}`);
+      throw new ToolError(
+        "BAD_ARGS",
+        `hook_function: bad position: ${position}`,
+      );
     }
     const key = `fn:${args.function_path}#${position}`;
     await ensureHookChannel(tabId);
     const reg = tabHookRegistry(tabId);
     if (reg.has(key)) {
-      return { tabId, registered: [{ preset: key, identifier: reg.get(key), already: true }] };
+      return {
+        tabId,
+        registered: [{ preset: key, identifier: reg.get(key), already: true }],
+      };
     }
     const source = await loadFnHookSource({
       key,
@@ -2489,7 +2933,9 @@ const tools = {
       nonOverridable: !!args.non_overridable,
     });
     const { identifier } = await cdpCall(
-      tabId, "Page.addScriptToEvaluateOnNewDocument", { source }
+      tabId,
+      "Page.addScriptToEvaluateOnNewDocument",
+      { source },
     );
     reg.set(key, identifier);
     await saveHookRegistry();
@@ -2523,13 +2969,16 @@ const tools = {
           res.exceptionDetails.text +
             (res.exceptionDetails.exception
               ? `: ${res.exceptionDetails.exception.description || ""}`
-              : "")
+              : ""),
         );
       }
       return res.result ? res.result.value : undefined;
     }
     if (!args.function_path) {
-      throw new ToolError("BAD_ARGS", "oracle_call: function_path or object_id is required");
+      throw new ToolError(
+        "BAD_ARGS",
+        "oracle_call: function_path or object_id is required",
+      );
     }
     const expression =
       `${ORACLE_EXPR}(${JSON.stringify(args.function_path)}, ` +
@@ -2552,10 +3001,14 @@ const tools = {
     // HttpOnly cookie 也包含（CDP 全量拿）
     let cookies = [];
     try {
-      const res = await cdpCall(tabId, "Network.getCookies", { urls: [origin, tab.url] });
+      const res = await cdpCall(tabId, "Network.getCookies", {
+        urls: [origin, tab.url],
+      });
       cookies = res.cookies || [];
     } catch (e) {}
-    const storage = await evaluateJs(tabId, STATE_EXPORT_EXPR, { awaitPromise: true });
+    const storage = await evaluateJs(tabId, STATE_EXPORT_EXPR, {
+      awaitPromise: true,
+    });
     return {
       tabId,
       url: tab.url,
@@ -2573,7 +3026,8 @@ const tools = {
       throw new ToolError("BAD_ARGS", "import_state: state object is required");
     }
     await ensureAttached(tabId);
-    let cookiesSet = 0, cookiesFailed = 0;
+    let cookiesSet = 0,
+      cookiesFailed = 0;
     for (const c of state.cookies || []) {
       try {
         const params = { name: c.name, value: c.value, path: c.path || "/" };
@@ -2608,7 +3062,9 @@ const tools = {
       throw new ToolError("BAD_ARGS", "break_xhr: url_substring is required");
     }
     await ensureDebugger(tabId);
-    await cdpCall(tabId, "DOMDebugger.setXHRBreakpoint", { url: args.url_substring });
+    await cdpCall(tabId, "DOMDebugger.setXHRBreakpoint", {
+      url: args.url_substring,
+    });
     armedBreakpoints(tabId).add("xhr:" + args.url_substring);
     return { tabId, armed: "xhr:" + args.url_substring };
   },
@@ -2627,14 +3083,18 @@ const tools = {
       if (!armed.has(b)) continue;
       if (b.startsWith("xhr:")) {
         try {
-          await cdpCall(tabId, "DOMDebugger.removeXHRBreakpoint", { url: b.slice(4) });
+          await cdpCall(tabId, "DOMDebugger.removeXHRBreakpoint", {
+            url: b.slice(4),
+          });
         } catch (e) {}
       } else {
         // fn:/url: 断点按 breakpointId 移除
         const bpId = bpIds && bpIds.get(b);
         if (bpId) {
           try {
-            await cdpCall(tabId, "Debugger.removeBreakpoint", { breakpointId: bpId });
+            await cdpCall(tabId, "Debugger.removeBreakpoint", {
+              breakpointId: bpId,
+            });
           } catch (e) {}
           bpIds.delete(b);
         }
@@ -2650,7 +3110,11 @@ const tools = {
     const tabId = await resolveTabId(args);
     const paused = pausedState.get(tabId);
     if (!paused) {
-      throw new ToolError("NOT_PAUSED", "page is not paused at a breakpoint", true);
+      throw new ToolError(
+        "NOT_PAUSED",
+        "page is not paused at a breakpoint",
+        true,
+      );
     }
     const maxFrames = args.max_frames || 3;
     const propLimit = args.prop_limit || 40;
@@ -2663,7 +3127,9 @@ const tools = {
         if (!scope.object || !scope.object.objectId) continue;
         try {
           scopes[scope.type] = await readScopeProperties(
-            tabId, scope.object.objectId, propLimit
+            tabId,
+            scope.object.objectId,
+            propLimit,
           );
         } catch (e) {
           scopes[scope.type] = { __error: String(e) };
@@ -2680,7 +3146,9 @@ const tools = {
     }
     // frozen-snapshot：默认 dump 完立即 resume，防页面长冻结
     let resumed = false;
-    if (args.auto_resume !== false) {
+    // BUG-65: 默认 NOT auto-resume。AI 工作流是 read → inspect → continue/step，
+    // 自动 resume 打断了断点检查。显式 auto_resume=true 才 resume。
+    if (args.auto_resume === true) {
       try {
         await cdpCall(tabId, "Debugger.resume");
         resumed = true;
@@ -2691,6 +3159,15 @@ const tools = {
 
   async resume(args) {
     const tabId = await resolveTabId(args);
+    // BUG-65: guard against double-resume — Debugger.resume when not paused
+    // throws an INTERNAL error that confuses AI.
+    if (!pausedState.has(tabId)) {
+      throw new ToolError(
+        "NOT_PAUSED",
+        "page is not paused at a breakpoint",
+        true,
+      );
+    }
     await cdpCall(tabId, "Debugger.resume");
     return { tabId, resumed: true };
   },
@@ -2704,7 +3181,10 @@ const tools = {
     };
     const method = map[args.action || "over"];
     if (!method) {
-      throw new ToolError("BAD_ARGS", `step: action must be one of ${Object.keys(map)}`);
+      throw new ToolError(
+        "BAD_ARGS",
+        `step: action must be one of ${Object.keys(map)}`,
+      );
     }
     await cdpCall(tabId, method, {});
     return { tabId, stepped: args.action || "over" };
@@ -2729,7 +3209,10 @@ const tools = {
   async capture_request(args) {
     const tabId = await resolveTabId(args);
     if (!args.url_pattern) {
-      throw new ToolError("BAD_ARGS", "capture_request: url_pattern is required");
+      throw new ToolError(
+        "BAD_ARGS",
+        "capture_request: url_pattern is required",
+      );
     }
     const re = toRegExp(args.url_pattern);
     await ensureNetwork(tabId);
@@ -2755,7 +3238,8 @@ const tools = {
     if (!found) {
       throw new ToolError(
         "TIMEOUT",
-        `no request matching ${args.url_pattern} within timeout`, true
+        `no request matching ${args.url_pattern} within timeout`,
+        true,
       );
     }
     // 等响应收尾（最多 5s），保证 body 可取
@@ -2793,12 +3277,17 @@ const tools = {
     const tabId = await resolveTabId(args);
     const kinds = ["selector", "text", "url_pattern", "network_idle"];
     const given = kinds.filter(
-      (k) => args[k] !== undefined && args[k] !== null && args[k] !== false && args[k] !== ""
+      (k) =>
+        args[k] !== undefined &&
+        args[k] !== null &&
+        args[k] !== false &&
+        args[k] !== "",
     );
     if (given.length !== 1) {
       throw new ToolError(
         "BAD_ARGS",
-        "wait_for: selector/text/url_pattern/network_idle 四选一（且必给一个）", false
+        "wait_for: selector/text/url_pattern/network_idle 四选一（且必给一个）",
+        false,
       );
     }
     const kind = given[0];
@@ -2839,7 +3328,12 @@ const tools = {
           if (kind === "url_pattern") {
             const tab = await chrome.tabs.get(tabId);
             if (re.test(tab.url || "")) {
-              return { tabId, condition: kind, elapsedMs: elapsedMs(), url: tab.url };
+              return {
+                tabId,
+                condition: kind,
+                elapsedMs: elapsedMs(),
+                url: tab.url,
+              };
             }
           } else {
             const expression =
@@ -2859,7 +3353,9 @@ const tools = {
             const v = res.result && res.result.value;
             if (v) {
               return {
-                tabId, condition: kind, elapsedMs: elapsedMs(),
+                tabId,
+                condition: kind,
+                elapsedMs: elapsedMs(),
                 ...(kind === "selector" ? v : { text: args.text }),
               };
             }
@@ -2872,7 +3368,8 @@ const tools = {
     }
     throw new ToolError(
       "TIMEOUT",
-      `wait_for: ${kind} 条件 ${timeoutMs}ms 内未满足`, true
+      `wait_for: ${kind} 条件 ${timeoutMs}ms 内未满足`,
+      true,
     );
   },
 
@@ -2894,17 +3391,26 @@ const tools = {
       });
       const text = (res.result && res.result.value) || "";
       return {
-        tabId, mode,
+        tabId,
+        mode,
         text: text.length > maxChars ? text.slice(0, maxChars) : text,
         truncated: text.length > maxChars,
       };
     }
 
     if (mode === "article") {
-      const v = (await evaluateJs(tabId, READ_PAGE_ARTICLE_EXPR)) || { title: "", content: "" };
+      const v = (await evaluateJs(tabId, READ_PAGE_ARTICLE_EXPR)) || {
+        title: "",
+        content: "",
+      };
       return {
-        tabId, mode, title: v.title,
-        content: v.content.length > maxChars ? v.content.slice(0, maxChars) : v.content,
+        tabId,
+        mode,
+        title: v.title,
+        content:
+          v.content.length > maxChars
+            ? v.content.slice(0, maxChars)
+            : v.content,
         length: v.content.length,
         truncated: v.content.length > maxChars,
       };
@@ -2913,7 +3419,10 @@ const tools = {
     // snapshot：页面表达式算好 nodes/line/hash，增量比对在扩展侧做
     const maxNodes = Math.min(Math.max(args.max_nodes || 400, 1), 2000);
     const nextRef = readPageNextRef.get(tabId) || 1;
-    const v = (await evaluateJs(tabId, READ_PAGE_SNAPSHOT_EXPR(nextRef, maxNodes))) || { nodes: [], nextRef };
+    const v = (await evaluateJs(
+      tabId,
+      READ_PAGE_SNAPSHOT_EXPR(nextRef, maxNodes),
+    )) || { nodes: [], nextRef };
     readPageNextRef.set(tabId, v.nextRef);
 
     const prev = readPageSnapshots.get(tabId) || new Map();
@@ -2927,9 +3436,15 @@ const tools = {
       for (const n of nodes) {
         const key = n.ref || "#" + n.hash;
         const old = prev.get(key);
-        if (old === undefined) { stats.added++; kept.push(n); }
-        else if (old !== n.hash) { stats.changed++; kept.push(n); }
-        else { stats.unchanged++; }
+        if (old === undefined) {
+          stats.added++;
+          kept.push(n);
+        } else if (old !== n.hash) {
+          stats.changed++;
+          kept.push(n);
+        } else {
+          stats.unchanged++;
+        }
       }
       for (const k of prev.keys()) {
         if (!cur.has(k)) stats.removed++;
@@ -2945,8 +3460,14 @@ const tools = {
       truncated = true;
     }
     return {
-      tabId, mode, url: v.url, title: v.title,
-      lines, nodes, truncated, refsAssigned: v.refsAssigned,
+      tabId,
+      mode,
+      url: v.url,
+      title: v.title,
+      lines,
+      nodes,
+      truncated,
+      refsAssigned: v.refsAssigned,
       ...(stats ? { stats } : {}),
     };
   },
@@ -2967,10 +3488,20 @@ const tools = {
           // 组已不存在：统计按空返回
         }
       }
-      return { cleared: true, title: t.title, groupId: t.groupId, tabIds, tabCount: tabIds.length };
+      return {
+        cleared: true,
+        title: t.title,
+        groupId: t.groupId,
+        tabIds,
+        tabCount: tabIds.length,
+      };
     }
     if (!args.title) {
-      throw new ToolError("BAD_ARGS", "task_context: title 必填（清任务用 action: clear）", false);
+      throw new ToolError(
+        "BAD_ARGS",
+        "task_context: title 必填（清任务用 action: clear）",
+        false,
+      );
     }
     currentTask = { title: String(args.title), groupId: null };
     return { taskSet: true, title: currentTask.title };
@@ -2985,36 +3516,62 @@ const tools = {
     const target = resolveTargetSelector(args, "mouse_click");
     const button = args.button || "left";
     if (!["left", "right", "middle"].includes(button)) {
-      throw new ToolError("BAD_ARGS", `mouse_click: bad button: ${button}`, false);
+      throw new ToolError(
+        "BAD_ARGS",
+        `mouse_click: bad button: ${button}`,
+        false,
+      );
     }
-    const clickCount = Math.min(Math.max(parseInt(args.click_count, 10) || 1, 1), 2);
+    const clickCount = Math.min(
+      Math.max(parseInt(args.click_count, 10) || 1, 1),
+      2,
+    );
     await ensureAttached(tabId);
     // 元素中心点（视口坐标）：scrollIntoView 后取 getBoundingClientRect
     const found = await cdpCall(tabId, "Runtime.evaluate", {
       expression: elementSnippet(
         target.selector,
         `const r = el.getBoundingClientRect();` +
-        ` return { x: r.x + r.width / 2, y: r.y + r.height / 2,` +
-        ` tag: el.tagName, text: String(el.innerText || el.value || "").slice(0, 80) };`
+          ` return { x: r.x + r.width / 2, y: r.y + r.height / 2,` +
+          ` tag: el.tagName, text: String(el.innerText || el.value || "").slice(0, 80) };`,
       ),
       returnByValue: true,
     });
     const v = found.result && found.result.value;
     if (!v) targetNotFound(target, "mouse_click");
-    const x = v.x, y = v.y;
+    const x = v.x,
+      y = v.y;
+    // BUG-35: bring tab to front — cursor animation uses requestAnimationFrame
+    // which is suspended in background tabs, causing permanent hang.
+    try {
+      await cdpCall(tabId, "Page.bringToFront");
+    } catch (e) {}
     // AI 光标：ensure 覆盖层（幂等）→ 贝塞尔移动动画（~450ms，await 到位再点）
     await evaluateJs(tabId, CURSOR_OVERLAY_EXPR, { returnByValue: false });
-    await evaluateJs(tabId, `window.__owbCursor.moveTo(${x}, ${y}, 450)`, { awaitPromise: true });
+    await evaluateJs(tabId, `window.__owbCursor.moveTo(${x}, ${y}, 450)`, {
+      awaitPromise: true,
+    });
     // 真实鼠标事件序列：moved → pressed → released（双击再来一轮 clickCount=2）
     await cdpCall(tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved", x, y, button: "none",
+      type: "mouseMoved",
+      x,
+      y,
+      button: "none",
     });
     for (let i = 1; i <= clickCount; i++) {
       await cdpCall(tabId, "Input.dispatchMouseEvent", {
-        type: "mousePressed", x, y, button, clickCount: i,
+        type: "mousePressed",
+        x,
+        y,
+        button,
+        clickCount: i,
       });
       await cdpCall(tabId, "Input.dispatchMouseEvent", {
-        type: "mouseReleased", x, y, button, clickCount: i,
+        type: "mouseReleased",
+        x,
+        y,
+        button,
+        clickCount: i,
       });
     }
     // 涟漪反馈（fire-and-forget）
@@ -3023,7 +3580,10 @@ const tools = {
       returnByValue: false,
     }).catch(() => {});
     return {
-      tabId, x, y, button,
+      tabId,
+      x,
+      y,
+      button,
       clicked: target.ref || target.selector,
       ...(v.tag ? { tag: v.tag } : {}),
       ...(v.text ? { text: v.text } : {}),
@@ -3055,13 +3615,25 @@ const tools = {
     const tabId = await resolveTabId(args);
     const condition = args.condition || "url_change";
     if (!["url_change", "selector", "text"].includes(condition)) {
-      throw new ToolError("BAD_ARGS", `wait_user: bad condition: ${condition}`, false);
+      throw new ToolError(
+        "BAD_ARGS",
+        `wait_user: bad condition: ${condition}`,
+        false,
+      );
     }
     if (condition === "selector" && !args.selector) {
-      throw new ToolError("BAD_ARGS", "wait_user: condition=selector 时 selector 必填", false);
+      throw new ToolError(
+        "BAD_ARGS",
+        "wait_user: condition=selector 时 selector 必填",
+        false,
+      );
     }
     if (condition === "text" && !args.text) {
-      throw new ToolError("BAD_ARGS", "wait_user: condition=text 时 text 必填", false);
+      throw new ToolError(
+        "BAD_ARGS",
+        "wait_user: condition=text 时 text 必填",
+        false,
+      );
     }
     // daemon ctl 天花板 300s，留 20s 余量给编排开销
     const timeoutMs = Math.min(args.timeout_ms || 280000, 280000);
@@ -3077,7 +3649,13 @@ const tools = {
         if (condition === "url_change") {
           const tab = await chrome.tabs.get(tabId);
           if ((tab.url || "") !== baselineUrl) {
-            return await resolveWaitUser(tabId, condition, tab.url || "", elapsedMs(), clear);
+            return await resolveWaitUser(
+              tabId,
+              condition,
+              tab.url || "",
+              elapsedMs(),
+              clear,
+            );
           }
         } else {
           // 与 wait_for 一致的可见性判断
@@ -3095,7 +3673,13 @@ const tools = {
           });
           if (res.result && res.result.value) {
             const tab = await chrome.tabs.get(tabId);
-            return await resolveWaitUser(tabId, condition, tab.url || "", elapsedMs(), clear);
+            return await resolveWaitUser(
+              tabId,
+              condition,
+              tab.url || "",
+              elapsedMs(),
+              clear,
+            );
           }
         }
       } catch (e) {
@@ -3105,7 +3689,8 @@ const tools = {
     }
     throw new ToolError(
       "TIMEOUT",
-      `wait_user: ${condition} 条件 ${timeoutMs}ms 内未满足`, true
+      `wait_user: ${condition} 条件 ${timeoutMs}ms 内未满足`,
+      true,
     );
   },
 
@@ -3114,14 +3699,20 @@ const tools = {
   async script_patch(args) {
     const tabId = await resolveTabId(args);
     if (!args.url_pattern) {
-      throw new ToolError("BAD_ARGS", "script_patch: url_pattern is required (CDP glob)");
+      throw new ToolError(
+        "BAD_ARGS",
+        "script_patch: url_pattern is required (CDP glob)",
+      );
     }
     const type = args.patch_type || "prepend";
     if (!["prepend", "proxy_probe"].includes(type)) {
       throw new ToolError("BAD_ARGS", `script_patch: bad patch_type: ${type}`);
     }
     if (type === "prepend" && !args.code) {
-      throw new ToolError("BAD_ARGS", "script_patch: code is required for prepend");
+      throw new ToolError(
+        "BAD_ARGS",
+        "script_patch: code is required for prepend",
+      );
     }
     await ensureAttached(tabId);
     const entry = {
@@ -3133,7 +3724,10 @@ const tools = {
     };
     tabPatches(tabId).push(entry);
     await rebuildFetchPatterns(tabId);
-    return { tabId, patch: { id: entry.id, pattern: entry.pattern, type: entry.type } };
+    return {
+      tabId,
+      patch: { id: entry.id, pattern: entry.pattern, type: entry.type },
+    };
   },
 
   async script_unpatch(args) {
@@ -3153,7 +3747,10 @@ const tools = {
   async watch_script(args) {
     const tabId = await resolveTabId(args);
     if (!args.url_pattern) {
-      throw new ToolError("BAD_ARGS", "watch_script: url_pattern is required (CDP glob)");
+      throw new ToolError(
+        "BAD_ARGS",
+        "watch_script: url_pattern is required (CDP glob)",
+      );
     }
     const action = args.action || "notify";
     if (action === "patch") {
@@ -3180,7 +3777,10 @@ const tools = {
       regex: globToRegExp(args.url_pattern),
     };
     list.push(entry);
-    return { tabId, watcher: { id: entry.id, pattern: entry.pattern, action: "notify" } };
+    return {
+      tabId,
+      watcher: { id: entry.id, pattern: entry.pattern, action: "notify" },
+    };
   },
 
   async watch_remove(args) {
@@ -3230,7 +3830,11 @@ const tools = {
     if (!args.force) {
       const tab = await chrome.tabs.get(tabId).catch(() => null);
       if (!tab) {
-        throw new ToolError("BAD_TAB", `close_tab: tab not found: ${tabId}`, false);
+        throw new ToolError(
+          "BAD_TAB",
+          `close_tab: tab not found: ${tabId}`,
+          false,
+        );
       }
       let managed = false;
       if (tab.groupId != null && tab.groupId >= 0) {
@@ -3247,7 +3851,7 @@ const tools = {
         throw new ToolError(
           "FORBIDDEN",
           `close_tab: tab ${tabId} 不在 OWB 管理的分组（「${OWB_GROUP_TITLE}」/「${HANDOFF_GROUP_TITLE}」/「task: 」前缀），拒绝关闭；确认要关请传 force: true`,
-          false
+          false,
         );
       }
     }
@@ -3262,20 +3866,48 @@ const tools = {
   async screenshot(args) {
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
-    const format = args.format === "jpeg" ? "jpeg" : "png";
+    // BUG-63: validate format explicitly — invalid values used to silently fall
+    // back to png, giving AI false success.
+    const format = (args.format || "png").toLowerCase();
+    if (!["png", "jpeg"].includes(format)) {
+      throw new ToolError(
+        "BAD_ARGS",
+        `screenshot: format must be 'png' or 'jpeg' (got: ${args.format})`,
+        false,
+      );
+    }
     const params = { format };
     if (format === "jpeg") {
-      params.quality = Math.min(Math.max(parseInt(args.quality, 10) || 80, 1), 100);
+      params.quality = Math.min(
+        Math.max(parseInt(args.quality, 10) || 80, 1),
+        100,
+      );
     }
     // full_page：captureBeyondViewport 截整页（不指定 clip 时）
-    if (args.full_page) params.captureBeyondViewport = true;
+    if (args.full_page) {
+      // BUG-61: captureBeyondViewport alone hangs on Chrome 150.
+      // Measure full document dimensions and use explicit clip + captureBeyondViewport.
+      const dimRes = await cdpCall(tabId, "Runtime.evaluate", {
+        expression:
+          `JSON.stringify({` +
+          `w: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0),` +
+          `h: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0)` +
+          `})`,
+        returnByValue: true,
+      });
+      const dims = dimRes.result && JSON.parse(dimRes.result.value);
+      if (dims && dims.w > 0 && dims.h > 0) {
+        params.clip = { x: 0, y: 0, width: dims.w, height: dims.h, scale: 1 };
+      }
+      params.captureBeyondViewport = true;
+    }
     const target = resolveTargetSelector(args, "screenshot", false);
     if (target) {
       const res = await cdpCall(tabId, "Runtime.evaluate", {
         expression: elementSnippet(
           target.selector,
           `const r = el.getBoundingClientRect();` +
-          ` return { x: r.x, y: r.y, width: r.width, height: r.height };`
+            ` return { x: r.x, y: r.y, width: r.width, height: r.height };`,
         ),
         returnByValue: true,
       });
@@ -3291,7 +3923,8 @@ const tools = {
   // 高危方法（Fetch.enable 跳过 fail-safe 等）由调用方自负。
   async cdp(args) {
     const tabId = await resolveTabId(args);
-    if (!args.method) throw new ToolError("BAD_ARGS", "cdp: method is required");
+    if (!args.method)
+      throw new ToolError("BAD_ARGS", "cdp: method is required");
     await ensureAttached(tabId);
     const result = await cdpCall(tabId, args.method, args.params || {});
     return { tabId, method: args.method, result };
@@ -3305,13 +3938,18 @@ const tools = {
       expression: elementSnippet(
         target.selector,
         `el.click();` +
-        ` return { tag: el.tagName, text: String(el.innerText || el.value || "").slice(0, 80) };`
+          ` return { tag: el.tagName, text: String(el.innerText || el.value || "").slice(0, 80) };`,
       ),
       returnByValue: true,
     });
     const v = res.result && res.result.value;
     if (!v) targetNotFound(target, "click");
-    return { tabId, clicked: target.selector, ...(target.ref ? { ref: target.ref } : {}), ...v };
+    return {
+      tabId,
+      clicked: target.selector,
+      ...(target.ref ? { ref: target.ref } : {}),
+      ...v,
+    };
   },
 
   async fill(args) {
@@ -3322,31 +3960,44 @@ const tools = {
       expression: elementSnippet(
         target.selector,
         `el.focus();` +
-        ` const value = ${JSON.stringify(String(args.value != null ? args.value : ""))};` +
-        ` if (el.isContentEditable) { el.textContent = value; }` +
-        ` else {` +
-        `   const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;` +
-        `   Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);` + // native setter 绕 React 受控组件
-        ` }` +
-        ` el.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));` +
-        ` el.dispatchEvent(new Event("change", { bubbles: true }));` +
-        ` return { tag: el.tagName, value };`
+          ` const value = ${JSON.stringify(String(args.value != null ? args.value : ""))};` +
+          ` if (el.isContentEditable) { el.textContent = value; }` +
+          ` else {` +
+          `   const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : el.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;` +
+          `   Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);` + // native setter 绕 React 受控组件
+          ` }` +
+          ` el.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));` +
+          ` el.dispatchEvent(new Event("change", { bubbles: true }));` +
+          ` return { tag: el.tagName, value };`,
       ),
       returnByValue: true,
     });
     const v = res.result && res.result.value;
     if (!v) targetNotFound(target, "fill");
-    return { tabId, filled: target.selector, ...(target.ref ? { ref: target.ref } : {}), ...v };
+    return {
+      tabId,
+      filled: target.selector,
+      ...(target.ref ? { ref: target.ref } : {}),
+      ...v,
+    };
   },
 
   async send_keys(args) {
     const tabId = await resolveTabId(args);
     await ensureAttached(tabId);
+    // BUG-58: bring tab to front — Input.dispatchKeyEvent is silently dropped
+    // when the tab lacks OS focus. Page.bringToFront ensures focus.
+    try {
+      await cdpCall(tabId, "Page.bringToFront");
+    } catch (e) {}
     if (args.text != null && args.text !== "") {
       await cdpCall(tabId, "Input.insertText", { text: String(args.text) });
       return { tabId, inserted: String(args.text).length };
     }
-    const keys = String(args.keys || "").trim().split(/\s+/).filter(Boolean);
+    const keys = String(args.keys || "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
     if (!keys.length) {
       throw new ToolError("BAD_ARGS", "send_keys: text 或 keys 必填一个");
     }
@@ -3356,29 +4007,38 @@ const tools = {
       Escape: { vk: 27 },
       Backspace: { vk: 8 },
       Delete: { vk: 46 },
-      Home: { vk: 36 }, End: { vk: 35 },
-      PageUp: { vk: 33 }, PageDown: { vk: 34 },
-      ArrowLeft: { vk: 37 }, ArrowUp: { vk: 38 },
-      ArrowRight: { vk: 39 }, ArrowDown: { vk: 40 },
+      Home: { vk: 36 },
+      End: { vk: 35 },
+      PageUp: { vk: 33 },
+      PageDown: { vk: 34 },
+      ArrowLeft: { vk: 37 },
+      ArrowUp: { vk: 38 },
+      ArrowRight: { vk: 39 },
+      ArrowDown: { vk: 40 },
     };
     for (const k of keys) {
       const def = KEYMAP[k];
       if (!def) {
         throw new ToolError(
           "BAD_ARGS",
-          `unknown key: ${k}（支持 ${Object.keys(KEYMAP).join(" ")}；自由文本用 text 参数）`
+          `unknown key: ${k}（支持 ${Object.keys(KEYMAP).join(" ")}；自由文本用 text 参数）`,
         );
       }
       const base = {
-        key: k, code: k,
-        windowsVirtualKeyCode: def.vk, nativeVirtualKeyCode: def.vk,
+        key: k,
+        code: k,
+        windowsVirtualKeyCode: def.vk,
+        nativeVirtualKeyCode: def.vk,
       };
       await cdpCall(tabId, "Input.dispatchKeyEvent", {
         type: def.text ? "keyDown" : "rawKeyDown",
         ...(def.text ? { text: def.text } : {}),
         ...base,
       });
-      await cdpCall(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...base });
+      await cdpCall(tabId, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        ...base,
+      });
     }
     return { tabId, pressed: keys };
   },
@@ -3404,7 +4064,15 @@ const tools = {
       throw new ToolError("BAD_ARGS", "cookie_set: name 和 value 必填");
     }
     const params = { name: args.name, value: String(args.value) };
-    for (const k of ["url", "domain", "path", "secure", "httpOnly", "sameSite", "expires"]) {
+    for (const k of [
+      "url",
+      "domain",
+      "path",
+      "secure",
+      "httpOnly",
+      "sameSite",
+      "expires",
+    ]) {
       if (args[k] !== undefined) params[k] = args[k];
     }
     if (!params.url && !params.domain) {
@@ -3413,7 +4081,10 @@ const tools = {
     }
     const res = await cdpCall(tabId, "Network.setCookie", params);
     if (!res.success) {
-      throw new ToolError("BAD_ARGS", "cookie_set: Network.setCookie 拒绝（检查 url/domain/sameSite 组合）");
+      throw new ToolError(
+        "BAD_ARGS",
+        "cookie_set: Network.setCookie 拒绝（检查 url/domain/sameSite 组合）",
+      );
     }
     return { tabId, success: true };
   },
@@ -3455,7 +4126,10 @@ const tools = {
   async script_source(args) {
     const tabId = await resolveTabId(args);
     if (!args.script_id) {
-      throw new ToolError("BAD_ARGS", "script_source: script_id 必填（script_list 获取）");
+      throw new ToolError(
+        "BAD_ARGS",
+        "script_source: script_id 必填（script_list 获取）",
+      );
     }
     await ensureDebugger(tabId);
     const res = await cdpCall(tabId, "Debugger.getScriptSource", {
@@ -3519,7 +4193,10 @@ const tools = {
           ` return typeof f === "function" ? f : null; })()`,
       });
       if (!res.result || !res.result.objectId) {
-        throw new ToolError("NOT_FOUND", `function not found: ${args.function_path}`);
+        throw new ToolError(
+          "NOT_FOUND",
+          `function not found: ${args.function_path}`,
+        );
       }
       const bp = await cdpCall(tabId, "Debugger.setBreakpointOnFunctionCall", {
         objectId: res.result.objectId,
@@ -3540,11 +4217,16 @@ const tools = {
       const key = `url:${args.url_pattern}:${args.line_number}`;
       armedBreakpoints(tabId).add(key);
       bpIds.set(key, bp.breakpointId);
-      return { tabId, armed: key, breakpointId: bp.breakpointId, locations: bp.locations };
+      return {
+        tabId,
+        armed: key,
+        breakpointId: bp.breakpointId,
+        locations: bp.locations,
+      };
     }
     throw new ToolError(
       "BAD_ARGS",
-      "break_function: function_path 或 (url_pattern + line_number) 必填一组"
+      "break_function: function_path 或 (url_pattern + line_number) 必填一组",
     );
   },
 };
@@ -3577,7 +4259,11 @@ async function onMessage(msg) {
       requestId,
       payload: {
         ok: false,
-        error: { code: "UNKNOWN_TOOL", message: `unknown tool: ${name}`, retryable: false },
+        error: {
+          code: "UNKNOWN_TOOL",
+          message: `unknown tool: ${name}`,
+          retryable: false,
+        },
       },
     });
     return;
@@ -3590,8 +4276,16 @@ async function onMessage(msg) {
     const err =
       e instanceof ToolError
         ? { code: e.code, message: e.message, retryable: e.retryable }
-        : { code: "INTERNAL", message: String(e && e.message ? e.message : e), retryable: true };
-    send({ type: "tool_result", requestId, payload: { ok: false, error: err } });
+        : {
+            code: "INTERNAL",
+            message: String(e && e.message ? e.message : e),
+            retryable: true,
+          };
+    send({
+      type: "tool_result",
+      requestId,
+      payload: { ok: false, error: err },
+    });
   }
 }
 

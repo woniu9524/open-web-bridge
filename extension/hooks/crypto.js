@@ -16,6 +16,11 @@
 
   const MAX_FIELD = 2000;
 
+  // BUG-37: 在包裹 JSON.stringify 之前保存原生引用。report() 和 argStr() 都
+  // 使用 JSON.stringify 做序列化——包裹后若仍用全局 JSON.stringify，会触发
+  // hook → report → JSON.stringify → hook → 无限递归 → SW 崩溃。
+  const nativeStringify = JSON.stringify;
+
   const truncate = (s) =>
     s && s.length > MAX_FIELD ? s.slice(0, MAX_FIELD) + "…(truncated)" : s;
 
@@ -23,19 +28,22 @@
     try {
       if (typeof __owbReport === "function") {
         __owbReport(
-          JSON.stringify({
+          nativeStringify({
             preset: "crypto",
             href: location.href,
             ts: Date.now(),
             ...obj,
-          })
+          }),
         );
       }
     } catch (e) {}
   };
 
   // ---- toString 原生样式（__owbSpoof 全局共享 WeakSet，多 preset 共存只包一层）----
-  window.__owbSpoof = window.__owbSpoof || { installed: false, set: new WeakSet() };
+  window.__owbSpoof = window.__owbSpoof || {
+    installed: false,
+    set: new WeakSet(),
+  };
   const spoof = window.__owbSpoof;
   if (!spoof.installed) {
     const nativeToString = Function.prototype.toString;
@@ -52,7 +60,7 @@
   const argStr = (v) => {
     try {
       if (typeof v === "string") return truncate(v);
-      return truncate(JSON.stringify(v));
+      return truncate(nativeStringify(v));
     } catch (e) {
       return String(typeof v);
     }
@@ -75,7 +83,6 @@
   markNative(window.atob);
 
   // JSON.stringify 只报调用栈采样 + 截断结果（最高频，字段给最小）
-  const nativeStringify = JSON.stringify;
   JSON.stringify = function stringify(value, replacer, space) {
     const ret = nativeStringify.apply(this, arguments);
     report({

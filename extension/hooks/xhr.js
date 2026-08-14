@@ -13,6 +13,10 @@
 
   const MAX_FIELD = 4000;
 
+  // BUG-37 防御: 保存原生 JSON.stringify。crypto 预设会包裹 JSON.stringify，
+  // 若同时注入，report() 调全局 JSON.stringify 会触发 crypto hook → report → 递归。
+  const nativeStringify = JSON.stringify;
+
   const truncate = (s) =>
     s && s.length > MAX_FIELD ? s.slice(0, MAX_FIELD) + "…(truncated)" : s;
 
@@ -20,12 +24,12 @@
     try {
       if (typeof __owbReport === "function") {
         __owbReport(
-          JSON.stringify({
+          nativeStringify({
             preset: "xhr",
             href: location.href,
             ts: Date.now(),
             ...obj,
-          })
+          }),
         );
       }
     } catch (e) {}
@@ -34,7 +38,10 @@
   // ---- toString 原生样式（__owbSpoof 全局共享 WeakSet，多 preset 共存只包一层）----
   // 注意：成员表达式赋值（X.open = function(){}）不触发 ES6 函数名推断，
   // 必须用命名函数表达式，否则原生样式串里函数名为空。
-  window.__owbSpoof = window.__owbSpoof || { installed: false, set: new WeakSet() };
+  window.__owbSpoof = window.__owbSpoof || {
+    installed: false,
+    set: new WeakSet(),
+  };
   const spoof = window.__owbSpoof;
   if (!spoof.installed) {
     const nativeToString = Function.prototype.toString;
@@ -55,7 +62,12 @@
   let nextId = 1;
 
   X.open = function open(method, url) {
-    this.__owb = { id: nextId++, method: String(method), url: String(url), headers: {} };
+    this.__owb = {
+      id: nextId++,
+      method: String(method),
+      url: String(url),
+      headers: {},
+    };
     return nativeOpen.apply(this, arguments);
   };
   markNative(X.open);
@@ -88,7 +100,7 @@
         if (!this.responseType || this.responseType === "text") {
           resp = truncate(String(this.responseText));
         } else if (this.responseType === "json") {
-          resp = truncate(JSON.stringify(this.response));
+          resp = truncate(nativeStringify(this.response));
         }
       } catch (e) {}
       report({

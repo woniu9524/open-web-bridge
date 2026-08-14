@@ -17,18 +17,29 @@
  * 超时报 phase:"error"。已存在则同步安装/报错。
  */
 (() => {
-  const OPTS = /*__OWB_OPTS__*/null/*__OWB_OPTS_END__*/;
+  const OPTS = /*__OWB_OPTS__*/ null; /*__OWB_OPTS_END__*/
   if (!OPTS || !OPTS.path) return;
   window.__owbFnHooked = window.__owbFnHooked || {};
   if (window.__owbFnHooked[OPTS.key]) return; // 幂等
   window.__owbFnHooked[OPTS.key] = true;
 
   const MAX_FIELD = 2000;
+
+  // BUG-62: 保存原生 JSON.stringify 引用。如果 fn_hook 挂的就是 JSON.stringify
+  // 本身，或 crypto 预设已包裹 JSON.stringify，report() 调用全局 JSON.stringify
+  // 会触发 hook → report → JSON.stringify → hook → 无限递归 → SW 崩溃。
+  const _nativeStringify = JSON.stringify;
+
   const report = (obj) => {
     try {
       if (typeof __owbReport === "function") {
         __owbReport(
-          JSON.stringify({ preset: "fn", href: location.href, ts: Date.now(), ...obj })
+          _nativeStringify({
+            preset: "fn",
+            href: location.href,
+            ts: Date.now(),
+            ...obj,
+          }),
         );
       }
     } catch (e) {}
@@ -36,9 +47,11 @@
   const safeVal = (v) => {
     try {
       if (typeof v === "string") {
-        return v.length > MAX_FIELD ? v.slice(0, MAX_FIELD) + "…(truncated)" : v;
+        return v.length > MAX_FIELD
+          ? v.slice(0, MAX_FIELD) + "…(truncated)"
+          : v;
       }
-      const s = JSON.stringify(v);
+      const s = _nativeStringify(v);
       if (s === undefined) return String(v);
       return s.length > MAX_FIELD ? s.slice(0, MAX_FIELD) + "…(truncated)" : s;
     } catch (e) {
@@ -48,7 +61,10 @@
   const safeArgs = (args) => Array.prototype.map.call(args, safeVal);
 
   // toString 原生样式：全局共享 WeakSet，与 xhr 预设等共存兼容
-  window.__owbSpoof = window.__owbSpoof || { installed: false, set: new WeakSet() };
+  window.__owbSpoof = window.__owbSpoof || {
+    installed: false,
+    set: new WeakSet(),
+  };
   const spoof = window.__owbSpoof;
   if (!spoof.installed) {
     const nativeToString = Function.prototype.toString;
@@ -76,14 +92,20 @@
 
   const install = (owner) => {
     if (typeof owner[name] !== "function") {
-      report({ phase: "error", key: OPTS.key, error: "not a function: " + OPTS.path });
+      report({
+        phase: "error",
+        key: OPTS.key,
+        error: "not a function: " + OPTS.path,
+      });
       return;
     }
     const original = owner[name];
     const custom = OPTS.hookCode
       ? new Function("args", "result", "stack", OPTS.hookCode)
       : null;
-    const replacement = OPTS.replacement ? (0, eval)("(" + OPTS.replacement + ")") : null;
+    const replacement = OPTS.replacement
+      ? (0, eval)("(" + OPTS.replacement + ")")
+      : null;
 
     const hooked = function (...args) {
       const stack = OPTS.trace && OPTS.trace.stack ? new Error().stack : null;
@@ -92,7 +114,13 @@
       }
       if (OPTS.position === "before") {
         if (OPTS.trace && OPTS.trace.args) {
-          report({ key: OPTS.key, phase: "call", path: OPTS.path, args: safeArgs(args), stack });
+          report({
+            key: OPTS.key,
+            phase: "call",
+            path: OPTS.path,
+            args: safeArgs(args),
+            stack,
+          });
         }
         if (custom) {
           try {
@@ -132,7 +160,12 @@
     } else {
       owner[name] = hooked;
     }
-    report({ phase: "installed", key: OPTS.key, path: OPTS.path, position: OPTS.position });
+    report({
+      phase: "installed",
+      key: OPTS.key,
+      path: OPTS.path,
+      position: OPTS.position,
+    });
   };
 
   const ownerNow = resolve();
@@ -151,7 +184,11 @@
         install(owner);
       } else if (waited >= 15000) {
         clearInterval(timer);
-        report({ phase: "error", key: OPTS.key, error: "not found after 15s: " + OPTS.path });
+        report({
+          phase: "error",
+          key: OPTS.key,
+          error: "not found after 15s: " + OPTS.path,
+        });
       }
     }, 100);
     if (timer.unref) timer.unref(); // Node 单测环境不拖住事件循环
