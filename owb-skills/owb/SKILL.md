@@ -354,8 +354,9 @@ base64 灌进你的上下文。任何工具返回超过 60KB 会被截断并附 
 - YouTube：`<video>` 卡在 `readyState:0`（HAVE_NOTHING），画面转圈不进度
 - Ctrip：请求被拦截返回极简响应，页面渲染异常（间接受影响，非直接因果）
 - play2048.co：棋盘上的方块（`requestAnimationFrame` 驱动 + worker 渲染）
-  一个都不生成，按方向键完全没反应，`document.querySelectorAll(".tile")`
-  持续为 0
+  一个都不生成，按方向键完全没反应；同一个窗口后来自己变回系统前台
+  （不受控，纯粹是真实环境里窗口焦点会变化），同一个页面重新打开就
+  正常出方块、按键正常——反证了确实是窗口焦点的因果关系，不是巧合
 - claude.com 官方博客：`--mode article/text` 只读到页头页脚导航，正文一个
   字都没有——真实原因是正文段落用了"滚动淡入"动画，一直
   `visibility:hidden`，触发动画的机制卡住了没跑（这条工具侧已经加了
