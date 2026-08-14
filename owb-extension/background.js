@@ -1794,16 +1794,21 @@ function resolveTargetSelector(args, toolName, required = true) {
   return { selector: `[data-owb-ref="${ref}"]`, ref: "@" + ref };
 }
 
-function targetNotFound(target, toolName) {
+function targetNotFound(target, toolName, extraHint) {
+  const suffix = extraHint ? ` — ${extraHint}` : "";
   if (target.ref) {
     throw new ToolError(
       "REF_STALE",
       `ref ${target.ref} is not in the current document ` +
-        "(page navigated or re-rendered); call read_page again for fresh refs",
+        "(page navigated or re-rendered); call read_page again for fresh refs" +
+        suffix,
       true,
     );
   }
-  throw new ToolError("NOT_FOUND", `selector not found: ${target.selector}`);
+  throw new ToolError(
+    "NOT_FOUND",
+    `selector not found: ${target.selector}${suffix}`,
+  );
 }
 
 // BUG-41/BUG-55 + UX-13/UX-214: document.querySelector 不穿透 shadow root，
@@ -3292,8 +3297,13 @@ const tools = {
   // ---- E2. 文件上传（页面内 DataTransfer + File，无需文件系统）----
 
   async upload(args) {
-    if (!args.selector)
-      throw new ToolError("BAD_ARGS", "upload: selector is required", false);
+    // BUG-97: every other interactive tool (click/fill/mouse_click) accepts
+    // either selector or the @eN ref from read_page via resolveTargetSelector —
+    // upload only ever took selector, forcing callers to hand-build
+    // `[data-owb-ref="..."]` themselves instead of just passing the ref they
+    // already have from the snapshot. Inconsistent with the rest of the toolset
+    // for no reason; this is the only tool that skipped the shared helper.
+    const target = resolveTargetSelector(args, "upload");
     if (!Array.isArray(args.files) || !args.files.length) {
       throw new ToolError("BAD_ARGS", "upload: files array required", false);
     }
@@ -3317,10 +3327,12 @@ const tools = {
     // 页面内：找 input、构造 File、赋给 .files、派发 change（绕文件系统，relay 模式也能用）
     const expr = `(() => {
       ${DEEP_QUERY_FN}
-      const input = __owbDeepQuery(${JSON.stringify(args.selector)});
+      const input = __owbDeepQuery(${JSON.stringify(target.selector)});
       // UX-146/147: "upload failed" 一句话把"找不到元素"和"元素不是 file input"
-      // 混在一起，AI 无从判断该改 selector 还是改目标。
-      if (!input) return { ok: false, code: "NOT_FOUND", error: "selector matched nothing" };
+      // 混在一起，AI 无从判断该改 selector 还是改目标。找不到元素交回 null，
+      // 走跟 click/fill 一样的 targetNotFound——ref 找不到时报可重试的
+      // REF_STALE，而不是不管哪种情况都报不可重试的 NOT_FOUND。
+      if (!input) return null;
       if (input.tagName !== "INPUT" || (input.type || "").toLowerCase() !== "file") {
         return { ok: false, code: "NOT_FILE_INPUT",
           error: "element is <" + input.tagName.toLowerCase() + ">" +
@@ -3350,15 +3362,18 @@ const tools = {
       );
     }
     const v = res.result && res.result.value;
-    if (!v || !v.ok) {
-      const code = (v && v.code) || "UPLOAD_FAILED";
+    if (!v) {
+      targetNotFound(
+        target,
+        "upload",
+        "many sites hide the real <input type=file> behind a styled button; " +
+          "call read_page to confirm it's actually there",
+      );
+    }
+    if (!v.ok) {
       throw new ToolError(
-        code,
-        `upload: ${(v && v.error) || "failed"} (selector: ${args.selector})` +
-          (code === "NOT_FOUND"
-            ? " — call read_page to find the file input; note many sites hide " +
-              "it behind a styled button"
-            : ""),
+        v.code || "UPLOAD_FAILED",
+        `upload: ${v.error || "failed"} (${target.ref || target.selector})`,
         false,
       );
     }

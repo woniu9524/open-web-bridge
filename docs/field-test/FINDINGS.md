@@ -646,3 +646,28 @@ value` 的老套路多拆了一层，导致 `stillHidden` 永远算不出真值�
 分支——用真实还在 `hidden` 状态的携程 tab 验证时立刻穿帮（消息给成了"内容被
 CSS 隐藏"，跟直接 `eval document.visibilityState` 查到的 `"hidden"` 对不上）。
 提醒自己：改之前该去看被调函数已经在哪一层拆包，不能凭记忆套用别处的写法。
+
+### BUG-97 · `upload` 是唯一不支持 `@eN` ref 的交互工具 🟡 低影响（一致性）
+
+**现象**：`click`/`fill`/`mouse_click` 都能吃 `read_page` 快照给的 `@eN` ref，
+唯独 `upload` 只认 `selector`——`resolveTargetSelector` 这个所有其它交互
+工具共用的辅助函数，`upload` 压根没调用，直接 `if (!args.selector) throw`。
+拿着刚从快照里读到的 `@e1` 却上传不了，得自己手写
+`[data-owb-ref="e1"]` 选择器，跟其余工具的使用习惯不一致，纯粹是遗漏。
+
+连带的：找不到元素时原来统一报不可重试的 `NOT_FOUND`，不管是 selector
+写错（不可重试，该换 selector）还是 ref 失效（可重试，重新 `read_page`
+就好）——两种性质不同的失败被压成一种错误码，跟 `click`/`fill` 已经做的
+`REF_STALE` vs `NOT_FOUND` 区分不一致。
+
+**修复**：`upload` 改用 `resolveTargetSelector` 支持 ref；页面内脚本找不到
+元素时交回 `null`（不再自己编 `NOT_FOUND` 对象），走共用的 `targetNotFound`
+——ref 失效报可重试的 `REF_STALE`，selector 写错报不可重试的 `NOT_FOUND`。
+顺带给 `targetNotFound` 加了个可选的 `extraHint` 参数，把 upload 原来那句
+有用的提示（"很多站点把真正的 file input 藏在样式化按钮后面"）保留在错误
+信息里，不用为了统一而丢掉这条针对性建议。
+
+**验证**：`the-internet.herokuapp.com/upload` 上验证四种情况——ref 上传
+成功（文件确实进了 `input.files`，name/size/type 都对得上）、selector 上传
+依旧成功（向后兼容）、坏 ref 报可重试 `REF_STALE`、坏 selector 报不可重试
+`NOT_FOUND`，两种错误都带上了"很多站点把 input 藏起来"的提示。
