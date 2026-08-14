@@ -148,6 +148,23 @@ owb eval 'JSON.stringify([...document.querySelectorAll(".item")].slice(0,20).map
 
 ⚠️ 返回是 `{"value":"<JSON 字符串>","type":"string"}`，要**解两层**。
 
+⚠️ **选择器别写成并列的多个类**（如 `"mat-list-item, [class*=event]"`）——
+外层容器和内层元素会各匹配一次，同一条数据出现两遍。实测抓地震列表时就这么
+重复了。用一个**足够具体**的选择器，拿到结果先看条数对不对。
+
+### 慢站提速
+
+`open` 默认等页面完全加载（所有图片、脚本）。只是要读内容的话，
+`--wait-until domcontentloaded` 明显更快，实测内容不减：
+
+| 站点 | 默认 | domcontentloaded |
+|---|---|---|
+| 开源中国 | 7.7s | **2.4s** |
+| CSDN | 9.6s | **5.0s** |
+| 新浪新闻 | 18.7s | **12.1s** |
+
+要点后面还要交互（点按钮、等 JS 绑定）时，仍用默认或配 `owb wait`。
+
 ### 调试用户自己的网站
 
 ⚠️ **顺序很重要**：`net start` 必须在导航**之前**。

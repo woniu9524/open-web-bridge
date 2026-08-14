@@ -101,7 +101,59 @@ added=54  changed=6  removed=62  unchanged=340
 
 ---
 
-## 5. 人机交接：撞到验证码不是终点
+## 5. 真·点击导航：AI 像人一样操作页面
+
+不是靠拼 URL，是真的填框、点按钮、等跳转。
+
+```bash
+owb open https://en.wikipedia.org/wiki/Main_Page
+owb page                              # 找到 @e17 搜索框、@e18 搜索按钮
+owb fill @e17 "Model Context Protocol"
+owb click @e18
+owb wait --url-pattern "Model"        # 等跳转落地
+owb page --mode article               # 读到正文
+```
+
+**真实产出**：759ms 后到达 `en.wikipedia.org/wiki/Model_Context_Protocol`，
+正文提取 11318 字符。
+
+值得注意的一处细节：`click` 返回了 `navigated: false` 并附
+`_hint: "the click dispatched but the page didn't navigate yet"`——
+**工具对不确定的事如实说不确定**，AI 因此知道要 `wait` 而不是直接读页面。
+这种诚实是 AI 能自我恢复的前提。
+
+## 6. 状态变更的精确捕捉
+
+点一个单选框，AI 收到的是：
+
+```
+added=0  changed=1  removed=0
+@e168 radio "CSS" checked
+```
+
+页面上几百个元素，只有这一行进入上下文。不需要重读整页去猜"刚才那下生效了吗"。
+
+## 7. 从实时地图里取数据
+
+USGS 全球地震实时图（WebGL 渲染 + 动态列表）：
+
+```bash
+owb open "https://earthquake.usgs.gov/earthquakes/map/"
+owb eval '<提取事件列表>'
+```
+
+**真实产出**（当次抓取）：
+
+```
+M4.8  207 km SE of Katsuura, Japan     深 10.0km
+M4.2  35 km WSW of Neyshābūr, Iran     深 10.0km
+M2.7  4 km S of Petrolia, CA           深 10.3km
+统计: 最大 M4.8 | 平均 M3.20 | 样本 12 条
+```
+
+数据是此刻的，不是缓存的数据集——因为它就是从用户屏幕上那个页面里取的。
+
+## 8. 人机交接：撞到验证码不是终点
 
 **场景**：帮用户在 npm 注册账号并发布包。注册需要邮箱验证 + 一次性密码。
 
