@@ -2295,8 +2295,33 @@ const READ_PAGE_ARTICLE_EXPR = `(() => {
     else parts.push(text);
   }
   const content = parts.join("\\n\\n");
+  // BUG-101: 上面全程用 innerText（p.innerText/el.innerText），会尊重 CSS
+  // 可见性——很多营销/博客站点用"滚动到视野内才淡入"的动画，文字在 DOM 里
+  // 但 visibility:hidden/opacity:0，直到触发动画才可见。这类动画常年靠
+  // requestAnimationFrame/IntersectionObserver 驱动，Chrome 窗口没有系统
+  // 焦点时会卡住不触发（跟 BUG-93/BUG-100 同一个根因）——AI 拿到"这页没
+  // 正文"的结论，但内容其实一直都在，只是読不到。这里额外量一下 best 容器
+  // 剥掉 script/style 之后的原始文字量，跟实际抓到的 content 长度差距大就
+  // 提示一句，不改变 content 本身（切到 textContent 会把真正该隐藏的菜单/
+  // 折叠面板也读进来，噪音更大，不能这么"修"）。
+  let rawLen = 0;
+  try {
+    const clone = best.cloneNode(true);
+    clone.querySelectorAll("script, style, noscript, template").forEach((n) => n.remove());
+    rawLen = String(clone.textContent || "").replace(/\\s+/g, " ").trim().length;
+  } catch (e) {}
+  const hiddenContentNote =
+    rawLen > 500 && rawLen > content.length * 3 && rawLen - content.length > 1500
+      ? \`extracted \${content.length} chars but the matched container has ~\${rawLen} \` +
+        "chars of text in the DOM that isn't currently visible (innerText excludes it) " +
+        "— likely a scroll-reveal/fade-in animation that hasn't triggered. If " +
+        "document.visibilityState is \\"hidden\\" (Chrome window not OS-focused), such " +
+        "animations can stall indefinitely; ask the user to bring the window to the " +
+        "front and retry"
+      : undefined;
   return { title: document.title, content,
     root: best.tagName.toLowerCase() + (best.className ? "." + String(best.className).split(/\\s+/)[0] : ""),
+    hiddenContentNote,
     reason: content ? undefined :
       "matched a container but it had no prose — try mode:text" };
 })()`;
@@ -4462,16 +4487,43 @@ const tools = {
     await ensureAttached(tabId);
 
     if (mode === "text") {
+      // BUG-101: innerText 尊重可见性，滚动淡入类动画卡住（窗口没系统焦点时
+      // 常年卡住，见 BUG-93/BUG-100）会让真实存在的正文读成空。额外量一下
+      // body 剥离 script/style 后的原始文字量，差距大就提示，不改变 text
+      // 本身（详见 READ_PAGE_ARTICLE_EXPR 里对应注释，同一处理原则）。
       const res = await cdpCall(tabId, "Runtime.evaluate", {
-        expression: `(() => String((document.body && document.body.innerText) || ""))()`,
+        expression: `(() => {
+          const body = document.body;
+          const text = String((body && body.innerText) || "");
+          let rawLen = 0;
+          try {
+            const clone = body ? body.cloneNode(true) : null;
+            if (clone) {
+              clone.querySelectorAll("script, style, noscript, template").forEach((n) => n.remove());
+              rawLen = String(clone.textContent || "").replace(/\\s+/g, " ").trim().length;
+            }
+          } catch (e) {}
+          return { text, rawLen };
+        })()`,
         returnByValue: true,
       });
-      const text = (res.result && res.result.value) || "";
+      const v = (res.result && res.result.value) || { text: "", rawLen: 0 };
+      const text = v.text || "";
+      const hiddenContentNote =
+        v.rawLen > 500 && v.rawLen > text.length * 3 && v.rawLen - text.length > 1500
+          ? `read ${text.length} chars but the page has ~${v.rawLen} chars of text ` +
+            "in the DOM that isn't currently visible (innerText excludes it) — likely " +
+            "a scroll-reveal/fade-in animation that hasn't triggered. If " +
+            'document.visibilityState is "hidden" (Chrome window not OS-focused), ' +
+            "such animations can stall indefinitely; ask the user to bring the " +
+            "window to the front and retry"
+          : undefined;
       return {
         tabId,
         mode,
         text: text.length > maxChars ? text.slice(0, maxChars) : text,
         truncated: text.length > maxChars,
+        hiddenContentNote,
       };
     }
 
@@ -4495,6 +4547,7 @@ const tools = {
         omitted: full.length > maxChars ? full.length - maxChars : undefined,
         root: v.root,
         reason: v.reason, // BUG-51/UX-199: 空正文要说明原因，不是静默空串
+        hiddenContentNote: v.hiddenContentNote, // BUG-101
       };
     }
 

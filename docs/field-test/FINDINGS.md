@@ -785,3 +785,38 @@ API 实现。
 `{y:19027, atBottom:true}`，`eval window.scrollY` 立即验证一致，全程窗口
 仍是 `visibilityState:hidden`——不依赖窗口拿到系统焦点，从根上绕开了问题
 而不是等条件改善。
+
+### BUG-101 · 滚动淡入动画卡住时，`text`/`article` 读到的是空页面，AI 无从察觉 🔴 高影响（静默失败）
+
+**现象**：Anthropic 官方博客 `claude.com/blog/maximizing-the-value-of-your-
+claude-code-sessions` 上，`--mode article` 只提取到 3 个字符（"FAQ"），
+`--mode text` 提取到 2476 字符——但内容全是页头页脚导航菜单（Products/
+Solutions/Company/...），一个字都不是文章正文。页面标题、URL 都对，看起来
+像是"这页真的没什么正文"，但这是个真实的、内容详实的官方博客页。
+
+**根因**：两种模式的正文提取都基于 `innerText`（`p.innerText`/`el.
+innerText`/`document.body.innerText`），这个 API 尊重 CSS 可见性——检查发现
+真正的正文段落在 DOM 里（`<main>` 的 `innerHTML` 有 14 万字符），但
+`visibility:hidden`，`checkVisibility()` 返回 `false`。这是"滚动到视野内
+才淡入"的常见营销页动画效果，实测滚动到底（`atBottom:true`）之后内容依然
+不出现——不是"还没滚过去"，是触发淡入的机制（多半是 rAF 或
+IntersectionObserver 驱动）跟 BUG-93/BUG-100 撞上了同一个环境条件：Chrome
+窗口没有操作系统级焦点时，这类动画会卡住永远不触发，不是慢。
+
+**为什么不能简单切到 `textContent`**：`textContent`不看可见性，会把真正
+该隐藏的东西也读进来——收起的下拉菜单、未展开的折叠面板、还没切换到的
+标签页内容——反而制造更多噪音，等于是拿一个假成功换另一个假成功。
+
+**修复**：不改变实际抓取逻辑（继续用 innerText，保证读到的东西确实是
+用户当下能看到的），而是**额外量一个对照值**——用同一个候选容器
+`cloneNode` 一份，剥掉 `script`/`style`/`noscript`/`template` 之后量
+`textContent` 长度，作为"DOM 里到底有多少文字，不管可见性"的粗略基线。
+两个值差距大（原始文字量 > 500 且是抓到内容的 3 倍以上，绝对差 > 1500）
+才提示，附上 `document.visibilityState` 排查建议——正常页面这两个值本来
+就接近，不会误报（Wikipedia、GitHub 仓库页实测都是 `hiddenContentNote:
+undefined`）。
+
+**验证**：同一个博客页，`article`/`text` 两种模式都正确报出
+`hiddenContentNote`（分别提示"抓到 3 字符但容器里有约 17533 字符不可见"、
+"读到 2476 字符但页面里有约 30665 字符不可见"）；Wikipedia 量子计算词条
+和 GitHub 仓库首页两个健康对照页均无误报。
