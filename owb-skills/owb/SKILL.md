@@ -183,7 +183,17 @@ owb debug console                          # 页面报错
 没有 URL 的记录——返回里 `orphanRecordsHidden` 会告诉你有多少条因此被丢掉。
 **看到这个数字大，就是在提醒你抓包起晚了。**
 
-留证据给同事：`owb har start` / `owb har stop` / `owb har save`。
+**留证据给同事——录 HAR 的正确顺序**：
+
+```bash
+owb har start          # 开录
+owb open <目标页>       # 干活
+owb har save --args '{"filename":"排查记录"}'   # ← 停止 + 落盘，一步到位
+```
+
+⚠️ **不要写 `har stop` 再 `har save`**。`har save` 内部**已经包含 stop**；
+先手动 stop 会销毁录制器，`har save` 报 `NOT_RECORDING` 且**数据永久丢失**。
+`har stop` 只在你确实只想停、不想存时用。
 
 ### 响应式适配审计
 
