@@ -12,6 +12,7 @@
     "playwright-alternative"
   ],
   "license": "MIT",
+  "author": "woniu9524 (https://github.com/woniu9524)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/woniu9524/open-web-bridge.git"
@@ -35,7 +36,8 @@
     "owb-skills",
     "README.md",
     "README.zh-CN.md",
-    "LICENSE"
+    "LICENSE",
+    "PRIVACY.md"
   ],
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",

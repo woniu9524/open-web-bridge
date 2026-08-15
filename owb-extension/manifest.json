@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Open Web Bridge",
-  "description": "Let AI agents drive your real browser: semantic snapshots, network capture, hooks, workflows and human handoff, driven by a local daemon via MCP.",
+  "description": "Let AI agents drive your real browser — page snapshots, network capture, hooks and human handoff, driven from your terminal.",
+  "homepage_url": "https://github.com/woniu9524/open-web-bridge",
   "version": "1.0.1",
   "icons": {
     "16": "icons/icon16.png",

@@ -215,6 +215,10 @@ and extract it into the repo's `bin/` directory, or point `OWB_CURL_BINARY` at i
 - The extension requests `debugger` + `<all_urls>`. These are the permissions CDP
   control requires, and they amount to handing browser control to the local daemon
 
+See **[PRIVACY.md](PRIVACY.md)** for what the extension can access, where that
+data goes, and a per-permission justification. Short version: nothing is sent to
+the developer, and there is no server we operate.
+
 **Relay mode (optional):**
 
 - **The token is the only secret on the wire**, and it must travel over `wss`
