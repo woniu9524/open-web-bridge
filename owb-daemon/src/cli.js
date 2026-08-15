@@ -266,7 +266,14 @@ async function autostartDaemon() {
 // 掉线是瞬时且能自愈的，在 CLI 这一层透明重试即可：daemon 侧「立即失败」的
 // 语义不动（测试依赖它），AI 也不必自己写重试逻辑。
 const TRANSIENT_EXT_ERRORS = new Set(["NO_EXTENSION", "DISCONNECTED"]);
-const EXT_RETRY_DELAYS_MS = [1500, 4000, 10000, 20000];
+// UX: 退避总计约 35 秒。绝大多数情况下这是对的（掉线能自愈，值得等）。
+// 但有两种场景明知道扩展不会回来，等满 35 秒纯属浪费：
+// 自动化测试（要断言"参数被正确接收"，NO_EXTENSION 本身就是可接受的结果），
+// 以及用户明确知道浏览器没开着的时候。给一个环境变量逃生口。
+const EXT_RETRY_DELAYS_MS =
+  process.env.OWB_NO_EXT_RETRY && process.env.OWB_NO_EXT_RETRY !== "0"
+    ? []
+    : [1500, 4000, 10000, 20000];
 
 async function callWithAutostart(ctl, name, args, timeout, autostart) {
   let res;

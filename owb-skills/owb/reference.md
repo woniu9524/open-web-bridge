@@ -191,5 +191,11 @@ ArrowLeft ArrowUp ArrowRight ArrowDown Space F1`–`F12`，单个字符（`a` `5
 | `OWB_RELAY_TOKEN`  | 中转 token，两端必须一致                           |
 | `OWB_CURL_BINARY`  | curl-impersonate 路径（`verify replay` 用）    |
 
+CLI 侧（每条命令启动时读）：
+
+| 变量                | 作用                                                                 |
+| ----------------- | ------------------------------------------------------------------ |
+| `OWB_NO_EXT_RETRY` | 设为非 `0` 则**跳过 `NO_EXTENSION` 的退避重试**（默认累计约 35 秒）。用在自动化测试、或你明知浏览器没开着、不想每条命令干等 35 秒的时候 |
+
 ⚠️ **daemon 只在启动时读环境变量**。改了这些要**先停掉正在跑的 daemon** 再让它
 重新拉起，否则新值不生效。

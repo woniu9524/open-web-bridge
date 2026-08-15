@@ -42,7 +42,7 @@
   },
   "scripts": {
     "start": "node owb-daemon/src/server.js",
-    "test": "node owb-daemon/tests/smoke_test.js && node owb-daemon/tests/cli_test.js && node owb-daemon/tests/slug_test.js && node owb-daemon/tests/docs_examples_test.js && node owb-daemon/tests/harexport_test.js"
+    "test": "node owb-daemon/tests/smoke_test.js && node owb-daemon/tests/cli_test.js && node owb-daemon/tests/slug_test.js && node owb-daemon/tests/docs_examples_test.js && node owb-daemon/tests/docs_run_test.js && node owb-daemon/tests/harexport_test.js"
   },
   "dependencies": {
     "ws": "^8.21.3"
