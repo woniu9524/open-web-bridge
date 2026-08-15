@@ -75,8 +75,14 @@ owb setup                     # 引导：扩展安装路径、装 skill、连通
 `owb setup` 会告诉你扩展怎么装。**这是唯一需要你手动做的一步**——扩展必须装进你
 平时用的那个浏览器，因为登录态在那儿，而这正是本项目的意义所在，命令行代劳不了。
 
-装完跑一次 `owb` 自检，两个 ✓ 就绪。然后 `owb skill install` 把 skill 装进
-`~/.claude/skills/`（加 `--project` 则只装到当前项目）。
+装完跑一次 `owb` 自检，两个 ✓ 就绪。然后 `owb skill install` 会把 skill 装给
+**检测到的每一个 agent**——Claude Code（`~/.claude/skills/`）、Codex CLI
+（`~/.codex/skills/`）、Cursor（`~/.cursor/skills/`）、OpenCode
+（`~/.opencode/skills/`）。想自己指定就 `--to claude,codex`，`--project` 只装到
+当前项目，`--dir <path>` 装到任意位置。
+
+之后可以用 `owb update check` 对比 npm 上的最新版本，有新版会打印升级步骤——
+skill 也教了 agent 在任务收尾时跑一次，所以有更新你不用自己盯。
 
 skill 是渐进披露结构，`skill install` 会把整个目录装好：
 

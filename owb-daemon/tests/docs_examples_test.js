@@ -27,8 +27,9 @@ const SKILL_DIR = path.resolve(__dirname, "../../owb-skills/owb");
 
 const { check, summarize } = makeChecker();
 
-// 非命令的伪 owb 行：安装引导、占位符演示等
-const NOT_COMMANDS = new Set(["setup", "skill", "call", "help", "cdp"]);
+// 非命令的伪 owb 行：安装引导、占位符演示等（skill/update 是 CLI 本地命令，
+// 不进 ctl 命令表）
+const NOT_COMMANDS = new Set(["setup", "skill", "update", "call", "help", "cdp"]);
 
 /** 从 markdown 里抽出 ```bash 代码块中的 owb 调用行。 */
 function extractOwbLines(md) {

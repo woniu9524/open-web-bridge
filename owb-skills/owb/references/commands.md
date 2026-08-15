@@ -90,8 +90,9 @@ when quotes collide.
 | --- | --- |
 | `owb` | Self-check: daemon reachability, mode (local/relay), extension connection, attached tabs |
 | `owb setup` | Install walkthrough (extension path + skill install + self-check) |
-| `owb skill install [--project]` | Install the skill to `~/.claude/skills/owb` (or the current project) |
+| `owb skill install [--to <agents>] [--project] [--dir <path>]` | Install the skill for **every detected agent** (`~/.claude` / `~/.codex` / `~/.cursor` / `~/.opencode`). `--to claude,codex` picks agents, `--project` installs into the current project instead of the home directory, `--dir <path>` installs to `<path>/owb` |
 | `owb skill path` | Print the bundled skill source directory |
+| `owb update check` | Compare the installed version against the npm registry; prints the upgrade steps when a newer version exists. Run once at the end of a session, per SKILL.md "Staying current" |
 | `owb help [group]` | All commands, or details for one group |
 | `owb call <tool> --args '<json>'` | Call any underlying tool directly (escape hatch for anything the aliases miss) |
 
@@ -262,6 +263,7 @@ owb upload --args "$(cat /tmp/up.json)"
 | `handoff` | `--reason "<what the user should do>"` | Moves the tab into the orange "✋ OWB waiting for you" group |
 | `wait-user` | `--condition url_change\|selector\|text` (**defaults to url_change**) `--selector` `--text` `--timeout-ms`(280000) `--clear` | For logins, **always pass an explicit condition** — a login that does not change the URL will otherwise wait out the full timeout |
 | `daemon-status` | — | Mode (local/relay), relay URL, extension presence, current task |
+| `daemon-stop` | — | Stops the daemon (it restarts on the next command). Part of the upgrade path; also loses `currentTask` context |
 | `reload-ext` | — | Makes the extension reload itself, so you don't have to click through `chrome://extensions` |
 
 ## Environment variables

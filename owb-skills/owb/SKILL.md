@@ -475,9 +475,30 @@ that road).
 | **task** | task begin / end / list |
 | **flow** | flow save / run / list |
 | **human** | handoff, wait-user |
-| **daemon** | daemon-status, reload-ext |
+| **daemon** | daemon-status, daemon-stop, reload-ext |
 
 The net/har/hook/debug/script/verify groups are the debugging ladder — see `references/debugging.md`.
+
+## Staying current
+
+Versions iterate quickly, and a stale install is a real source of avoidable
+failures (this document itself is an installed copy that only updates on
+reinstall). **After the session's main task is finished** — once per session,
+not after every command — run:
+
+```bash
+owb update check
+```
+
+- `✓ up to date` → done; no need to mention it to the user.
+- `? could not reach the npm registry` → skip silently; not worth surfacing.
+- `⬆ update available` → the output lists the exact upgrade steps
+  (`npm i -g open-web-bridge@latest`, then `owb skill install` to refresh this
+  skill, then `owb daemon-stop` so the new daemon starts on the next command;
+  a store-installed extension updates itself, a Load-unpacked one needs
+  `owb reload-ext`). Tell the user a new version exists and **offer to run the
+  upgrade** — run the steps only after they agree, then run `owb` to confirm
+  both ✓s before reporting success.
 
 ## Boundaries
 

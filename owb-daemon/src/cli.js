@@ -160,6 +160,7 @@ const GROUPS = {
   },
   daemon: {
     "daemon-status": { ctl: "daemon.status", desc: "daemon status (mode / relay / work directory)" },
+    "daemon-stop": { ctl: "daemon.shutdown", desc: "stop the daemon (it restarts on the next command; part of the upgrade path)" },
     "reload-ext": { ctl: "reload_extension", desc: "make the extension reload itself (after editing extension code)" },
   },
 };
@@ -485,34 +486,78 @@ const SKILL_SRC = path.join(PKG_ROOT, "owb-skills", "owb");
 // （一键安装 + 自动更新，无需开发者模式）。留空则只引导本地加载。
 const STORE_URL = "";
 
-function skillTargets() {
-  const home = process.env.HOME || process.env.USERPROFILE || "";
-  return {
-    global: home ? path.join(home, ".claude", "skills", "owb") : null,
-    project: path.join(process.cwd(), ".claude", "skills", "owb"),
-  };
+// Agent Skills 已是跨工具格式：Claude Code / Codex / Cursor / OpenCode 各读各的
+// 目录。装到哪取决于用户装了哪些工具——检测规则从简：家目录下存在该工具的
+// 配置目录（~/.claude 等）即视为装了。写死 ~/.claude 的老行为是它的特例。
+const SKILL_AGENTS = {
+  claude:   { dir: ".claude",   label: "Claude Code" },
+  codex:    { dir: ".codex",    label: "Codex CLI" },
+  cursor:   { dir: ".cursor",   label: "Cursor" },
+  opencode: { dir: ".opencode", label: "OpenCode" },
+};
+
+function homeDir() {
+  return process.env.HOME || process.env.USERPROFILE || "";
 }
 
-// 装 skill 到 ~/.claude/skills/owb（--project 装到当前项目）
-function installSkill(toProject) {
+function detectAgents() {
+  const home = homeDir();
+  if (!home) return [];
+  return Object.keys(SKILL_AGENTS).filter((a) =>
+    fs.existsSync(path.join(home, SKILL_AGENTS[a].dir)));
+}
+
+function skillDest(agent, toProject) {
+  const base = toProject ? process.cwd() : homeDir();
+  return base ? path.join(base, SKILL_AGENTS[agent].dir, "skills", "owb") : null;
+}
+
+// 装 skill：默认装到每个检测到的 agent（--to 指定 agent，--project 装进当前
+// 项目，--dir 指定任意 skills 父目录）。检测不到任何 agent 时回退 Claude ——
+// 报错要求用户先装 agent 反而挡住「先装 owb 再装 agent」的顺序。
+function installSkill({ toProject, to, dir }) {
   if (!fs.existsSync(SKILL_SRC)) {
     process.stderr.write(`error SKILL_MISSING: no skill bundled in the package (${SKILL_SRC})\n`);
     process.exitCode = 1;
-    return null;
+    return [];
   }
-  const t = skillTargets();
-  const dest = toProject ? t.project : t.global;
-  if (!dest) {
-    process.stderr.write("error NO_HOME: cannot locate a home directory; use --project\n");
-    process.exitCode = 1;
-    return null;
+  let dests;
+  if (dir) {
+    dests = [path.join(path.resolve(String(dir)), "owb")];
+  } else {
+    let agents;
+    if (to) {
+      agents = String(to).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+      const bad = agents.filter((a) => !SKILL_AGENTS[a]);
+      if (bad.length) {
+        throw new UsageError(
+          `--to: unknown agent ${bad.join(", ")} (valid: ${Object.keys(SKILL_AGENTS).join(", ")})`);
+      }
+    } else {
+      agents = detectAgents();
+      if (!agents.length) {
+        agents = ["claude"];
+        if (homeDir()) {
+          process.stdout.write(
+            "no agent config directory detected (~/.claude, ~/.codex, ~/.cursor, ~/.opencode) - defaulting to Claude Code\n");
+        }
+      }
+    }
+    dests = [...new Set(agents.map((a) => skillDest(a, toProject)).filter(Boolean))];
+    if (!dests.length) {
+      process.stderr.write("error NO_HOME: cannot locate a home directory; use --project or --dir\n");
+      process.exitCode = 1;
+      return [];
+    }
   }
-  fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.cpSync(SKILL_SRC, dest, { recursive: true });
-  return dest;
+  for (const dest of dests) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.cpSync(SKILL_SRC, dest, { recursive: true });
+  }
+  return dests;
 }
 
-function cmdSkill(sub, toProject) {
+function cmdSkill(sub, opts) {
   if (sub === "path") {
     process.stdout.write(SKILL_SRC + "\n");
     return;
@@ -520,8 +565,11 @@ function cmdSkill(sub, toProject) {
   if (sub && sub !== "install") {
     throw new UsageError(`owb skill: unknown subcommand ${sub} (available: install / path)`);
   }
-  const dest = installSkill(toProject);
-  if (dest) process.stdout.write(`✓ skill installed to ${dest}\n  Start a new agent session for it to take effect.\n`);
+  const dests = installSkill(opts);
+  if (dests.length) {
+    for (const d of dests) process.stdout.write(`✓ skill installed to ${d}\n`);
+    process.stdout.write("  Start a new agent session for it to take effect.\n");
+  }
 }
 
 // 安装引导：打印扩展路径 + 装 skill + 自检。人工步骤只有「Chrome 加载扩展」一步。
@@ -545,18 +593,101 @@ async function cmdSetup(ctl, autostart) {
 
   // 2. skill：可选但推荐
   out.write("\n2. Install the skill (teaches the agent how to use this; optional)\n");
-  const t = skillTargets();
-  const already = t.global && fs.existsSync(path.join(t.global, "SKILL.md"));
-  if (already) {
-    out.write(`   ✓ installed: ${t.global}\n`);
+  const detected = detectAgents();
+  if (detected.length) {
+    for (const a of detected) {
+      const dest = skillDest(a, false);
+      const ok = dest && fs.existsSync(path.join(dest, "SKILL.md"));
+      out.write(`   ${ok ? "✓" : "·"} ${SKILL_AGENTS[a].label}: ${ok ? `installed (${dest})` : "detected, skill not installed"}\n`);
+    }
   } else {
-    out.write("   Run: owb skill install            (installs to ~/.claude/skills/)\n");
-    out.write("   Or:  owb skill install --project  (installs into the current project only)\n");
+    out.write("   (no agent config directory detected: ~/.claude, ~/.codex, ~/.cursor, ~/.opencode)\n");
   }
+  out.write("   Run: owb skill install                 (installs for every agent detected above)\n");
+  out.write("   Or:  --to claude,codex (pick agents) / --project (this project only) / --dir <path>\n");
 
   // 3. 连通性自检
   out.write("\n3. Self-check\n");
   await doctor(ctl, autostart);
+}
+
+// ---------------------------------------------------------------------------
+// update：版本检查。skill 教 agent 在任务收尾时跑一次；有新版则提示用户升级。
+// 只查不装——装涉及 npm -g 和 daemon 重启，应该由用户（或征得同意的 agent）执行。
+// ---------------------------------------------------------------------------
+
+const PKG_INFO = (() => {
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, "package.json"), "utf8"));
+    return { name: p.name || "open-web-bridge", version: p.version || "0.0.0" };
+  } catch (e) {
+    return { name: "open-web-bridge", version: "0.0.0" };
+  }
+})();
+
+// x.y.z 数值比较；预发布后缀忽略（对「有没有新版」这个判断足够了）
+function cmpVersion(a, b) {
+  const pa = String(a).split("-")[0].split(".").map(Number);
+  const pb = String(b).split("-")[0].split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+// 兜底路径：registry.npmjs.org 直连失败（镜像源用户/代理环境）时走 npm 自己的
+// 配置——它认 registry 镜像和代理设置，而 fetch 不认。
+function npmViewLatest() {
+  return new Promise((resolve) => {
+    const p = spawn("npm", ["view", PKG_INFO.name, "version"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: process.platform === "win32", // Windows 上 npm 是 npm.cmd
+    });
+    let outBuf = "";
+    const timer = setTimeout(() => {
+      try { p.kill(); } catch (e) {}
+      resolve(null);
+    }, 15000);
+    p.stdout.on("data", (d) => { outBuf += d; });
+    p.on("close", (code) => {
+      clearTimeout(timer);
+      const v = outBuf.trim();
+      resolve(code === 0 && /^\d+\.\d+\.\d+/.test(v) ? v : null);
+    });
+    p.on("error", () => { clearTimeout(timer); resolve(null); });
+  });
+}
+
+async function cmdUpdate(sub) {
+  if (sub && sub !== "check") {
+    throw new UsageError(`owb update: unknown subcommand ${sub} (available: check)`);
+  }
+  let latest = null;
+  try {
+    const res = await fetch(`https://registry.npmjs.org/${PKG_INFO.name}/latest`, {
+      signal: AbortSignal.timeout(6000),
+      headers: { accept: "application/json" },
+    });
+    if (res.ok) latest = String((await res.json()).version || "") || null;
+  } catch (e) { /* 直连失败 → 走 npm 兜底 */ }
+  if (!latest) latest = await npmViewLatest();
+  if (!latest) {
+    process.stdout.write(
+      `? could not reach the npm registry - current version ${PKG_INFO.version}, latest unknown\n`);
+    return;
+  }
+  if (cmpVersion(latest, PKG_INFO.version) > 0) {
+    process.stdout.write(
+      `⬆ update available: ${PKG_INFO.version} -> ${latest}\n` +
+      `  1. npm i -g ${PKG_INFO.name}@latest    new CLI + daemon + extension files + skill source\n` +
+      `  2. owb skill install                  refresh the installed skill copies\n` +
+      `  3. owb daemon-stop                    old daemon exits; the new one starts on the next command\n` +
+      `  4. owb reload-ext                     dev-mode (Load unpacked) extension reloads the new files;\n` +
+      `                                        store installs update themselves - skip this step\n`);
+  } else {
+    process.stdout.write(`✓ owb ${PKG_INFO.version} is up to date\n`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +706,8 @@ function printHelp(groupName) {
     out.push("");
     out.push("  owb setup              setup walkthrough (run this first)");
     out.push("  owb                    self-check: daemon and extension connection");
-    out.push("  owb skill install      install the skill into ~/.claude/skills/ (--project for this project only)");
+    out.push("  owb skill install      install the skill for every detected agent (--to claude,codex / --project / --dir <path>)");
+    out.push("  owb update check       check npm for a newer version (prints the upgrade steps)");
     out.push("  owb help <group>       details for one group");
     out.push("  owb call <tool> --args '<json>'   call any underlying tool directly");
     out.push("");
@@ -643,10 +775,29 @@ async function main() {
   // skill 安装是纯本地文件操作，不连 ctl
   if (positionals[0] === "skill") {
     try {
-      cmdSkill(positionals[1], args.project === true);
+      cmdSkill(positionals[1], {
+        toProject: args.project === true,
+        to: args.to,
+        dir: args.dir,
+      });
     } catch (e) {
       process.stderr.write(`usage error: ${e.message}\n`);
       process.exitCode = 2;
+    }
+    return;
+  }
+  // update 查 npm registry，不连 ctl
+  if (positionals[0] === "update") {
+    try {
+      await cmdUpdate(positionals[1]);
+    } catch (e) {
+      if (e instanceof UsageError) {
+        process.stderr.write(`usage error: ${e.message}\n`);
+        process.exitCode = 2;
+      } else {
+        process.stderr.write(`error UPDATE_CHECK: ${e.message}\n`);
+        process.exitCode = 1;
+      }
     }
     return;
   }

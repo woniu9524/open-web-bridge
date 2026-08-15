@@ -51,7 +51,7 @@ export const OWB_RELAY_TOKEN = process.env.OWB_RELAY_TOKEN || "";
 // 报出可操作的错误）。EXT_ONLY_OVERLAP 是两侧同名的工具——不带前缀时按老规矩
 // 转发给扩展，语义不变。
 const DAEMON_LOCAL_TOOLS = new Set([
-  "status", "hook_logs", "verify_signer", "replay", "evidence_write",
+  "status", "shutdown", "hook_logs", "verify_signer", "replay", "evidence_write",
   "task_begin", "task_end", "task_list", "workflow_save", "workflow_run",
   "workflow_list", "state_save", "state_load", "state_list", "state_delete",
   "har_save", "download", "har_to_replay", "har_diff", "har_assert",
@@ -552,6 +552,14 @@ export class Bridge {
         pending: this.pending.size,
         subscribers: this.subscribers.size,
         current_task: this.current_task ? this.current_task.id : null,
+      } };
+    }
+    if (name === "shutdown") {
+      // 升级路径的最后一步：老进程退出，下一条 owb 命令 autostart 时跑的就是
+      // npm -g 更新后的新代码。延迟退出是为了让这条结果先送达 ctl 端。
+      setTimeout(() => process.exit(0), 200);
+      return { ok: true, data: {
+        note: "daemon exiting; it restarts on the next owb command",
       } };
     }
     if (name === "hook_logs") {

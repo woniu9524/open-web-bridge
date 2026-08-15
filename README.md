@@ -94,8 +94,15 @@ because that is where your sessions are, which is the entire point of this
 project. No command line can do it for you.
 
 Then run `owb` once as a self-check; two ✓ means you are ready. Finally
-`owb skill install` puts the skill in `~/.claude/skills/` (add `--project` to
-install into the current project only).
+`owb skill install` installs the skill for **every agent it detects** — Claude
+Code (`~/.claude/skills/`), Codex CLI (`~/.codex/skills/`), Cursor
+(`~/.cursor/skills/`), OpenCode (`~/.opencode/skills/`). Use
+`--to claude,codex` to pick agents yourself, `--project` to install into the
+current project only, or `--dir <path>` for anywhere else.
+
+Later, `owb update check` compares your install against npm and prints the
+upgrade steps when a newer version exists — the skill also teaches agents to
+run it at the end of a session, so you hear about updates without asking.
 
 The skill uses progressive disclosure, and `skill install` copies the whole
 directory:
