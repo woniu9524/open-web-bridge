@@ -13,6 +13,13 @@
 
   const MAX_FIELD = 4000;
 
+  // BUG-37: 上报时必须用**原生** JSON.stringify。crypto 预设会包裹
+  // JSON.stringify，两个预设同时注入时，本文件每上报一次就会反向触发一条
+  // 假的 JSON.stringify 调用事件——而 crypto 预设的全部用途就是回答
+  // 「页面到底调了多少次 JSON.stringify」。xhr.js / crypto.js / fn_hook.js
+  // 都存了原生引用，只有这里漏了。
+  const nativeStringify = JSON.stringify;
+
   const truncate = (s) =>
     s && s.length > MAX_FIELD ? s.slice(0, MAX_FIELD) + "…(truncated)" : s;
 
@@ -20,7 +27,7 @@
     try {
       if (typeof __owbReport === "function") {
         __owbReport(
-          JSON.stringify({
+          nativeStringify({
             preset: "fetch",
             href: location.href,
             ts: Date.now(),
@@ -59,7 +66,7 @@
         body.forEach((v, k) => {
           o[k] = typeof v === "string" ? v : `[${v && v.constructor ? v.constructor.name : typeof v}]`;
         });
-        return truncate(JSON.stringify(o));
+        return truncate(nativeStringify(o));
       }
       return `[${body.constructor ? body.constructor.name : typeof body}]`;
     } catch (e) {

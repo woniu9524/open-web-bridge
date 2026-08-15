@@ -139,12 +139,23 @@ $("save").addEventListener("click", async () => {
     const relayUrl = $("relayUrl").value.trim();
     const relayToken = $("relayToken").value.trim();
     if (!relayUrl || !relayToken) return msg("Relay mode needs both a relay URL and a token.", true);
-    if (!/^wss?:\/\//i.test(relayUrl)) return msg("The relay URL must start with wss://.", true);
+    // 这里原来是 /^wss?:\/\//i —— 那个 s? 让 ws:// 直接过关，而紧挨着的文案
+    // 写的是 "must start with wss://"。后果不是文案不准，是 token 和整套登录
+    // cookie 明文走公网，而 UI 让用户相信已经强制加密（README/PRIVACY 也是
+    // 这么承诺的）。局域网自测放行 localhost，其余一律要 wss。
+    const localRelay = /^wss?:\/\/(localhost|127\.0\.0\.1)([:/]|$)/i.test(relayUrl);
+    if (!/^wss:\/\//i.test(relayUrl) && !localRelay) {
+      return msg("The relay URL must start with wss:// — plain ws:// would send " +
+                 "your token and cookies unencrypted.", true);
+    }
     await chrome.storage.local.set({ relayUrl, relayToken });
   } else {
     // 切回本地：清空中转字段，使 background 的 relayMode 判定为 false
     const wsUrl = $("wsUrl").value.trim();
-    if (wsUrl && !/^wss?:\/\//i.test(wsUrl)) return msg("The daemon address must start with ws://.", true);
+    // 本地 daemon 是回环连接，ws:// 与 wss:// 都合法（这里 s? 是对的）
+    if (wsUrl && !/^wss?:\/\//i.test(wsUrl)) {
+      return msg("The daemon address must start with ws:// or wss://.", true);
+    }
     const patch = { relayUrl: "", relayToken: "" };
     if (wsUrl) patch.wsUrl = wsUrl;
     await chrome.storage.local.set(patch);

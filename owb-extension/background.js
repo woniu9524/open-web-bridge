@@ -4168,7 +4168,12 @@ const tools = {
         failed.push(`${type}: ${e && e.message ? e.message : e}`);
       }
     }
-    emulateState.delete(tabId);
+    // 只摘掉真正清理成功的项。原来这里无条件 delete(tabId)，然后才抛
+    // retryable=true 的 RESET_INCOMPLETE —— AI 照提示重试，开头
+    // `if (!s) return { tabId, reset: [] }` 直接命中，返回 ok=true + 空数组，
+    // 而覆盖其实还留在页面上。又一次「假成功」，正是本文件到处在防的那种。
+    for (const type of reset) s.delete(type);
+    if (s.size === 0) emulateState.delete(tabId);
     const out = { tabId, reset, failed: failed.length ? failed : undefined };
     // BUG-19/UX-152: clear 之后回读一次真实视口。relay 模式下 clear 命令可能
     // 静默不生效，只有量一下才能发现。

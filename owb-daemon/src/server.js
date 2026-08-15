@@ -801,11 +801,13 @@ export class Bridge {
       // 调用方可能沿用了那个形状；两个都收，别再静默丢标题。
       const title = String(args.title || args.name || "").trim();
       let taskId = tsId();
-      if (title) {
-        const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "").slice(0, 30);
-        if (slug) taskId += `-${slug}`;
-      }
+      // BUG-119 判死的就是这条内联 ASCII 正则（原来是
+      // `replace(/[^a-z0-9]+/g,"-")`），_slug 那边早就改成了 Unicode 安全版，
+      // 这里却又复制了一份旧的：纯中文标题 → slug 塌成空串 → taskId 退化成
+      // 纯时间戳，而 tsId 只到秒 —— 同一秒内两次 task_begin 会拿到相同 id，
+      // 后一个 write_json 直接覆盖前一个任务的元数据。复用唯一真源。
+      const slug = _slug(title);
+      if (slug) taskId += `-${slug}`;
       const meta = { id: taskId, title,
                      began_at: isoSeconds(),
                      began_ts: Date.now() / 1000,

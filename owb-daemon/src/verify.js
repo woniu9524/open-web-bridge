@@ -113,7 +113,20 @@ export function verify_signer(signer_code, samples) {
       results.push({ id: sample.id, ok: false, error: res.error });
       continue;
     }
-    const div = first_divergence(sample.expected || {}, res.computed);
+    // 样本没给 expected 时，first_divergence 遍历的是 expected 的键：空对象
+    // → 零次循环 → 返回 null → 判定通过。于是「忘了写 expected」会得到
+    // pass_rate 1.0 的假绿，正好违背本文件 dry_run_signer 处立的规矩
+    //（没有基准就不产 pass_rate）。缺基准就是坏样本，直接判失败并说清楚。
+    if (sample.expected === undefined || sample.expected === null) {
+      results.push({
+        id: sample.id, ok: false,
+        error: "sample has no `expected` — nothing to compare against. " +
+          "Give the expected params from a real captured request, or call " +
+          "with `calls` instead to dry-run the signer without a baseline.",
+      });
+      continue;
+    }
+    const div = first_divergence(sample.expected, res.computed);
     const ok = div === null;
     if (ok) passed++;
     const entry = { id: sample.id, ok };

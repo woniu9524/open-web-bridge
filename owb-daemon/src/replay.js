@@ -85,11 +85,20 @@ function parseHeaders(raw) {
  * spec: {
  *   method, url, headers, body, params,
  *   impersonate (默认 "chrome"), allow_redirects (默认 false),
- *   max_body (响应体回传截断，默认 4000)
+ *   max_body (响应体回传截断，默认 4000；0 = 只要头),
+ *   timeout (秒，默认 20，上限 120)
  * }
+ *
+ * 第二个形参只是给单测直接调用用的。工具路径（server.js 的 `replay` 分支）
+ * 只传 spec —— 所以超时必须从 spec 里读，否则 AI 传的 timeout 会被静默忽略，
+ * 长请求怎么调都必然失败。
  */
-export async function replay(spec, timeout = 20.0) {
+export async function replay(spec, timeoutArg) {
   if (!spec || !spec.url) return { ok: false, error: "replay: url is required" };
+  const rawTimeout = Number(spec.timeout ?? timeoutArg);
+  const timeout = Number.isFinite(rawTimeout) && rawTimeout > 0
+    ? Math.min(rawTimeout, 120)
+    : 20.0;
   const binary = findCurlBinary();
   if (!binary) {
     return {
@@ -102,7 +111,12 @@ export async function replay(spec, timeout = 20.0) {
   }
 
   const method = String(spec.method || "GET").toUpperCase();
-  const maxBody = spec.max_body ? Math.trunc(Number(spec.max_body)) : MAX_BODY_DEFAULT;
+  // max_body 非法（"abc"、负数）时 Math.trunc(Number(…)) 得 NaN，下面的
+  // body.slice(0, NaN) 会静默返回空串、truncated 又判成 false —— 调用方拿到
+  // 一个 ok:true 的空 body，完全看不出发生过什么。坏输入回落默认值。
+  // 顺带：0 现在是合法值（只要头不要体），原来 falsy 判断把它吃成了默认值。
+  const rawMax = Math.trunc(Number(spec.max_body));
+  const maxBody = Number.isFinite(rawMax) && rawMax >= 0 ? rawMax : MAX_BODY_DEFAULT;
   let url = spec.url;
   if (spec.params && typeof spec.params === "object") {
     const qs = new URLSearchParams();
@@ -156,6 +170,9 @@ export async function replay(spec, timeout = 20.0) {
       headers,
       body: body.slice(0, maxBody) + (truncated ? "…(truncated)" : ""),
       body_len: body.length,
+      // 截断标记直接拼在 body 尾部会让调用方的 JSON.parse 炸，且光看 body_len
+      // 判断不出来。给一个显式布尔位。
+      truncated,
       elapsed_ms: elapsedMs,
     },
   };

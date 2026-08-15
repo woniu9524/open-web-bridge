@@ -223,6 +223,20 @@ export function harAssert(har, assertions) {
   for (const a of assertions || []) {
     const r = { assertion: a, ok: false };
     try {
+      // BUG-26/27 那一批修的是「字段名猜错 → 静默恒 false」，url_pattern 漏在了
+      // 网外，而它的失效方向更糟：new RegExp(undefined) 求值为 /(?:)/，test 恒真。
+      // 于是漏传 url_pattern 时 request_exists **无条件通过**、request_absent
+      // 无条件失败，status/contains 则落到「第一条请求」上——断言看起来跑了，
+      // 其实什么都没验。假绿比报错危害大一档，这里当场拦下。
+      const NEEDS_PATTERN = ["request_exists", "request_absent",
+                             "response_status", "response_contains"];
+      if (NEEDS_PATTERN.includes(a.type) && !a.url_pattern) {
+        r.detail = `${a.type} needs a url_pattern field (regex matched against ` +
+          "the request URL); without it the assertion would match every request";
+        failed++;
+        results.push(r);
+        continue;
+      }
       if (a.type === "request_exists") {
         const re = new RegExp(a.url_pattern);
         r.ok = entries.some((e) => re.test(e.request.url));
