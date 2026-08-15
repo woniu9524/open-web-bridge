@@ -146,7 +146,7 @@ Certifications (all three must be checked):
 
 ## Screenshots
 
-1280×800, in `C:\Users\Administrator\Downloads\`:
+1280×800 (keep them out of the repo; export to a local scratch folder):
 
 - `owb-store-1280x800.png` — the whole window: task tab group, popup, a real page
 - `owb-store-2-popup.png` — popup close-up: connection state, Local/Relay, daemon address

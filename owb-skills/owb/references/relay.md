@@ -54,8 +54,11 @@ and safer. Skip this entire document.
 
 - **Already deployed**: get the `wss://…` address and go to step 2.
 - **Not yet**: the user needs to deploy one on their own Cloudflare account (the
-  free tier is enough). `owb-relay/README.md` in the repo has the full guide;
-  the core is three commands:
+  free tier is enough). ⚠️ **The relay source is not part of the npm package** —
+  it ships only in the git repository, so `cd owb-relay` fails on a normal
+  `npm i -g` install. Point the user at
+  <https://github.com/woniu9524/open-web-bridge/tree/master/owb-relay> (its
+  README is the full guide); from a clone, the core is three commands:
 
   ```bash
   cd owb-relay && npm install
@@ -209,4 +212,5 @@ tabs moving on their own. So:
 | A bare `1101` with no other information | The exception is outside the catch layer (broken deploy or platform fault). Run `npx wrangler tail` for the stack; redeploy under a different worker name |
 
 Deeper documentation on deploying, testing and the quotas of the relay service
-itself is in `owb-relay/README.md`.
+itself is in the repository (not the npm package):
+<https://github.com/woniu9524/open-web-bridge/tree/master/owb-relay>.
