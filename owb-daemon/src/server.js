@@ -18,6 +18,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
 
@@ -909,8 +910,24 @@ export class Bridge {
       // task 分组联动的内部管道，不固化）；坏行跳过
       const steps = [];
       let skippedState = 0;
+      // 只读时间窗覆盖到的那几天。审计文件名就是 YYYYMMDD（滚动分片是
+      // YYYYMMDD.N.jsonl），所以按名字就能筛掉绝大多数文件。
+      // 原来这里是「glob 全部 sessions → readFileSync 整读 → split("\n")」：
+      // 实测单日文件已到 130 MB，一次 flow save 就把整个事件循环同步卡住数秒
+      //（期间所有 ctl 调用、扩展 tool_result、事件广播全部停摆），而且随日志
+      // 增长线性恶化，最终会撞上 Node 单字符串上限直接失败。
+      const dayOf = (ts) => ymd(new Date(ts * 1000));
+      const days = new Set([dayOf(beganTs), dayOf(endedTs)]);
+      for (let t = beganTs; t < endedTs; t += 86400) days.add(dayOf(t));
       for (const sp of this._glob("sessions", "*.jsonl")) {
-        for (const line of fs.readFileSync(sp, "utf8").split("\n")) {
+        const m = /^(\d{8})/.exec(path.basename(sp));
+        if (m && !days.has(m[1])) continue; // 认得出日期且不在窗口内
+        // 逐行流式读，不把整个文件读进内存
+        const rl = readline.createInterface({
+          input: fs.createReadStream(sp, "utf8"),
+          crlfDelay: Infinity,
+        });
+        for await (const line of rl) {
           if (!line) continue;
           let rec;
           try {

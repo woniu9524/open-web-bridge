@@ -48,7 +48,9 @@
     "test": "node owb-daemon/tests/run-all.js",
     "test:browser": "node owb-daemon/tests/e2e_browser_test.js",
     "test:replay": "node owb-daemon/tests/verify_replay_test.js",
-    "test:relay": "node --test owb-relay/test/relay_test.mjs"
+    "test:relay": "node --test owb-relay/test/relay_test.mjs",
+    "version": "node scripts/sync-version.mjs && git add owb-extension/manifest.json",
+    "prepublishOnly": "npm test"
   },
   "dependencies": {
     "ws": "^8.21.3"
