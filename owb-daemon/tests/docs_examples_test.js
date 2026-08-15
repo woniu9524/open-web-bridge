@@ -1,5 +1,5 @@
 /**
- * 文档示例 lint：把 owb-skills/owb/*.md 里所有 `owb ...` 示例抽出来，
+ * 文档示例 lint：把 owb-skills/owb 下（含 references/）所有 `owb ...` 示例抽出来，
  * 逐条确认它**确实是一条存在的命令**。
  *
  * 为什么需要这条测试（BUG-119 / BUG-120 的共同教训）：
@@ -72,8 +72,22 @@ for (const good of ["owb oracle", "owb download", "owb file fetch",
   check(`检测器认得出好写法：${good}`, resolveCommand(good) !== null);
 }
 
-const files = fs.readdirSync(SKILL_DIR).filter((f) => f.endsWith(".md"));
+// skill 现在是 SKILL.md + references/ 子目录。这里必须**递归**扫——
+// 只扫顶层的话，附文件一份都查不到，测试会「全绿」但其实只检查了 SKILL.md。
+function collectMd(dir, prefix = "") {
+  const out = [];
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${e.name}` : e.name;
+    if (e.isDirectory()) out.push(...collectMd(path.join(dir, e.name), rel));
+    else if (e.name.endsWith(".md")) out.push(rel);
+  }
+  return out;
+}
+
+const files = collectMd(SKILL_DIR);
 check("找得到技能文档", files.length > 0, files.join(","));
+check("附文件也扫到了（不只是 SKILL.md）",
+  files.some((f) => f.includes("/")), files.join(","));
 
 let total = 0;
 const broken = [];

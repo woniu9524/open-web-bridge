@@ -81,7 +81,7 @@ open-web-bridge/          ← npm 包根（package.json 在这里）
 ├── owb-daemon/tests/     测试（不进 npm 包）
 ├── owb-extension/        MV3 Chrome 扩展
 ├── owb-relay/            可选：Cloudflare Workers 公网中转（独立部署，不进 npm 包）
-└── owb-skills/owb/       给 AI agent 装的 skill（SKILL.md + 四份按需附文件）
+└── owb-skills/owb/       给 AI agent 装的 skill（英文；SKILL.md + references/ 五份按需附文件）
 ```
 
 `npm i -g open-web-bridge` 会把 CLI、扩展文件、skill 一起装到本机——`owb setup`
