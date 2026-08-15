@@ -180,7 +180,7 @@ Chrome recycles the MV3 service worker, and the extension reconnects on its own.
 You will see this on stderr:
 
 ```
-[owb] 扩展暂时不可达（NO_EXTENSION），1.5s 后重试…
+[owb] extension unreachable (NO_EXTENSION), retrying in 1.5s…
 ```
 
 Backoff is 1.5s → 4s → 10s → 20s, about 35 seconds total. **This is normal; the

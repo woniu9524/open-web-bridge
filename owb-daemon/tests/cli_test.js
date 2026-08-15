@@ -121,8 +121,8 @@ async function main() {
 
     // 6. help 渐进披露
     r = await runCli(["help"], env);
-    check("help 列出命令组", /\[基础\]/.test(r.out) && /\[net\]/.test(r.out) && /\[state\]/.test(r.out));
-    r = await runCli(["help", "基础"], env);
+    check("help 列出命令组", /\[core\]/.test(r.out) && /\[net\]/.test(r.out) && /\[state\]/.test(r.out));
+    r = await runCli(["help", "core"], env);
     check("help <组> 展开详情", /owb open/.test(r.out) && /owb click/.test(r.out));
 
     // 6b. BUG-115: 语义上是字符串的参数不能被自动 JSON 解析。
@@ -190,7 +190,7 @@ async function main() {
       p.stderr.on("data", (d) => { lerr += d; });
       const lcode = await new Promise((res) => p.on("close", res));
       check("BUG-110 经符号链接调用 CLI 仍执行 main()",
-        lcode === 0 && /\[基础\]/.test(lout),
+        lcode === 0 && /\[core\]/.test(lout),
         `code=${lcode} out=${lout.slice(0, 80) || "(空)"} err=${lerr.slice(0, 80)}`);
     }
   } finally {

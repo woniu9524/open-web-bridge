@@ -45,122 +45,122 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TARGET = { target: true };
 
 const GROUPS = {
-  基础: {
-    open: { ctl: "navigate", pos: ["url"], desc: "打开 url（--new-tab 新开 tab）" },
-    back: { ctl: "history", preset: { action: "back" }, desc: "后退" },
-    forward: { ctl: "history", preset: { action: "forward" }, desc: "前进" },
-    reload: { ctl: "history", preset: { action: "reload" }, desc: "刷新（--bypass-cache 强刷）" },
-    page: { ctl: "read_page", desc: "语义快照（@eN ref 供 click/fill）；--mode article|text，--since-last 增量" },
-    shot: { ctl: "screenshot", desc: "截图" },
-    click: { ctl: "click", pos: [TARGET], desc: "点击 @ref 或 selector（--mouse 走真实鼠标事件）" },
-    "click-mouse": { ctl: "mouse_click", pos: [TARGET], desc: "真实鼠标事件点击（isTrusted，带 AI 光标动画）" },
-    fill: { ctl: "fill", pos: [TARGET, "value"], desc: "填输入框（native setter，兼容 React 受控组件）" },
-    keys: { ctl: "send_keys", desc: "键盘输入：--text 走 insertText，--keys 走真实按键（二选一）" },
-    scroll: { ctl: "scroll", desc: "滚动页面" },
-    eval: { ctl: "evaluate", pos: ["expression"], desc: "页面上下文执行 JS 表达式" },
-    wait: { ctl: "wait_for", desc: "等待 --selector / --text / --url-pattern / --network-idle" },
-    frames: { ctl: "list_frames", desc: "列出 iframe（配合 eval --frame-pattern）" },
-    status: { ctl: "status", desc: "扩展侧状态：WS 连接、attached tabs" },
-    cdp: { ctl: "cdp", desc: "直发任意 CDP 命令（逃生口）" },
+  core: {
+    open: { ctl: "navigate", pos: ["url"], desc: "open a url (--new-tab opens a new tab)" },
+    back: { ctl: "history", preset: { action: "back" }, desc: "go back" },
+    forward: { ctl: "history", preset: { action: "forward" }, desc: "go forward" },
+    reload: { ctl: "history", preset: { action: "reload" }, desc: "reload (--bypass-cache for a hard reload)" },
+    page: { ctl: "read_page", desc: "semantic snapshot (@eN refs for click/fill); --mode article|text, --since-last for a diff" },
+    shot: { ctl: "screenshot", desc: "screenshot" },
+    click: { ctl: "click", pos: [TARGET], desc: "click an @ref or selector (--mouse switches to real mouse events)" },
+    "click-mouse": { ctl: "mouse_click", pos: [TARGET], desc: "click with real mouse events (isTrusted, with a visible cursor animation)" },
+    fill: { ctl: "fill", pos: [TARGET, "value"], desc: "fill an input (native setter, works with React controlled components)" },
+    keys: { ctl: "send_keys", desc: "keyboard input: --text uses insertText, --keys sends real key events (pick one)" },
+    scroll: { ctl: "scroll", desc: "scroll the page" },
+    eval: { ctl: "evaluate", pos: ["expression"], desc: "evaluate a JS expression in the page" },
+    wait: { ctl: "wait_for", desc: "wait for --selector / --text / --url-pattern / --network-idle" },
+    frames: { ctl: "list_frames", desc: "list iframes (pair with eval --frame-pattern)" },
+    status: { ctl: "status", desc: "extension-side state: WS connection, attached tabs" },
+    cdp: { ctl: "cdp", desc: "send any raw CDP command (escape hatch)" },
   },
   tab: {
-    "tab list": { ctl: "list_tabs", desc: "列出全部 tab" },
-    "tab find": { ctl: "find_tab", pos: ["url_pattern"], desc: "按 url 正则找 tab" },
-    "tab close": { ctl: "close_tab", desc: "关 tab（--tab 指定）" },
-    "tab close-group": { ctl: "close_group", desc: "一键清场：关掉「OWB 临时」+ 全部「task:」组的 tab" },
+    "tab list": { ctl: "list_tabs", desc: "list all tabs" },
+    "tab find": { ctl: "find_tab", pos: ["url_pattern"], desc: "find a tab by url regex" },
+    "tab close": { ctl: "close_tab", desc: "close a tab (--tab to pick one)" },
+    "tab close-group": { ctl: "close_group", desc: "clean up: close the OWB scratch group and every task: group" },
   },
   net: {
-    "net start": { ctl: "network_start", desc: "开始抓包" },
-    "net stop": { ctl: "network_stop", desc: "停止抓包" },
-    "net list": { ctl: "network_list", desc: "列出已捕获请求；--sort-by duration|size 找最慢/最重，--url-pattern 过滤" },
-    "net detail": { ctl: "network_detail", desc: "单条请求全量（头 + body）" },
-    "net initiator": { ctl: "get_initiator", desc: "请求发起调用栈" },
-    "net capture": { ctl: "capture_request", desc: "宏工具：触发动作并捕获目标请求" },
+    "net start": { ctl: "network_start", desc: "start capturing network traffic" },
+    "net stop": { ctl: "network_stop", desc: "stop capturing" },
+    "net list": { ctl: "network_list", desc: "list captured requests; --sort-by duration|size for slowest/heaviest, --url-pattern to filter" },
+    "net detail": { ctl: "network_detail", desc: "one request in full (headers + body)" },
+    "net initiator": { ctl: "get_initiator", desc: "the call stack that initiated a request" },
+    "net capture": { ctl: "capture_request", desc: "macro: run a trigger action and capture the matching request" },
   },
   har: {
-    "har start": { ctl: "record_start", desc: "开始录制（HAR 1.2 全量）" },
-    "har save": { ctl: "daemon.har_save", desc: "停止录制并落盘（录完用这个，它已含 stop）" },
-    "har stop": { ctl: "record_stop", desc: "只停止不落盘——录完请直接用 har save，停了再 save 会失败" },
-    "har status": { ctl: "record_status", desc: "录制状态" },
-    "har to-replay": { ctl: "daemon.har_to_replay", desc: "HAR → python/curl/node 重放脚本" },
-    "har diff": { ctl: "daemon.har_diff", desc: "两份 HAR 对比漂移" },
-    "har assert": { ctl: "daemon.har_assert", desc: "HAR 断言校验" },
+    "har start": { ctl: "record_start", desc: "start recording (full HAR 1.2)" },
+    "har save": { ctl: "daemon.har_save", desc: "stop recording and write to disk (use this when done, it stops for you)" },
+    "har stop": { ctl: "record_stop", desc: "stop without saving; when done recording use har save directly, stopping first makes save fail" },
+    "har status": { ctl: "record_status", desc: "recording status" },
+    "har to-replay": { ctl: "daemon.har_to_replay", desc: "HAR to a python/curl/node replay script" },
+    "har diff": { ctl: "daemon.har_diff", desc: "diff two HARs for drift" },
+    "har assert": { ctl: "daemon.har_assert", desc: "assert against a HAR" },
   },
   hook: {
-    "hook preset": { ctl: "hook_preset", pos: ["preset"], desc: "注入预设 hook：xhr|fetch|crypto" },
-    "hook fn": { ctl: "hook_function", desc: "hook 任意函数记录出入参" },
-    "hook remove": { ctl: "hook_remove", desc: "移除 hook" },
-    "hook status": { ctl: "hook_status", desc: "hook 注入状态" },
-    "hook logs": { ctl: "daemon.hook_logs", desc: "拉取 hook 事件（轮询）" },
+    "hook preset": { ctl: "hook_preset", pos: ["preset"], desc: "inject a preset hook: xhr|fetch|crypto" },
+    "hook fn": { ctl: "hook_function", desc: "hook any function and record its arguments and return value" },
+    "hook remove": { ctl: "hook_remove", desc: "remove a hook" },
+    "hook status": { ctl: "hook_status", desc: "which hooks are installed" },
+    "hook logs": { ctl: "daemon.hook_logs", desc: "pull hook events (polling)" },
   },
   debug: {
-    "debug break-xhr": { ctl: "break_xhr", desc: "XHR 断点（配 debug frames 读冻结现场）" },
-    "debug break-fn": { ctl: "break_function", desc: "函数断点" },
-    "debug break-remove": { ctl: "break_remove", desc: "移除断点" },
-    "debug frames": { ctl: "frame_read", desc: "读断点调用帧（frozen snapshot，自动 resume）" },
-    "debug step": { ctl: "step", desc: "单步" },
-    "debug resume": { ctl: "resume", desc: "恢复执行" },
-    "debug console": { ctl: "console_stream", desc: "console 输出流" },
-    oracle: { ctl: "oracle_call", desc: "对页面函数做确定性采样调用" },
+    "debug break-xhr": { ctl: "break_xhr", desc: "XHR breakpoint (pair with debug frames to read the frozen state)" },
+    "debug break-fn": { ctl: "break_function", desc: "function breakpoint" },
+    "debug break-remove": { ctl: "break_remove", desc: "remove a breakpoint" },
+    "debug frames": { ctl: "frame_read", desc: "read call frames at a breakpoint (frozen snapshot)" },
+    "debug step": { ctl: "step", desc: "step" },
+    "debug resume": { ctl: "resume", desc: "resume execution" },
+    "debug console": { ctl: "console_stream", desc: "stream console output" },
+    oracle: { ctl: "oracle_call", desc: "call a page function deterministically (time and randomness frozen)" },
   },
   script: {
-    "script list": { ctl: "script_list", desc: "列出页面脚本" },
-    "script source": { ctl: "script_source", desc: "取脚本源码" },
-    "script search": { ctl: "search_code", desc: "全脚本代码搜索" },
-    "script patch": { ctl: "script_patch", desc: "改写脚本（下次加载生效）" },
-    "script unpatch": { ctl: "script_unpatch", desc: "撤销改写" },
-    "script watch": { ctl: "watch_script", desc: "监听脚本加载" },
-    "script watch-remove": { ctl: "watch_remove", desc: "移除监听" },
+    "script list": { ctl: "script_list", desc: "list the scripts a page loaded" },
+    "script source": { ctl: "script_source", desc: "get a script source" },
+    "script search": { ctl: "search_code", desc: "search across all script sources" },
+    "script patch": { ctl: "script_patch", desc: "patch a script (takes effect on next load)" },
+    "script unpatch": { ctl: "script_unpatch", desc: "undo a patch" },
+    "script watch": { ctl: "watch_script", desc: "watch for a script to load" },
+    "script watch-remove": { ctl: "watch_remove", desc: "remove a watcher" },
   },
   cookie: {
-    "cookie get": { ctl: "cookie_get", desc: "读 cookie" },
-    "cookie set": { ctl: "cookie_set", desc: "写 cookie" },
-    "cookie delete": { ctl: "cookie_delete", desc: "删 cookie" },
+    "cookie get": { ctl: "cookie_get", desc: "read cookies" },
+    "cookie set": { ctl: "cookie_set", desc: "write a cookie" },
+    "cookie delete": { ctl: "cookie_delete", desc: "delete a cookie" },
   },
   state: {
-    "state save": { ctl: "daemon.state_save", pos: ["name"], desc: "保存站点登录态（cookie+storage+IDB）" },
-    "state load": { ctl: "daemon.state_load", pos: ["name"], desc: "恢复登录态" },
-    "state list": { ctl: "daemon.state_list", desc: "列出已存登录态" },
-    "state delete": { ctl: "daemon.state_delete", pos: ["name"], desc: "删除登录态" },
-    "state export": { ctl: "export_state", desc: "导出当前页 storage（扩展侧原语）" },
-    "state import": { ctl: "import_state", desc: "导入 storage（扩展侧原语）" },
+    "state save": { ctl: "daemon.state_save", pos: ["name"], desc: "save a site login (cookies + storage + IndexedDB)" },
+    "state load": { ctl: "daemon.state_load", pos: ["name"], desc: "restore a saved login" },
+    "state list": { ctl: "daemon.state_list", desc: "list saved logins" },
+    "state delete": { ctl: "daemon.state_delete", pos: ["name"], desc: "delete a saved login" },
+    "state export": { ctl: "export_state", desc: "export the current page storage (extension-side primitive)" },
+    "state import": { ctl: "import_state", desc: "import storage (extension-side primitive)" },
   },
   env: {
-    "env set": { ctl: "emulate", desc: "环境模拟：设备/网络节流/地理/时区/语言/UA" },
-    "env reset": { ctl: "emulate_reset", desc: "恢复真实环境" },
-    "env compare": { ctl: "env_compare", desc: "模拟前后环境对比" },
+    "env set": { ctl: "emulate", desc: "emulate device / network throttling / geolocation / timezone / locale / UA" },
+    "env reset": { ctl: "emulate_reset", desc: "reset emulation" },
+    "env compare": { ctl: "env_compare", desc: "compare the environment before and after emulation" },
   },
   file: {
-    download: { ctl: "download", desc: "下载页面资源" },
-    upload: { ctl: "upload", desc: "上传文件到页面（DataTransfer，无需文件系统）" },
-    pdf: { ctl: "print_pdf", desc: "导出页面为 PDF" },
-    "file fetch": { ctl: "daemon.download", desc: "daemon 侧直接下载 URL" },
+    download: { ctl: "download", desc: "download via the browser" },
+    upload: { ctl: "upload", desc: "upload a file to the page (DataTransfer, no filesystem access)" },
+    pdf: { ctl: "print_pdf", desc: "export the page as PDF" },
+    "file fetch": { ctl: "daemon.download", desc: "fetch a URL daemon-side into work/downloads/" },
   },
   task: {
     // BUG-110: 位置参数原来映射成 name，但 daemon 侧 task_begin 读的是
     // args.title —— 标题一路丢到底，任务组退化成 "task: <时间戳>"，
     // 「一个任务一个可读分组」这个核心卖点直接失效。
-    "task begin": { ctl: "daemon.task_begin", pos: ["title"], desc: "任务开始（建任务组 + 归档）" },
-    "task end": { ctl: "daemon.task_end", desc: "任务结束（自动收尾 HAR 入档）" },
-    "task list": { ctl: "daemon.task_list", desc: "任务列表" },
+    "task begin": { ctl: "daemon.task_begin", pos: ["title"], desc: "begin a task (creates a tab group and archive dir)" },
+    "task end": { ctl: "daemon.task_end", desc: "end a task (files the HAR automatically)" },
+    "task list": { ctl: "daemon.task_list", desc: "list tasks" },
   },
   flow: {
-    "flow save": { ctl: "daemon.workflow_save", pos: ["name"], desc: "把跑通的流程固化为工作流" },
-    "flow run": { ctl: "daemon.workflow_run", pos: ["name"], desc: "确定性回放工作流" },
-    "flow list": { ctl: "daemon.workflow_list", desc: "工作流列表" },
+    "flow save": { ctl: "daemon.workflow_save", pos: ["name"], desc: "save the flow you just ran as a workflow" },
+    "flow run": { ctl: "daemon.workflow_run", pos: ["name"], desc: "replay a workflow deterministically" },
+    "flow list": { ctl: "daemon.workflow_list", desc: "list workflows" },
   },
   verify: {
-    "verify signer": { ctl: "daemon.verify_signer", desc: "离线验证签名函数" },
-    "verify replay": { ctl: "daemon.replay", desc: "TLS 指纹重放（需 curl-impersonate）" },
-    "verify evidence": { ctl: "daemon.evidence_write", desc: "写入取证记录" },
+    "verify signer": { ctl: "daemon.verify_signer", desc: "verify a signing function offline against samples" },
+    "verify replay": { ctl: "daemon.replay", desc: "TLS fingerprint replay (needs curl-impersonate)" },
+    "verify evidence": { ctl: "daemon.evidence_write", desc: "write a record into the evidence archive" },
   },
   human: {
-    handoff: { ctl: "handoff", desc: "把 tab 交还人类（验证码/扫码登录）" },
-    "wait-user": { ctl: "wait_user", desc: "等人类操作完成后接管" },
+    handoff: { ctl: "handoff", desc: "hand the tab back to the human (captcha / QR login)" },
+    "wait-user": { ctl: "wait_user", desc: "wait for the human to finish, then take over" },
   },
   daemon: {
-    "daemon-status": { ctl: "daemon.status", desc: "daemon 状态（模式/中转/工作目录）" },
-    "reload-ext": { ctl: "reload_extension", desc: "让扩展重载自己（改完扩展代码用，免去手点 chrome://extensions）" },
+    "daemon-status": { ctl: "daemon.status", desc: "daemon status (mode / relay / work directory)" },
+    "reload-ext": { ctl: "reload_extension", desc: "make the extension reload itself (after editing extension code)" },
   },
 };
 
@@ -242,7 +242,7 @@ class CtlClient {
 
 async function autostartDaemon() {
   const serverPath = path.join(__dirname, "server.js");
-  process.stderr.write(`[owb] daemon 未运行，自动拉起（${CTL_URL}）…\n`);
+  process.stderr.write(`[owb] daemon not running, starting it (${CTL_URL})…\n`);
   spawn(process.execPath, [serverPath], {
     detached: true,
     stdio: "ignore",
@@ -283,14 +283,14 @@ async function callWithAutostart(ctl, name, args, timeout, autostart) {
     const refused = /ECONNREFUSED|ctl disconnected/.test(String(e && e.message));
     if (!refused || !autostart) throw e;
     if (!(await autostartDaemon())) {
-      throw new Error(`daemon 拉起失败：手动运行 node ${path.join("owb-daemon", "src", "server.js")} 看报错`);
+      throw new Error(`failed to start the daemon: run node ${path.join("owb-daemon", "src", "server.js")} manually to see the error`);
     }
     res = await ctl.call(name, args, timeout);
   }
   for (const delay of EXT_RETRY_DELAYS_MS) {
     if (res.ok || !res.error || !TRANSIENT_EXT_ERRORS.has(res.error.code)) break;
     process.stderr.write(
-      `[owb] 扩展暂时不可达（${res.error.code}），${delay / 1000}s 后重试…\n`,
+      `[owb] extension unreachable (${res.error.code}), retrying in ${delay / 1000}s…\n`,
     );
     await new Promise((r) => setTimeout(r, delay));
     res = await ctl.call(name, args, timeout);
@@ -372,7 +372,7 @@ function applyPositionals(spec, positionals, args) {
     }
   }
   if (positionals.length > pos.length) {
-    throw new UsageError(`多余的位置参数：${positionals.slice(pos.length).join(" ")}`);
+    throw new UsageError(`too many positional arguments: ${positionals.slice(pos.length).join(" ")}`);
   }
 }
 
@@ -467,7 +467,7 @@ function shapeForAgent(toolName, data, cli) {
   if (clipped.length) {
     out._clipped = clipped;
     out._hint =
-      "输出过大已截断。要全量：--max-chars/--max-nodes 缩小范围，或 --raw 拿原始信封。";
+      "Output was too large and got clipped. For everything: narrow the scope with --max-chars/--max-nodes, or use --raw for the full envelope.";
   }
   return out;
 }
@@ -496,14 +496,14 @@ function skillTargets() {
 // 装 skill 到 ~/.claude/skills/owb（--project 装到当前项目）
 function installSkill(toProject) {
   if (!fs.existsSync(SKILL_SRC)) {
-    process.stderr.write(`error SKILL_MISSING: 包内找不到 skill（${SKILL_SRC}）\n`);
+    process.stderr.write(`error SKILL_MISSING: no skill bundled in the package (${SKILL_SRC})\n`);
     process.exitCode = 1;
     return null;
   }
   const t = skillTargets();
   const dest = toProject ? t.project : t.global;
   if (!dest) {
-    process.stderr.write("error NO_HOME: 无法定位 home 目录，请用 --project\n");
+    process.stderr.write("error NO_HOME: cannot locate a home directory; use --project\n");
     process.exitCode = 1;
     return null;
   }
@@ -518,44 +518,44 @@ function cmdSkill(sub, toProject) {
     return;
   }
   if (sub && sub !== "install") {
-    throw new UsageError(`owb skill: 未知子命令 ${sub}（可用：install / path）`);
+    throw new UsageError(`owb skill: unknown subcommand ${sub} (available: install / path)`);
   }
   const dest = installSkill(toProject);
-  if (dest) process.stdout.write(`✓ skill 已装到 ${dest}\n  重开 agent 会话即可生效。\n`);
+  if (dest) process.stdout.write(`✓ skill installed to ${dest}\n  Start a new agent session for it to take effect.\n`);
 }
 
 // 安装引导：打印扩展路径 + 装 skill + 自检。人工步骤只有「Chrome 加载扩展」一步。
 async function cmdSetup(ctl, autostart) {
   const out = process.stdout;
-  out.write("Open Web Bridge 安装引导\n\n");
+  out.write("Open Web Bridge setup\n\n");
 
   // 1. 扩展：必须装进用户自己的浏览器 profile（登录态就在那儿），无法命令行代劳
   const extOk = fs.existsSync(path.join(EXT_DIR, "manifest.json"));
-  out.write("① 装浏览器扩展（唯一需要你手动做的一步）\n");
+  out.write("1. Install the browser extension (the one step you have to do yourself)\n");
   if (STORE_URL) {
-    out.write(`   推荐 · 应用商店一键装（自动更新）：${STORE_URL}\n`);
-    if (extOk) out.write(`   或用随包的开发版：chrome://extensions → 开发者模式 → 加载已解压 → ${EXT_DIR}\n`);
+    out.write(`   Recommended - one click from the store, auto-updating: ${STORE_URL}\n`);
+    if (extOk) out.write(`   Or the bundled dev build: chrome://extensions -> Developer mode -> Load unpacked -> ${EXT_DIR}\n`);
   } else if (extOk) {
-    out.write(`   扩展目录：${EXT_DIR}\n`);
-    out.write("   在浏览器里：chrome://extensions → 打开右上角「开发者模式」\n");
-    out.write("   → 点「加载已解压的扩展程序」→ 选上面那个目录\n");
+    out.write(`   Extension directory: ${EXT_DIR}\n`);
+    out.write("   In the browser: chrome://extensions -> turn on Developer mode (top right)\n");
+    out.write("   -> click Load unpacked -> pick the directory above\n");
   } else {
-    out.write(`   ✗ 找不到扩展目录（${EXT_DIR}）——安装可能不完整\n`);
+    out.write(`   ✗ extension directory not found (${EXT_DIR}) - the install may be incomplete\n`);
   }
 
   // 2. skill：可选但推荐
-  out.write("\n② 装 skill（让 AI agent 知道怎么用，可选）\n");
+  out.write("\n2. Install the skill (teaches the agent how to use this; optional)\n");
   const t = skillTargets();
   const already = t.global && fs.existsSync(path.join(t.global, "SKILL.md"));
   if (already) {
-    out.write(`   ✓ 已装：${t.global}\n`);
+    out.write(`   ✓ installed: ${t.global}\n`);
   } else {
-    out.write("   运行：owb skill install          （装到 ~/.claude/skills/）\n");
-    out.write("   或：  owb skill install --project（只装到当前项目）\n");
+    out.write("   Run: owb skill install            (installs to ~/.claude/skills/)\n");
+    out.write("   Or:  owb skill install --project  (installs into the current project only)\n");
   }
 
   // 3. 连通性自检
-  out.write("\n③ 自检\n");
+  out.write("\n3. Self-check\n");
   await doctor(ctl, autostart);
 }
 
@@ -566,18 +566,18 @@ async function cmdSetup(ctl, autostart) {
 function printHelp(groupName) {
   const out = [];
   if (groupName && GROUPS[groupName]) {
-    out.push(`owb ${groupName} 组命令：`);
+    out.push(`owb ${groupName} commands:`);
     for (const [name, spec] of Object.entries(GROUPS[groupName])) {
       out.push(`  owb ${name.padEnd(22)} ${spec.desc}`);
     }
   } else {
-    out.push("owb — 让 AI agent 驱动你的真实浏览器");
+    out.push("owb - let an AI agent drive your real browser");
     out.push("");
-    out.push("  owb setup              安装引导（装完先跑这个）");
-    out.push("  owb                    自检：daemon/扩展连接状态");
-    out.push("  owb skill install      把 skill 装进 ~/.claude/skills/（--project 装到当前项目）");
-    out.push("  owb help <组>          组内命令详情");
-    out.push("  owb call <工具> --args '<json>'   直调任意 ctl 工具");
+    out.push("  owb setup              setup walkthrough (run this first)");
+    out.push("  owb                    self-check: daemon and extension connection");
+    out.push("  owb skill install      install the skill into ~/.claude/skills/ (--project for this project only)");
+    out.push("  owb help <group>       details for one group");
+    out.push("  owb call <tool> --args '<json>'   call any underlying tool directly");
     out.push("");
     // BUG-120: 原来一律 `n.split(" ").pop()` 只取最后一段，于是「要带组名前缀的」
     // 和「顶层的」在这一行里长得一模一样。debug 组里 7 条要写 `owb debug xxx`、
@@ -597,7 +597,7 @@ function printHelp(groupName) {
       out.push(`  [${gname}] ${[...new Set(names)].join(mixed ? " / " : " ")}`);
     }
     out.push("");
-    out.push("通用 flag：--tab <id> --timeout <s> --out <文件> --raw --compact --no-autostart --args '<json>'");
+    out.push("Common flags: --tab <id> --timeout <s> --out <file> --raw --compact --no-autostart --args '<json>'");
   }
   process.stdout.write(out.join("\n") + "\n");
 }
@@ -607,23 +607,23 @@ async function doctor(ctl, autostart) {
   try {
     daemonRes = await callWithAutostart(ctl, "daemon.status", {}, 10, autostart);
   } catch (e) {
-    process.stdout.write(`✗ daemon 不可达（${CTL_URL}）：${e.message}\n`);
+    process.stdout.write(`✗ daemon unreachable (${CTL_URL}): ${e.message}\n`);
     process.exitCode = 1;
     return;
   }
   const d = (daemonRes.ok && daemonRes.data) || {};
-  process.stdout.write(`✓ daemon ${CTL_URL}${d.mode ? `（${d.mode} 模式）` : ""}\n`);
+  process.stdout.write(`✓ daemon ${CTL_URL}${d.mode ? ` (${d.mode} mode)` : ""}\n`);
   const extRes = await ctl.call("status", {}, 15).catch(() => null);
   if (extRes && extRes.ok) {
     const tabs = (extRes.data && extRes.data.tabs) || [];
-    process.stdout.write(`✓ 扩展已连接，attached tabs: ${tabs.length}\n`);
-    process.stdout.write(`下一步：owb open <url> → owb page → owb click @eN\n`);
+    process.stdout.write(`✓ extension connected, attached tabs: ${tabs.length}\n`);
+    process.stdout.write(`Next: owb open <url> -> owb page -> owb click @eN\n`);
   } else {
-    const msg = extRes && extRes.error ? extRes.error.message : "未连接";
-    process.stdout.write(`✗ 扩展未连接（${msg}）\n`);
+    const msg = extRes && extRes.error ? extRes.error.message : "not connected";
+    process.stdout.write(`✗ extension not connected (${msg})\n`);
     process.stdout.write(
-      "  检查：浏览器已加载 owb-extension/ 目录（chrome://extensions 开发者模式）？\n" +
-      "  点扩展工具栏图标看连接状态，必要时「重新连接」。\n",
+      "  Check: is owb-extension/ loaded in the browser (chrome://extensions, Developer mode)?\n" +
+      "  Click the extension icon in the toolbar to see its status, and Reconnect if needed.\n",
     );
   }
 }
@@ -645,7 +645,7 @@ async function main() {
     try {
       cmdSkill(positionals[1], args.project === true);
     } catch (e) {
-      process.stderr.write(`用法错误：${e.message}\n`);
+      process.stderr.write(`usage error: ${e.message}\n`);
       process.exitCode = 2;
     }
     return;
@@ -673,7 +673,7 @@ async function main() {
       consumed = 2;
     }
     if (!spec) {
-      throw new UsageError(`未知命令：${positionals[0]}（owb help 看清单）`);
+      throw new UsageError(`unknown command: ${positionals[0]} (run owb help for the list)`);
     }
 
     const callArgs = { ...(spec.preset || {}) };
@@ -684,7 +684,7 @@ async function main() {
       try {
         extra = JSON.parse(cli.rawArgs);
       } catch (e) {
-        throw new UsageError(`--args 不是合法 JSON：${e.message}`);
+        throw new UsageError(`--args is not valid JSON: ${e.message}`);
       }
       Object.assign(callArgs, extra);
     }
@@ -712,13 +712,13 @@ async function main() {
     } else {
       const err = res.error || {};
       let line = `error ${err.code || "INTERNAL"}: ${err.message !== undefined ? err.message : err}`;
-      if (err.retryable) line += "（可重试）";
+      if (err.retryable) line += " (retryable)";
       process.stderr.write(line + "\n");
       process.exitCode = 1;
     }
   } catch (e) {
     if (e instanceof UsageError) {
-      process.stderr.write(`用法错误：${e.message}\n`);
+      process.stderr.write(`usage error: ${e.message}\n`);
       process.exitCode = 2;
     } else {
       process.stderr.write(`error CTL_UNREACHABLE: ${e.message}\n`);

@@ -415,7 +415,7 @@ once a symptom matches, rather than pulling all of it into context up front.
 | A PDF URL yields no body text in any mode | Chrome's PDF viewer lives in a separate sandboxed view — **architecturally out of reach**. Find an HTML version, or screenshot it |
 | Garbage words like `derosnopS` in search results | Anti-scraping decoy text (invisible to humans). **Skip it as noise** |
 | Navigating to `docs.google.com/**/create` | ⚠️ **Merely visiting creates a real file in the user's account**, and a brand-new empty file cannot be trashed. Don't navigate to these URLs |
-| stderr shows `扩展暂时不可达…retrying in N s` | The MV3 worker was recycled. **Normal** — the command retries itself (about 35 seconds total) to success |
+| stderr shows `extension unreachable … retrying in N s` | The MV3 worker was recycled. **Normal** — the command retries itself (about 35 seconds total) to success |
 | Still `NO_EXTENSION` after the backoff finishes | This is not idle recycling; **the script itself crashed** and the heartbeat cannot wake it. **Stop waiting** and tell the user |
 | Navigation is just slow | Measured across 219 sites: p50 4.7s / p90 15s / p99 30s. Beyond 30s it is usually the site — widen with `--timeout-ms` or use `domcontentloaded` |
 

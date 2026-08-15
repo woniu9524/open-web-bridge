@@ -66,7 +66,7 @@ function usageFailure(r) {
   if (r.code === 2) return "退出码 2（CLI 用法错误）";
   const m = (r.err || "").match(/error (BAD_ARGS|UNKNOWN_TOOL)\b/);
   if (m) return r.err.trim().slice(0, 150);
-  if (/未知命令/.test(r.err || "")) return r.err.trim().slice(0, 120);
+  if (/unknown command/.test(r.err || "")) return r.err.trim().slice(0, 120);
   return null;
 }
 
