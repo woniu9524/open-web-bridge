@@ -295,8 +295,24 @@ async function callWithAutostart(ctl, name, args, timeout, autostart) {
 // 参数解析
 // ---------------------------------------------------------------------------
 
-function parseValue(v) {
+// BUG-115: 这些参数在语义上永远是字符串，绝不能被 JSON 自动解析。
+// 起因：CDP 的 requestId 长得像小数（"110404.81"），`--request-id 110404.81`
+// 被解析成数字 110404.81，而 buffer 是按字符串键存的 → `net detail` 对
+// **每一条**请求都报 NOT_FOUND，整条 `net list → net detail` 下钻路径失效。
+// 同类还有：scriptId 是纯数字串、`--text 404`、`--url-pattern 2024`——
+// 一旦被转成数字，比对/正则全部走空。
+const STRING_PARAMS = new Set([
+  "request_id", "script_id", "object_id", "frame_id", "node_id",
+  "text", "query", "selector", "url_pattern", "url_substring",
+  "function_path", "expression", "code", "replacement", "hook_code",
+  "name", "title", "filename", "path", "keys", "reason", "label",
+  "condition", "mode", "format", "sort_by", "impersonate", "url",
+  "source", "signer_code", "trigger", "patch_type", "position",
+]);
+
+function parseValue(v, key) {
   if (v === undefined) return true; // 裸 flag = true
+  if (key && STRING_PARAMS.has(key)) return v; // 语义字符串，原样传
   try {
     return JSON.parse(v);
   } catch (e) {
@@ -330,7 +346,8 @@ function parseArgv(argv) {
       case "out": cli.out = val; continue;   // 二进制结果落盘路径
       case "tab": args.tabId = parseValue(val); continue;
     }
-    args[key.replace(/-/g, "_")] = parseValue(val);
+    const name = key.replace(/-/g, "_");
+    args[name] = parseValue(val, name);
   }
   return { positionals, args, cli };
 }

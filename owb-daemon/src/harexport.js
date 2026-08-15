@@ -48,12 +48,38 @@ function splitStaticDynamicHeaders(headerPairs) {
 
 // ---- C7: HAR → 重放脚本 ----
 
-export function harToReplay(har, format = "python") {
-  const entries = replayableEntries(har);
-  if (!entries.length) return { format, count: 0, code: `# no replayable entries\n` };
-  if (format === "curl") return { format, count: entries.length, code: toCurl(entries) };
-  if (format === "node") return { format, count: entries.length, code: toNode(entries) };
-  return { format: "python", count: entries.length, code: toPython(entries) };
+// BUG-118: 以前没有任何过滤，一次页面加载录下来的 HAR 有几十条（统计脚本、
+// 字体、地图瓦片…），全量生成出的脚本没法用；而且传了 url_pattern 会被**静默
+// 忽略**——调用方看到 count:42 还以为过滤生效了。逆向场景要的从来只是其中
+// 一两条接口，这里补上过滤，并在过滤到 0 条时明确说清是被谁滤掉的。
+export function harToReplay(har, format = "python", opts = {}) {
+  let entries = replayableEntries(har);
+  const total = entries.length;
+  let re = null;
+  if (opts.url_pattern) {
+    try {
+      re = new RegExp(opts.url_pattern);
+    } catch (e) {
+      throw new Error(`har_to_replay: bad url_pattern regex: ${e.message}`);
+    }
+    entries = entries.filter((e) => re.test(e.request.url || ""));
+  }
+  if (!entries.length) {
+    return {
+      format,
+      count: 0,
+      matched: 0,
+      total,
+      code: re
+        ? `# no entries matched url_pattern ${JSON.stringify(opts.url_pattern)} ` +
+          `(${total} replayable entries in this HAR)\n`
+        : "# no replayable entries\n",
+    };
+  }
+  const meta = { matched: entries.length, total };
+  if (format === "curl") return { format, count: entries.length, ...meta, code: toCurl(entries) };
+  if (format === "node") return { format, count: entries.length, ...meta, code: toNode(entries) };
+  return { format: "python", count: entries.length, ...meta, code: toPython(entries) };
 }
 
 function entryContext(e, idx) {

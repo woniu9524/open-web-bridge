@@ -129,4 +129,32 @@ const unknown = harAssert(aHar, [{ type: "no_such_assert" }]);
 check("unknown assertion type lists valid ones",
   /valid: request_exists\|/.test(unknown.results[0].detail));
 
+// ---- BUG-118: har_to_replay 的 url_pattern 过滤（以前被静默忽略，全量生成）----
+const rHar = makeHar([
+  { request: { method: "GET", url: "https://x.test/api/data", headers: [] },
+    response: { status: 200, content: {} } },
+  { request: { method: "GET", url: "https://x.test/analytics.js", headers: [] },
+    response: { status: 200, content: {} } },
+  { request: { method: "GET", url: "https://cdn.test/font.woff2", headers: [] },
+    response: { status: 200, content: {} } },
+]);
+const all = harToReplay(rHar, "python");
+check("no filter keeps every entry", all.count === 3 && all.total === 3);
+
+const filtered = harToReplay(rHar, "python", { url_pattern: "api/data" });
+check("url_pattern filters down", filtered.count === 1 && filtered.matched === 1);
+check("url_pattern reports the pool it filtered from", filtered.total === 3);
+check("filtered code only has the match",
+  /api\/data/.test(filtered.code) && !/analytics\.js/.test(filtered.code));
+
+const none = harToReplay(rHar, "python", { url_pattern: "nope-no-match" });
+check("no match says so instead of silently emitting everything",
+  none.count === 0 && /no entries matched url_pattern/.test(none.code));
+
+let threw = null;
+try { harToReplay(rHar, "python", { url_pattern: "([unclosed" }); }
+catch (e) { threw = e; }
+check("bad regex throws instead of matching nothing silently",
+  threw && /bad url_pattern regex/.test(threw.message));
+
 summarize();

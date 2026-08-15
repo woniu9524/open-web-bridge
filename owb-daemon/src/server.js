@@ -1002,6 +1002,10 @@ export class Bridge {
       const p = this.store.write_json(rel, har);
       return { ok: true, data: {
         path: p, entries: data.entries || 0,
+        // BUG-117: 「录到过的请求数」与「HAR 里真正写下的条数」的差额，
+        // 别在这一层丢掉——否则调用方只看到一个数，不知道有请求没被序列化。
+        entriesDropped: data.entriesDropped,
+        entriesDroppedNote: data.entriesDroppedNote,
         bodyBytes: data.bodyBytes || 0, tabIds: data.tabIds || null,
       } };
     }
@@ -1090,7 +1094,15 @@ export class Bridge {
           retryable: false } };
       }
       const format = args.format || "python";
-      const out = harToReplay(har, format);
+      let out;
+      try {
+        // BUG-118: url_pattern 以前被静默忽略——整页几十条全量生成，
+        // 调用方还以为过滤生效了
+        out = harToReplay(har, format, { url_pattern: args.url_pattern });
+      } catch (e) {
+        return { ok: false, error: {
+          code: "BAD_ARGS", message: e.message, retryable: false } };
+      }
       // 落盘（可选）：replay/<名>.<ext>
       if (args.save) {
         const ext = format === "python" ? "py" : format === "node" ? "mjs" : "sh";

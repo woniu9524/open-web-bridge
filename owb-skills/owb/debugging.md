@@ -18,14 +18,21 @@ SKILL.md 讲怎么用浏览器**干活**，这份讲怎么用它**查问题**：
 ⚠️ **`net start` 必须在导航之前**，否则拿到的是一批没有 URL 的孤儿记录
 （返回里 `orphanRecordsHidden` 会告诉你丢了多少条）。
 
+🚨 **别把这条写成 `owb net start` 然后 `owb open <url>`。** `net start` 不给
+`--tab` 会绑到**当前活动标签页**——也就是**用户自己正在看的那一页**；紧接着
+一条不带 `--new-tab` 的 `open` 会**把用户的页面导航走**。实测就这么绑到了
+用户的后台管理系统上。**先要一个自己的空标签页，再在它身上开抓包**：
+
 ```bash
-owb net start                                  # 默认清空旧 buffer（--clear false 保留）
-owb open https://目标站 --new-tab true
-owb net list --sort-by duration --limit 10     # 最慢的十个
-owb net list --sort-by size --limit 10         # 最占带宽的十个
-owb net list --url-pattern "api/"              # 只看接口
-owb net detail --request-id <id> --include-body true   # 单条完整头 + body
-owb net initiator --request-id <id>            # 谁发起的：完整调用栈
+owb open about:blank --new-tab true --active false     # ① 先拿到自己的 tab
+# → 记下返回的 tabId，下面每一条都带 --tab
+owb net start --tab <id>                       # ② 抓包绑在自己的 tab 上（默认清空旧 buffer，--clear false 保留）
+owb open https://目标站 --tab <id>              # ③ 再导航，首屏请求一条不漏
+owb net list --tab <id> --sort-by duration --limit 10  # 最慢的十个
+owb net list --tab <id> --sort-by size --limit 10      # 最重的十个
+owb net list --tab <id> --url-pattern "api/"           # 只看接口
+owb net detail --tab <id> --request-id <id> --include-body true   # 单条完整头 + body
+owb net initiator --tab <id> --request-id <id>         # 谁发起的：完整调用栈
 ```
 
 `net initiator` 是从「这个请求哪来的」跳到「哪段代码发的」的桥——拿到栈顶的
@@ -55,7 +62,10 @@ owb har save --args '{"filename":"排查记录"}'
 
 ```bash
 # 转成脱离浏览器的重放脚本（动态签名头会标成占位符）
-owb har to-replay --path har/排查记录.har --format python --save true
+# ⚠️ 一次页面加载动辄几十条（统计脚本、字体、瓦片），不过滤生成出来的脚本没法用。
+# --url-pattern 只留你要的那几条；返回里 matched/total 告诉你从多少条里挑出了几条。
+owb har to-replay --path har/排查记录.har --format python --save true \
+  --url-pattern "api/search"
 
 # 改版前后两份 HAR 比漂移：少了哪个请求、状态码变了、响应结构变了
 owb har diff --baseline har/上线前.har --current har/上线后.har --save true

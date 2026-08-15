@@ -540,6 +540,21 @@ async function feedRecorderScreenshot(tabId, reason, url) {
   } catch (e) {}
 }
 
+// BUG-117: 「录到过的请求数」与「HAR 里真正写下的条数」的差额说明。
+// 没等到响应就结束/被取消的请求组装不出 HAR entry，两个数天然会差。
+// 报文件里的真实条数，差额单独说清楚，别让调用方拿一个对不上的数去做回归比对。
+function droppedFields(seen, serialized) {
+  const dropped = (seen || 0) - (serialized || 0);
+  if (dropped <= 0) return {};
+  return {
+    entriesDropped: dropped,
+    entriesDroppedNote:
+      `${dropped} of ${seen} recorded requests had no complete response ` +
+      "(still in flight when recording stopped, or cancelled) and cannot be " +
+      "serialized as HAR entries",
+  };
+}
+
 // 组装单个 recorder 的 HAR page 数据（含增强字段挂到 page._recording）
 function buildRecorderPage(rec, tabId, title) {
   const har = new HARBuilder().create([rec.stats], title);
@@ -561,7 +576,12 @@ function buildRecorderPage(rec, tabId, title) {
     frames: rec.captureScreenshots ? rec.frames : undefined,
     cookiesDiff: rec.cookiesDiff || undefined,
   };
-  return { har, entries: Object.keys(rec.stats.entries).length };
+  // BUG-117: 以前这里回的是「录到过的请求数」，而 HAR 文件里只有能序列化出来的
+  // 那些（没等到响应就结束、被取消的请求组装不出 entry）。实测报 57、文件里 43。
+  // 取证归档报一个跟文件对不上的数，回头做回归比对时会白查一轮。
+  // 以文件真实条数为准，差额单独给出，信息不丢。
+  const entriesSeen = Object.keys(rec.stats.entries).length;
+  return { har, entries: har.log.entries.length, entriesSeen };
 }
 
 // cookie 快照（含 HttpOnly）
@@ -630,7 +650,7 @@ async function stopAllRecorders(title) {
     const rec = recorders.get(tabId);
     if (!rec) continue;
     const page = await finalizeRecorder(tabId, rec, title);
-    totalEntries += page.entries;
+    totalEntries += page.entriesSeen; // BUG-117: 先累「录到过的」，下面拿合并后的真实条数比
     totalBodyBytes += rec.bodyBytes;
     // 把单 page har 的 entries/pages 并入合并 har
     pages.push({ stats: rec.stats, rec, tabId });
@@ -671,10 +691,16 @@ async function stopAllRecorders(title) {
         : 0,
     });
   }
+  // BUG-117: totalEntries 数的是「录到过的请求数」，而 HAR 里只有能序列化出来
+  // 的那些（没等到响应就结束的、被取消的请求组装不出 entry）。实测报 56、
+  // 文件里 42。取证归档报一个跟文件对不上的数，回头做回归比对时会白查一轮。
+  // 以文件里的真实条数为准，差额单独说明，信息不丢。
+  const serialized = (har && har.log && har.log.entries) ? har.log.entries.length : 0;
   return {
     tabIds,
     recording: false,
-    entries: totalEntries,
+    entries: serialized,
+    ...droppedFields(totalEntries, serialized),
     bodyBytes: totalBodyBytes,
     har,
   };
@@ -834,6 +860,24 @@ function onNetworkEvent(tabId, method, params) {
           });
         }
       }
+    }
+    return;
+  }
+  // BUG-116: 光靠 loadingFinished.encodedDataLength 拿不到体积——实测（扩展
+  // debugger 通道）它对**每一条**请求都是 0，于是 network_list 的 size 全 0、
+  // `--sort-by size`（文档里写着"看最重的十个"）完全失效。同一次导航的 HAR
+  // 里却有真实体积（最大 2.1MB），说明字节数确实流过来了，只是走的是
+  // dataReceived 这条事件。这里按块累加，才是可靠的来源。
+  if (method === "Network.dataReceived") {
+    const buf = getBuffer(tabId);
+    const prev = buf.get(params.requestId);
+    if (prev) {
+      const add = params.encodedDataLength > 0
+        ? params.encodedDataLength
+        : params.dataLength || 0;
+      bufferPut(tabId, params.requestId, {
+        receivedBytes: (prev.receivedBytes || 0) + add,
+      });
     }
     return;
   }
@@ -3134,7 +3178,9 @@ const tools = {
           rec.finishedAt && rec.startedAt
             ? rec.finishedAt - rec.startedAt
             : undefined,
-        size: rec.encodedDataLength,
+        // BUG-116: 两个来源取大的——encodedDataLength 在扩展 debugger 通道下
+        // 常年是 0，dataReceived 累加值才是真实到达字节数。
+        size: Math.max(rec.encodedDataLength || 0, rec.receivedBytes || 0),
         fromCache: rec.fromCache || undefined,
       });
     }
@@ -3178,10 +3224,18 @@ const tools = {
         false,
       );
     }
-    args = { ...args, request_id: reqId };
-    const rec = getBuffer(tabId).get(reqId);
+    // BUG-115: CDP 的 requestId 是**字符串**，但长得像小数（"110404.81"）。
+    // 任何一层把它转成数字（CLI 的自动 JSON 解析、JSON 往返、调用方手滑），
+    // Map 查找就必然落空。这里统一按字符串查，跟传进来的类型无关。
+    const key = String(reqId);
+    args = { ...args, request_id: key };
+    const rec = getBuffer(tabId).get(key);
     if (!rec)
-      throw new ToolError("NOT_FOUND", `request not in buffer: ${reqId}`);
+      throw new ToolError(
+        "NOT_FOUND",
+        `request not in buffer: ${key} — call network_list on this tab for ` +
+          "live ids (the buffer is per-tab and rotates as new requests arrive)",
+      );
     const detail = { ...rec };
     if (args.include_body !== false && rec.finished) {
       try {
@@ -3241,7 +3295,7 @@ const tools = {
         initiator: hit.initiator,
       };
     }
-    const rec = getBuffer(tabId).get(reqId);
+    const rec = getBuffer(tabId).get(String(reqId)); // BUG-115: 同上，按字符串查
     if (!rec) throw new ToolError("NOT_FOUND", `request not in buffer: ${reqId}`);
     return {
       requestId: rec.requestId,
@@ -3350,7 +3404,7 @@ const tools = {
       // 单 recorder：直接取它的 tabId
       const onlyTabId = recorders.keys().next().value;
       const rec = recorders.get(onlyTabId);
-      const { har, entries } = await finalizeRecorder(
+      const { har, entries, entriesSeen } = await finalizeRecorder(
         onlyTabId,
         rec,
         args.title,
@@ -3368,6 +3422,7 @@ const tools = {
         tabId: onlyTabId,
         recording: false,
         entries,
+        ...droppedFields(entriesSeen, entries),
         bodyBytes: rec.bodyBytes,
         har,
       };
@@ -3386,7 +3441,7 @@ const tools = {
           "writes to disk in one step). Do not call record_stop before har_save.",
         false,
       );
-    const { har, entries } = await finalizeRecorder(tabId, rec, args.title);
+    const { har, entries, entriesSeen } = await finalizeRecorder(tabId, rec, args.title);
     recorders.delete(tabId);
     recorderSkipped.delete(tabId);
     recorderOrigins.delete(tabId);
@@ -3396,7 +3451,9 @@ const tools = {
       entries,
       bodyBytes: rec.bodyBytes,
     });
-    return { tabId, recording: false, entries, bodyBytes: rec.bodyBytes, har };
+    return { tabId, recording: false, entries,
+      ...droppedFields(entriesSeen, entries),
+      bodyBytes: rec.bodyBytes, har };
   },
 
   async record_status(args) {

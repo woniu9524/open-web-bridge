@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeChecker, freePort, waitPort, killProc } from "./kit.js";
-import { COMMANDS } from "../src/cli.js";
+import { COMMANDS, parseArgv } from "../src/cli.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DAEMON_DIR = path.resolve(__dirname, "..");
@@ -124,6 +124,24 @@ async function main() {
     check("help 列出命令组", /\[基础\]/.test(r.out) && /\[net\]/.test(r.out) && /\[state\]/.test(r.out));
     r = await runCli(["help", "基础"], env);
     check("help <组> 展开详情", /owb open/.test(r.out) && /owb click/.test(r.out));
+
+    // 6b. BUG-115: 语义上是字符串的参数不能被自动 JSON 解析。
+    // CDP 的 requestId 长得像小数（"110404.81"），被转成数字后 Map 查找必然
+    // 落空 —— `net list` → `net detail` 这条下钻路径对每一条请求都 NOT_FOUND。
+    const pv = (argv) => parseArgv(argv).args;
+    check("BUG-115 request_id 保持字符串",
+      pv(["net", "detail", "--request-id", "110404.81"]).request_id === "110404.81");
+    check("BUG-115 script_id 纯数字串也不转数字",
+      pv(["script", "source", "--script-id", "12345"]).script_id === "12345");
+    check("BUG-115 --text 404 不变成数字",
+      pv(["wait", "--text", "404"]).text === "404");
+    check("BUG-115 --url-pattern 数字串保持正则文本",
+      pv(["net", "list", "--url-pattern", "2024"]).url_pattern === "2024");
+    // 真正该被解析的仍要解析，别把这层管过头
+    check("BUG-115 布尔/数字参数仍按原样解析",
+      pv(["open", "--new-tab", "true"]).new_tab === true
+      && pv(["page", "--max-nodes", "1200"]).max_nodes === 1200
+      && pv(["page", "--tab", "612684020"]).tabId === 612684020);
 
     // 7. BUG-110：经符号链接调用（npm link / pnpm / 全局 bin）入口守卫仍要成立。
     // Node 把 import.meta.url 解析到 realpath，argv[1] 却保留软链路径；旧守卫
