@@ -1,6 +1,6 @@
 {
   "name": "open-web-bridge",
-  "version": "0.10.0",
+  "version": "1.0.1",
   "description": "让 AI agent 驱动你的真实浏览器——你的登录态、你的指纹、你正在看的页面。CLI 接入，零客户端配置。",
   "keywords": [
     "ai-agent",
@@ -34,6 +34,7 @@
     "owb-extension",
     "owb-skills",
     "README.md",
+    "README.zh-CN.md",
     "LICENSE"
   ],
   "publishConfig": {

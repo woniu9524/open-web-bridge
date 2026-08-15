@@ -1,158 +1,261 @@
 # open-web-bridge
 
-让任何 AI agent 驱动你的**真实浏览器**——你的登录态、你的指纹、你正在看的页面。
+**English** · [简体中文](README.zh-CN.md)
 
-两种部署形态：
+Let any AI agent drive **your real browser** — your logged-in sessions, your
+fingerprint, the page you are looking at right now.
 
-- **本地模式**（默认）：三层架构 AI agent → 本地 daemon（Node.js，`127.0.0.1:43917`）→ MV3 Chrome 扩展 → 经 CDP 操作页面。agent 通过 **`owb` CLI** 接入（Kimi Code / Claude Code / Codex 等任何能跑 shell 的工具零配置直用），配套 skill 教典型流程。
-- **中转模式**（可选）：daemon 与扩展都拨出到一个公网中转（Cloudflare Workers + Durable Objects，按 token 配对），让**远程** AI agent 经公网控制你的浏览器，不暴露本机端口。默认关闭，不影响本地模式。
+That is the whole point: an agent that opens its own clean browser can only reach
+what is public. An agent driving *your* browser can read the article behind your
+subscription, check the dashboard you are already signed into, and finish the flow
+that needs your identity.
 
-## 能干什么
+Two deployment shapes:
 
-- **语义快照**：`read_page` 给可交互元素打 `@eN` 稳定 ref，`click`/`fill`/`screenshot` 直接引用；`since_last` 增量快照省 token；`article` 模式正文提取为 markdown
-- **等待原语**：`wait_for` 等 selector / 文本 / URL / 网络空闲，不再用 evaluate 轮询
-- **真实鼠标 + AI 光标**：`mouse_click` 走 CDP Input 域真实鼠标事件（isTrusted），页面内光标贝塞尔动画，用户在旁可见
-- **人机交接**：`handoff` / `wait_user`——撞验证码、要扫码登录时把 tab 交还你，你操作完 agent 自动接管继续
-- **交互盲区补齐**：`download`/`upload`（文件下载/上传，上传走页面内 DataTransfer 无需文件系统）、`print_pdf`（导出 PDF）、`list_frames`+`evaluate frame_pattern`（iframe 定向求值）
-- **环境模拟**：`emulate`/`emulate_reset` 一次性覆盖设备视口/网络节流/地理/时区/语言/权限/UA，测移动端/慢网/地域场景
-- **网络抓包**：请求/响应全量（含头与 body）+ `get_initiator` 调用栈定位
-- **会话录制（HAR）**：`record_start/stop` 录全量网络成标准 HAR 1.2（含 timing/WebSocket/主动收 body，支持 url/resource_type 过滤、多 tab 合并）；附 console 归档、storage 变更流、导航截图时间线；`daemon_task_end` 自动收尾 HAR 入档
-- **HAR 产物加工**：`daemon_har_to_replay`（→ python/curl/node 重放脚本，动态签名头标占位）、`daemon_har_diff`（两份 HAR 对比漂移）、`daemon_har_assert`（断言校验）
-- **任务与工作流**：`daemon_task_begin/end` 归档 + 标签分组；`daemon_workflow_save/run` 把跑通的流程固化成确定性回放
-- **站点会话库**：`daemon_state_save/load zhihu` 一键保存/恢复登录态（cookie + localStorage + IndexedDB）
-- **页面调试与分析**（按需）：hook 预设（xhr/fetch/crypto）、断点与调用帧读取、脚本改写、函数离线验证、TLS 指纹重放
+- **Local mode** (default) — three layers: AI agent → local daemon (Node.js on
+  `127.0.0.1:43917`) → MV3 Chrome extension → the page, over CDP. Agents connect
+  through the **`owb` CLI**, so anything that can run a shell (Claude Code, Kimi
+  Code, Codex, …) works with zero configuration. A bundled skill teaches the
+  typical workflows.
+- **Relay mode** (optional) — the daemon and the extension both dial out to a
+  public relay (Cloudflare Workers + Durable Objects, paired by token), so a
+  **remote** agent can drive your browser without exposing any port on your
+  machine. Off by default; enabling it does not change local mode.
 
-## 安装
+## What it can do
 
-前提：**Node.js ≥ 18** + 一个 Chromium 系浏览器（Chrome/Edge）。
+- **Semantic snapshots** — `read_page` assigns stable `@eN` refs to interactive
+  elements so `click`/`fill`/`screenshot` can reference them directly;
+  `since_last` returns only what changed (the difference between a session that
+  survives and one that drowns in tokens); `article` mode extracts body text as
+  clean markdown
+- **Waiting primitives** — `wait_for` on a selector, text, URL or network idle,
+  instead of polling with `evaluate`
+- **Real mouse events plus a visible cursor** — `mouse_click` dispatches genuine
+  CDP Input events (`isTrusted`), with an in-page bezier cursor animation so a
+  user sitting beside you can see what is happening
+- **Human handoff** — `handoff` / `wait_user` give the tab back to you for a
+  captcha or a QR login, and the agent resumes automatically once you are done
+- **The awkward interactions** — `download`/`upload` (uploads go through an
+  in-page DataTransfer, so no filesystem access is needed), `print_pdf`,
+  `list_frames` + `evaluate frame_pattern` for iframe-targeted evaluation
+- **Environment emulation** — `emulate`/`emulate_reset` covers viewport, network
+  throttling, geolocation, timezone, locale, permissions and UA in one call
+- **Network capture** — full requests and responses including headers and bodies,
+  plus `get_initiator` for the call stack that produced a request
+- **Session recording (HAR)** — `record_start/stop` writes standard HAR 1.2
+  (timing, WebSocket, actively collected bodies, url/resource_type filters,
+  multi-tab merge), with console archives, storage change streams and a
+  navigation screenshot timeline; `daemon_task_end` files the HAR automatically
+- **HAR processing** — `daemon_har_to_replay` (→ python/curl/node replay scripts,
+  with dynamic signature headers marked as placeholders),
+  `daemon_har_diff` (drift between two recordings), `daemon_har_assert`
+- **Tasks and workflows** — `daemon_task_begin/end` for archiving and tab
+  grouping; `daemon_workflow_save/run` turns a working flow into deterministic
+  replay
+- **Per-site session store** — `daemon_state_save/load <name>` saves and restores
+  a login (cookies + localStorage + IndexedDB)
+- **Debugging and analysis** (on demand) — hook presets (xhr/fetch/crypto),
+  breakpoints and call-frame inspection, script patching, offline function
+  verification, TLS fingerprint replay
 
-### 让 AI 帮你装
+## Install
 
-把下面这段话整段发给你的 AI agent（Claude Code / Kimi Code / Codex 等），它会带你走完：
+Requirements: **Node.js ≥ 18** and a Chromium-based browser (Chrome or Edge).
 
-> 帮我安装 open-web-bridge，步骤如下，每步做完告诉我结果：
+### Let an AI install it for you
+
+Paste this to your agent (Claude Code / Kimi Code / Codex / …) and it will walk
+you through:
+
+> Install open-web-bridge for me. Do these in order and tell me the result of each:
 >
-> 1. 运行 `npm i -g open-web-bridge`
-> 2. 运行 `owb setup`，把输出里「装浏览器扩展」那一步的具体做法念给我，等我装完再继续
-> 3. 运行 `owb`，确认输出里 daemon 和扩展都是 ✓；如果扩展未连接，让我点浏览器工具栏的扩展图标看状态
-> 4. 运行 `owb skill install` 装上技能，然后告诉我重开一个会话
+> 1. Run `npm i -g open-web-bridge`
+> 2. Run `owb setup`, read me the "install the browser extension" step, and wait
+>    until I confirm I've done it
+> 3. Run `owb` and confirm both the daemon and the extension show ✓. If the
+>    extension is not connected, tell me to click the extension icon in my
+>    browser toolbar and check its status
+> 4. Run `owb skill install`, then tell me to start a new session
 >
-> 装好后你就能用 `owb` 命令驱动我的浏览器了，`owb help` 看全部命令。
+> After that you can drive my browser with the `owb` command; `owb help` lists
+> everything.
 
-### 手动装
+### Manual install
 
 ```bash
-npm i -g open-web-bridge     # CLI + 扩展文件 + skill，一条命令装齐
-owb setup                     # 引导：扩展安装路径、装 skill、连通性自检
+npm i -g open-web-bridge     # CLI + extension files + skill, in one command
+owb setup                     # walkthrough: extension path, skill install, self-check
 ```
 
-`owb setup` 会告诉你扩展怎么装。**这是唯一需要你手动做的一步**——扩展必须装进你
-平时用的那个浏览器（登录态在那儿，这正是本项目的意义），命令行代劳不了。
+`owb setup` tells you how to install the extension. **That is the one step you
+have to do yourself** — the extension has to go into the browser you actually use,
+because that is where your sessions are, which is the entire point of this
+project. No command line can do it for you.
 
-装完跑一次 `owb` 自检，两个 ✓ 就绪。然后 `owb skill install` 把 skill 装进
-`~/.claude/skills/`（加 `--project` 则只装到当前项目）。
+Then run `owb` once as a self-check; two ✓ means you are ready. Finally
+`owb skill install` puts the skill in `~/.claude/skills/` (add `--project` to
+install into the current project only).
 
-skill 是**一主四附**的渐进披露结构，`skill install` 会整目录装好：
-`SKILL.md`（主干：任务形状、核心循环、高频坑，每次会话都进上下文）+
-`reference.md`（82 条命令的参数速查）、`debugging.md`（抓包/HAR/hook/断点/逆向）、
-`relay.md`（中转模式配置引导）、`field-notes.md`（实测怪现象详情）——后四份由
-agent 按需读取。其他 agent 直接把这几份 markdown 并进规则/系统提示即可，
-无专有格式。
+The skill uses progressive disclosure, and `skill install` copies the whole
+directory:
 
-### 试一下
+```
+owb/SKILL.md                     the trunk — enters context on every trigger
+owb/references/commands.md       arguments for all 82 commands
+owb/references/recipes.md        longer per-task procedures
+owb/references/debugging.md      capture / HAR / hooks / breakpoints / reverse engineering
+owb/references/field-notes.md    real-world oddities, indexed by symptom
+owb/references/relay.md          relay mode setup
+```
 
-对 agent 说一句「打开知乎搜一下 XXX，把前三条整理给我」，就能看到它干活。或者你自己敲：
+Only `SKILL.md` is always loaded; the agent reads the rest when it needs them.
+Other agents can simply concatenate these markdown files into their rules or
+system prompt — there is no proprietary format.
+
+### Try it
+
+Tell your agent something like "open Hacker News and summarize the top three
+stories for me". Or drive it yourself:
 
 ```bash
 owb open https://example.com
-owb page                 # 语义快照：可交互元素带 @eN 编号
-owb click @e1            # 直接引用编号操作
-owb help                 # 全部命令
+owb page                 # semantic snapshot: interactive elements numbered @eN
+owb click @e1            # act by number
+owb help                 # all commands
 ```
 
-> 从源码跑（开发/尝鲜）：`git clone` 后在仓库根 `npm install`，用
-> `node owb-daemon/src/cli.js <命令>` 代替 `owb`，或 `npm link` 后照常用 `owb`。
+> Running from source (development): `git clone`, then `npm install` in the repo
+> root, and use `node owb-daemon/src/cli.js <command>` instead of `owb` — or
+> `npm link` and use `owb` as normal.
 
-## 目录结构
+## Repository layout
 
 ```
-open-web-bridge/          ← npm 包根（package.json 在这里）
-├── owb-daemon/src/       owb CLI（agent 接入面）+ 本地 daemon
-├── owb-daemon/tests/     测试（不进 npm 包）
-├── owb-extension/        MV3 Chrome 扩展
-├── owb-relay/            可选：Cloudflare Workers 公网中转（独立部署，不进 npm 包）
-└── owb-skills/owb/       给 AI agent 装的 skill（英文；SKILL.md + references/ 五份按需附文件）
+open-web-bridge/          ← npm package root (package.json lives here)
+├── owb-daemon/src/       owb CLI (the agent-facing surface) + local daemon
+├── owb-daemon/tests/     tests (not shipped in the npm package)
+├── owb-extension/        MV3 Chrome extension
+├── owb-relay/            optional: Cloudflare Workers relay (deployed separately, not in the npm package)
+└── owb-skills/owb/       the skill an AI agent installs (SKILL.md + references/)
 ```
 
-`npm i -g open-web-bridge` 会把 CLI、扩展文件、skill 一起装到本机——`owb setup`
-打印的扩展路径就指向包里那份。运行时产物（分析归档、登录态、HAR）落在 `work/`，已 gitignore。
+`npm i -g open-web-bridge` installs the CLI, the extension files and the skill
+together — the extension path printed by `owb setup` points at the copy inside the
+package. Runtime artifacts (task archives, saved sessions, HAR files) go to
+`work/`, which is gitignored.
 
-## 中转模式（远程控制，可选）
+## Relay mode (remote control, optional)
 
-让**远程** AI agent 经公网控制你的浏览器，不用暴露本机端口。默认关闭；开启不影响本地模式。
+Lets a **remote** agent drive your browser over the public internet without
+exposing any port on your machine. Off by default.
 
-拓扑：扩展（你的机器）与 daemon（AI agent 机器）都拨出到一个公网中转，按 token 配对，配对后中转做透明双向转发。中转跑在 Cloudflare Workers + Durable Objects 上（空闲休眠，免费额度友好，TLS 内置）。
+Topology: the extension (your machine) and the daemon (the agent's machine) both
+dial out to a public relay and pair by token; once paired the relay forwards
+transparently in both directions. The relay runs on Cloudflare Workers + Durable
+Objects (sleeps when idle, friendly to the free tier, TLS included).
 
-**1. 部署中转（约 2 分钟，一次性）：**
+**1. Deploy the relay (about 2 minutes, once):**
 
 ```bash
 cd owb-relay
 npm install
-npx wrangler login          # 浏览器授权一次
-npx wrangler deploy         # 输出 https://owb-relay2.<你的子域>.workers.dev
+npx wrangler login          # one browser authorization
+npx wrangler deploy         # prints https://owb-relay2.<subdomain>.workers.dev
 ```
 
-详见 `owb-relay/README.md`。
+See `owb-relay/README.md` for details.
 
-**2. 扩展端配置：** 点浏览器工具栏的扩展图标 → 切到「中转」页 → 填中转 URL（如 `wss://owb-relay2.xxx.workers.dev`）→ 点「生成」→「保存并重连」。弹窗上方实时显示配对进度（浏览器 → 中转 → daemon 逐环点亮）。
+**2. Configure the extension:** click the extension icon in your browser toolbar →
+switch to the **Relay** tab → enter the relay URL (e.g.
+`wss://owb-relay2.xxx.workers.dev`) → click **Generate** → **Save and reconnect**.
+The popup shows pairing progress live (browser → relay → daemon lighting up in
+turn).
 
-**3. daemon 端配置：** 在 AI agent 机器上设同名环境变量再启动 daemon：
+**3. Configure the daemon:** set the matching environment variables on the agent's
+machine, then start the daemon:
 
 ```bash
 export OWB_RELAY_URL="wss://owb-relay2.xxx.workers.dev"
-export OWB_RELAY_TOKEN="<与扩展端相同的 Token>"
-owb-daemon                    # 日志会标注「中转模式」
+export OWB_RELAY_TOKEN="<the same token as the extension>"
+owb-daemon                    # the log will say relay mode
 ```
 
-两者配对后，`owb daemon-status` 的 `mode` 字段为 `relay`，远程 agent 即可像本地一样驱动浏览器。CLI 接入面不变（仍连本地 `/ctl`）。
+Once paired, `owb daemon-status` reports `mode: relay` and a remote agent drives
+the browser exactly as it would locally. The CLI surface is unchanged (it still
+connects to the local `/ctl`).
 
-## 可选：TLS 指纹重放
+⚠️ The daemon reads these variables **only at startup**. If a local-mode daemon is
+already running, stop it first — setting the variables alone does nothing.
 
-`daemon_replay` 需要 curl-impersonate 二进制（仅在验证协议脚本时用）：
-从 [lexiforest/curl-impersonate releases](https://github.com/lexiforest/curl-impersonate/releases) 下载对应平台的压缩包，解压到仓库 `bin/` 目录（或设环境变量 `OWB_CURL_BINARY` 指向它）。
+## Optional: TLS fingerprint replay
 
-## 安全模型（用前请读）
+`daemon_replay` needs the curl-impersonate binary (only used when verifying
+protocol scripts). Download the archive for your platform from
+[lexiforest/curl-impersonate releases](https://github.com/lexiforest/curl-impersonate/releases)
+and extract it into the repo's `bin/` directory, or point `OWB_CURL_BINARY` at it.
 
-**本地模式（默认）：**
+## Security model (please read before using)
 
-- daemon 只监听 `127.0.0.1`，并校验 WS 握手的 Host/Origin（防 DNS rebinding）
-- **本地信任模型，无配对 token**：同机任何进程都可连 daemon。这是刻意的简化——
-  连接成本为零；但不要在共享/多用户机器上运行 daemon（同机恶意进程可控制浏览器）
-- token 曾作为本机进程防线（v0.7.0–v0.8.0 默认启用 `?token=` 校验），现已移除；
-  它防不住同用户恶意进程（能读文件系统），收益小于配置成本
-  所以 `work/states/` 明文登录态同样只在你信任本机进程的前提下存放，已 gitignore，分享仓库前注意
-- 扩展申请了 `debugger` + `<all_urls>` 权限——这是 CDP 驱动的必要权限，等同于把浏览器控制权交给本机 daemon
+**Local mode (default):**
 
-**中转模式（可选，v0.9.0+）：**
+- The daemon listens only on `127.0.0.1` and validates the Host/Origin of the WS
+  handshake (protecting against DNS rebinding)
+- **Local trust model, no pairing token**: any process on the same machine can
+  connect to the daemon. This is a deliberate simplification — the connection cost
+  is zero — but **do not run the daemon on a shared or multi-user machine**, where
+  a hostile local process could drive the browser
+- A token was previously used as a same-machine defense (`?token=` was on by
+  default in v0.7.0–v0.8.0) and has since been removed: it cannot stop a hostile
+  process running as the same user (which can read the filesystem anyway), so the
+  benefit did not justify the configuration cost
+- For the same reason, the plaintext sessions under `work/states/` are only safe
+  if you trust the processes on your machine. It is gitignored — check before
+  sharing the repo
+- The extension requests `debugger` + `<all_urls>`. These are the permissions CDP
+  control requires, and they amount to handing browser control to the local daemon
 
-- **token 是线上唯一秘密**，必须走 wss（Cloudflare 边缘内置 TLS）。连接到某中转房间即证明持有 token（房间按 `sha256(token)` 寻址，哈希泄露也无法逆推构造 URL）。
-- **中转是可信 broker**。MVP **无端到端加密**——中转能看到全部明文流量（含登录 cookie/storage）。只用你自己控制的 Cloudflare 账号部署中转，或接受此风险。E2EE（token 派生密钥逐帧加密）为后续硬化项。
-- token 在扩展端生成、手动同步到 daemon 环境变量，**勿提交入库**。
-- 开启中转模式不改变本地 `/ctl` 的本地信任模型（CLI 仍连本机 daemon）。
+**Relay mode (optional):**
 
-## 测试
+- **The token is the only secret on the wire**, and it must travel over `wss`
+  (Cloudflare's edge TLS). Reaching a relay room proves possession of the token
+  (rooms are addressed by `sha256(token)`, so a leaked hash cannot be reversed
+  into a working URL)
+- **The relay is a trusted broker.** There is **no end-to-end encryption** — the
+  relay can see all plaintext traffic, including login cookies and storage. Deploy
+  it on a Cloudflare account you control, or accept that risk. E2EE (per-frame
+  encryption with a token-derived key) is a planned hardening step
+- Generate the token in the extension, copy it into the daemon's environment by
+  hand, and **never commit it**
+- Enabling relay mode does not change the local trust model of `/ctl` — the CLI
+  still connects to the daemon on your own machine
+
+## Tests
 
 ```bash
-cd owb-daemon
-node tests/smoke_test.js        # 60 项：协议/守护/编排（自起子进程，无需停 daemon）
-node tests/relay_test.js        # 10 项：中转模式集成（mock 中转 + 真 daemon）
-node tests/cli_test.js          # 13 项：owb CLI 接入面（命令映射/转发/错误模型）
-node tests/verify_replay_test.js # 11 项：离线验证 + 重放
-node tests/e2e_browser_test.js  # 68 项：真机端到端（headless Chromium + 真扩展）
-node tests/read_page_test.js    # 页面表达式单测（另有 7 个同类文件，共 101 项）
-
-cd ../owb-relay && node test/relay_test.mjs  # 14 项：中转 Durable Object 单元测试
+npm test          # smoke + CLI + slug + doc-example lint + doc-example run + HAR export
 ```
+
+Individual suites:
+
+```bash
+node owb-daemon/tests/smoke_test.js          # protocol / daemon / orchestration (spawns its own daemon)
+node owb-daemon/tests/cli_test.js            # the owb CLI surface: command mapping, forwarding, error model
+node owb-daemon/tests/slug_test.js           # filename slugs, including non-ASCII names
+node owb-daemon/tests/docs_examples_test.js  # every `owb ...` example in the skill resolves to a real command
+node owb-daemon/tests/docs_run_test.js       # side-effect-free skill examples actually execute
+node owb-daemon/tests/harexport_test.js      # HAR → replay / diff / assert
+node owb-daemon/tests/relay_test.js          # relay mode integration (mock relay + real daemon)
+node owb-daemon/tests/verify_replay_test.js  # offline verification + replay
+node owb-daemon/tests/e2e_browser_test.js    # end to end on a real browser (headless Chromium + the real extension)
+node owb-daemon/tests/read_page_test.js      # page-expression unit tests (several sibling files cover the rest)
+
+cd owb-relay && node test/relay_test.mjs     # relay Durable Object unit tests
+```
+
+The last two doc-example suites exist because of a specific failure: the commands
+the tests exercised and the commands the documentation taught had drifted apart,
+so documented examples could break while every test stayed green.
 
 ## License
 
