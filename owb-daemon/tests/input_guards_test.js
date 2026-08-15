@@ -83,4 +83,30 @@ const HAR = {
     JSON.stringify(bad.results[0]));
 }
 
+// ---- signer 死循环必须被超时打断，而不是挂死 daemon ----
+{
+  // daemon 是单进程：signer 里一个 while(true) 曾经能把它连同所有 WS 连接
+  // 永久挂死（5s timeout 只包住"求值 signer_code"，真正的 fn() 在宿主里跑）。
+  // 这条断言就是那个 DoS 的回归护栏——跑不过时它自己会卡住，也算报警。
+  const t0 = Date.now();
+  const hang = verify_signer(
+    "(input) => { while (true) {} }",
+    [{ id: "s1", input: {}, expected: { sig: "x" } }],
+  );
+  const elapsed = Date.now() - t0;
+  check("死循环 signer 被 vm 超时打断（不挂死进程）",
+    hang.ok === false && elapsed < 15000
+    && /timed out|Script execution/i.test(hang.results[0].error || ""),
+    `elapsed=${elapsed}ms err=${(hang.results[0] || {}).error}`);
+}
+
+// ---- 沙箱里要有签名算法常用的编码原语 ----
+{
+  const enc = verify_signer(
+    "(input) => ({ sig: btoa(String.fromCharCode(...new TextEncoder().encode(input.s))) })",
+    [{ id: "s1", input: { s: "hi" }, expected: { sig: "aGk=" } }],
+  );
+  check("沙箱提供 TextEncoder / btoa", enc.ok === true, JSON.stringify(enc.results[0]));
+}
+
 process.exitCode = summarize();

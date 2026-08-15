@@ -37,9 +37,53 @@ export function first_divergence(expected, computed) {
   return null;
 }
 
-/** 在独立 vm 上下文求值 signer_code（无 require/无 Node 全局，贴近纯算法环境）。 */
+const SIGNER_TIMEOUT_MS = 5000;
+
+/**
+ * 建沙箱上下文。
+ *
+ * 裸 Object.create(null) 里连 TextEncoder / btoa 都没有，而真实站点的签名算法
+ * 里 base64 和 UTF-8 编码基本是标配 —— 报错只有一句 "TextEncoder is not
+ * defined"，调用方分不清是自己代码写错了还是沙箱缺东西。补齐这几个编码原语。
+ *
+ * ⚠️ vm **不是安全边界**（Node 官方明示），signer_code 以 daemon 的权限运行。
+ * 在本地信任模型下这不额外放大风险——能连上 /ctl 的进程本来就能驱动整个浏览器
+ * ——但别把它当沙箱使，也别把不可信的第三方代码丢进来。
+ */
+function makeSignerContext() {
+  return vm.createContext({
+    TextEncoder, TextDecoder, URLSearchParams,
+    btoa: (s) => Buffer.from(String(s), "binary").toString("base64"),
+    atob: (s) => Buffer.from(String(s), "base64").toString("binary"),
+  });
+}
+
+/** 求值 signer_code，返回 { ctx, fn }。 */
 function evalSigner(signerCode) {
-  return vm.runInNewContext(signerCode, Object.create(null), { timeout: 5000 });
+  const ctx = makeSignerContext();
+  const fn = vm.runInContext(signerCode, ctx, { timeout: SIGNER_TIMEOUT_MS });
+  return { ctx, fn };
+}
+
+/**
+ * 调用 signer。**调用本身必须发生在 vm 里**——原来 5s timeout 只包住了
+ * "求值 signer_code" 这一步，真正的 fn(...) 在宿主里同步执行、零超时保护，
+ * 于是 signer 里一个 while(true) 或病态正则就能把单进程 daemon（连同它上面
+ * 所有 WS 连接）永久挂死。而 signer_code 恰恰是 AI 生成的、最不可信的输入。
+ *
+ * 结果经 JSON 往返回传：既避免把 vm realm 的对象漏进宿主，也正好是
+ * first_divergence 需要的形状。
+ */
+function callSigner(ctx, fn, argv) {
+  ctx.__owbFn = fn;
+  ctx.__owbArgv = JSON.stringify(argv ?? []);
+  const json = vm.runInContext(
+    "(() => { const r = __owbFn.apply(null, JSON.parse(__owbArgv));" +
+    "  return r === undefined ? null : JSON.stringify(r); })()",
+    ctx,
+    { timeout: SIGNER_TIMEOUT_MS },
+  );
+  return json === null || json === undefined ? null : JSON.parse(json);
 }
 
 /**
@@ -51,7 +95,7 @@ function evalSigner(signerCode) {
 export function dry_run_signer(signer_code, calls) {
   let probe;
   try {
-    probe = evalSigner(signer_code);
+    probe = evalSigner(signer_code).fn;
   } catch (e) {
     return { ok: false, error: "signer_code eval failed: " + e.message };
   }
@@ -62,8 +106,8 @@ export function dry_run_signer(signer_code, calls) {
     const id = (c && c.id) || `call-${i}`;
     const argv = Array.isArray(c && c.args) ? c.args : [c && c.args];
     try {
-      const fn = evalSigner(signer_code);
-      const computed = fn(...argv);
+      const { ctx, fn } = evalSigner(signer_code);
+      const computed = callSigner(ctx, fn, argv);
       return { id, ok: true, computed: computed === undefined ? null : computed };
     } catch (e) {
       return { id, ok: false, error: String(e && e.message ? e.message : e) };
@@ -90,7 +134,7 @@ export function verify_signer(signer_code, samples) {
   // 先验证 signer_code 能求值为函数
   let probe;
   try {
-    probe = evalSigner(signer_code);
+    probe = evalSigner(signer_code).fn;
   } catch (e) {
     return { ok: false, error: "signer_code eval failed: " + e.message };
   }
@@ -103,8 +147,8 @@ export function verify_signer(signer_code, samples) {
   for (const sample of samples) {
     let res;
     try {
-      const fn = evalSigner(signer_code);
-      const computed = fn(sample.input);
+      const { ctx, fn } = evalSigner(signer_code);
+      const computed = callSigner(ctx, fn, [sample.input]);
       res = { computed: computed === undefined ? null : computed };
     } catch (e) {
       res = { error: String(e && e.message ? e.message : e) };
