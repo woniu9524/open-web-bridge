@@ -650,17 +650,35 @@ export class Bridge {
           code: "BAD_ARGS", message: "evidence_write: path is required",
           retryable: false } };
       }
+      // BUG-114: content 缺省时原来走 String(content || "") → 写出一个**空文件**
+      // 还回 ok:true。取证归档最不该做的就是"成功地存了个空文件"——真出事时
+      // 那份证据已经没了。缺 content 跟缺 path 一样属于用法错误，明说。
+      if (args.content === undefined) {
+        return { ok: false, error: {
+          code: "BAD_ARGS",
+          message: "evidence_write: content is required (pass \"\" to write " +
+            "an intentionally empty file)",
+          retryable: false } };
+      }
       try {
         const content = args.content;
         let p;
         if (typeof content === "object" && content !== null) {
           p = this.store.write_json(args.path, content);
         } else {
-          // 布尔 true 写 "True"，其余 falsy 写 ""
-          const text = content === true ? "True" : String(content || "");
+          // BUG-114: 原来是 String(content || "")，于是 0 和 false 都被悄悄
+          // 写成空文件。布尔按 Python 风格写 True/False，其余原样字符串化。
+          const text =
+            content === true ? "True"
+            : content === false ? "False"
+            : content === null ? ""
+            : String(content);
           p = this.store.write_text(args.path, text);
         }
-        return { ok: true, data: { path: p } };
+        // 返回字节数，调用方不用再自己去 stat 一遍确认真的落盘了
+        let bytes;
+        try { bytes = fs.statSync(p).size; } catch (e) {}
+        return { ok: true, data: { path: p, bytes } };
       } catch (e) {
         return { ok: false, error: {
           code: "WRITE_FAILED",
