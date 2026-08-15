@@ -1,13 +1,14 @@
 ---
 name: owb
-description: Drive the user's own real browser with the `owb` command — read pages behind their existing logins, gather and cross-check information, fill forms, walk multi-step flows, debug their site, audit responsive/accessibility behavior, and capture or reverse-engineer network traffic. Use this whenever a task involves "go look at this page", "pull these pages together", "do this for me on that site", "my site's frontend is broken", "how is this request signed", or anything at all that needs a logged-in session or a real browser environment rather than a plain HTTP fetch.
+description: Open Web Bridge (OWB) — drive the user's own real browser with the `owb` command. Read pages behind their existing logins, gather and cross-check information, fill forms, walk multi-step flows, debug their site, audit responsive/accessibility behavior, and capture or reverse-engineer network traffic. Use this whenever the user mentions Open Web Bridge or OWB by name, or a task involves "go look at this page", "pull these pages together", "do this for me on that site", "my site's frontend is broken", "how is this request signed", or anything at all that needs a logged-in session or a real browser environment rather than a plain HTTP fetch.
 ---
 
-# owb — driving the user's real browser
+# owb (Open Web Bridge) — driving the user's real browser
 
-`owb` operates **the browser the user is using right now**: their logged-in
-accounts, their settings, their open tabs. That is why you can reach content that
-exists only behind a login, and complete actions that require an identity.
+`owb`, the Open Web Bridge CLI, operates **the browser the user is using right
+now**: their logged-in accounts, their settings, their open tabs. That is why you
+can reach content that exists only behind a login, and complete actions that
+require an identity.
 
 For the same reason, **every step lands on a real person's account** and **they may
 be using this browser beside you**. Read freely; ask before changing anything;
