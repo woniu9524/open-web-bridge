@@ -3,7 +3,7 @@
 Notable changes per release. Dates are release dates; the repository history
 has the full detail.
 
-## Unreleased
+## 1.1.0 — 2026-08-16
 
 ### Breaking
 
