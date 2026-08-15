@@ -1,17 +1,17 @@
-# owb 调试与逆向线
+# owb 调试线
 
 SKILL.md 讲怎么用浏览器**干活**，这份讲怎么用它**查问题**：
 接口为什么慢、请求为什么 403、这个签名参数是谁算的、改版有没有破坏老接口。
 
 五级台阶，**从上往下用，能在上一级解决就别下沉**：
 
-| 台阶            | 命令                                | 回答什么问题                |
-| ------------- | --------------------------------- | --------------------- |
-| ① 看请求         | `net start/list/detail/initiator` | 发了什么、多慢、多大、谁发起的       |
-| ② 存证据         | `har start/save` + `to-replay/diff/assert` | 留档、转成脱离浏览器的重放脚本、回归比对  |
-| ③ 挂钩子         | `hook preset/fn` + `hook logs`    | 某个函数被调了几次、入参出参是什么     |
-| ④ 下断点         | `debug break-xhr/break-fn/frames` | 请求发出的**那一刻**，闭包里有什么变量 |
-| ⑤ 读/改代码       | `script search/source/patch`、`oracle`、`verify signer` | 算法本身长什么样、能不能脱离页面复现    |
+| 台阶      | 命令                                                    | 回答什么问题                |
+| ------- | ----------------------------------------------------- | --------------------- |
+| ① 看请求   | `net start/list/detail/initiator`                     | 发了什么、多慢、多大、谁发起的       |
+| ② 存证据   | `har start/save` + `to-replay/diff/assert`            | 留档、转成脱离浏览器的重放脚本、回归比对  |
+| ③ 挂钩子   | `hook preset/fn` + `hook logs`                        | 某个函数被调了几次、入参出参是什么     |
+| ④ 下断点   | `debug break-xhr/break-fn/frames`                     | 请求发出的**那一刻**，闭包里有什么变量 |
+| ⑤ 读/改代码 | `script search/source/patch`、`oracle`、`verify signer` | 算法本身长什么样、能不能脱离页面复现    |
 
 ## ① 看请求
 
@@ -87,11 +87,11 @@ owb har assert --path har/排查记录.har --args '{"assertions":[
 
 三个现成预设，覆盖绝大多数"参数是怎么拼出来的"场景：
 
-| 预设       | 钩住什么                             |
-| -------- | -------------------------------- |
+| 预设       | 钩住什么                                          |
+| -------- | --------------------------------------------- |
 | `xhr`    | `XMLHttpRequest` 的 open/send/setRequestHeader |
-| `fetch`  | `fetch()` 的入参与响应                 |
-| `crypto` | `btoa`/`atob`/`JSON.stringify` 这类编解码原语 |
+| `fetch`  | `fetch()` 的入参与响应                              |
+| `crypto` | `btoa`/`atob`/`JSON.stringify` 这类编解码原语        |
 
 ```bash
 owb hook preset crypto            # ⚠️ 默认会刷新页面（见下）
@@ -251,5 +251,4 @@ owb task end && owb tab close-group
 - **改完扩展代码用 `owb reload-ext`**，不用手点 chrome://extensions。但如果改出了
   语法错误，扩展会彻底起不来（`NO_EXTENSION` 且心跳唤不醒）——那时只能去浏览器里
   看扩展的报错。
-- 逆向类操作只用于**用户自己的站点、或用户明确授权排查的站点**。绕过风控、
-  破解他人系统不做。
+- 
