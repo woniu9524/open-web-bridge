@@ -1705,16 +1705,59 @@ async function resolveTabId(args) {
       false,
     );
   }
+  // BUG-111: 上面那条护栏只在「已附着多个 tab」时才拦，而最危险的场景根本
+  // 不附着任何 tab —— `navigate {new_tab:true, active:false}` 在后台开页，
+  // 活动 tab 仍是用户自己那个，后续无 tabId 的 read_page/evaluate 于是
+  // 静默读了用户的私人页面：命令全部「成功」，数据全是别人的。
+  // 判据用「有没有活动任务组、且组里确实有 tab」：task_begin 是调用方
+  // 明确声明过"我在这个任务里干活"，此时落到非 OWB 管理的 tab 上几乎必然是
+  // 拿错了目标。没有活动任务时行为不变（"就是要操作用户当前这一页"仍然直接可用）。
+  if (currentTask && currentTask.groupId != null) {
+    let taskTabs = [];
+    try {
+      taskTabs = await chrome.tabs.query({ groupId: currentTask.groupId });
+    } catch (e) {
+      taskTabs = [];
+    }
+    if (taskTabs.length && !taskTabs.some((t) => t.id === tab.id)) {
+      if (!(await isOwbManagedTab(tab))) {
+        throw new ToolError(
+          "AMBIGUOUS_TAB",
+          `no tabId given: the active tab (${tab.id}) is the user's own page, ` +
+            `but task "${currentTask.title}" has ${taskTabs.length} tab(s) of ` +
+            `its own (${taskTabs.map((t) => t.id).join(", ")}). Refusing to ` +
+            "guess — pass tabId explicitly. If you opened the page with " +
+            "active:false it is NOT the active tab; use the tabId that " +
+            "navigate returned.",
+          false,
+        );
+      }
+    }
+  }
   return tab.id;
 }
 
 // ---------------------------------------------------------------------------
 // OWB 标签分组：
 // 只给【桥自己创建的 tab】（navigate new_tab）编组，用户已有的 tab 绝不动。
-// 价值：视觉上一眼区分分析现场 + close_group 一键清场。
+// 价值：视觉上一眼区分分析现场 + close_group 一键清场 + 作为 close_tab 的
+// 安全白名单（不在 OWB 组里的 tab 一律拒关，防止误关用户自己的 tab）。
+//
+// UX-235: 这个组原名「OWB 分析」，是「没有活动任务时」的兜底落点。问题在于
+// 它既是默认落点、又没有生命周期（task 有 begin/end，它没有），于是阻力最小
+// 的路径通向最差的结构：不声明任务就一直往同一个桶里堆，几十个互不相关的
+// tab 混在一起，收尾只能一个个关。实测一晚上堆到 25 个。
+// 改名为「OWB 临时」把定位摆正——它是未归类暂存区，不是工作区；多步任务
+// 应该 task_begin 之后进 "task: 标题" 组。navigate 里配套返回 taskHint，
+// 让「你正在往杂物抽屉里堆东西」这件事可见（见该处注释）。
 // ---------------------------------------------------------------------------
 
-const OWB_GROUP_TITLE = "OWB 分析";
+const OWB_GROUP_TITLE = "OWB 临时";
+// 改名前建的组里可能还有 tab，close_tab/close_group 必须继续认旧名，
+// 否则用户浏览器里的遗留 tab 会突然变成「非 OWB 管理」而关不掉（要 force）。
+const OWB_GROUP_TITLE_LEGACY = "OWB 分析";
+const isOwbTempGroupTitle = (t) =>
+  t === OWB_GROUP_TITLE || t === OWB_GROUP_TITLE_LEGACY;
 const OWB_GROUP_COLOR = "blue";
 
 // 通用命名组：按标题找已有组或新建（OWB 分析 / task 任务 / handoff 交接共用）
@@ -1731,6 +1774,22 @@ async function ensureNamedGroup(tabId, title, color) {
 
 async function ensureOwbGroup(tabId) {
   return ensureNamedGroup(tabId, OWB_GROUP_TITLE, OWB_GROUP_COLOR);
+}
+
+// 这个 tab 是不是 OWB 自己管的（暂存组 / task 组 / 交接组）？
+// close_tab 的护栏和 resolveTabId 的歧义判定共用同一套判据。
+async function isOwbManagedTab(tab) {
+  if (!tab || tab.groupId == null || tab.groupId < 0) return false;
+  try {
+    const title = (await chrome.tabGroups.get(tab.groupId)).title || "";
+    return (
+      isOwbTempGroupTitle(title) ||
+      title === HANDOFF_GROUP_TITLE ||
+      title.startsWith("task: ")
+    );
+  } catch (e) {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2604,6 +2663,7 @@ const tools = {
     // new_tab：桥自己开的 tab 才编入 OWB 组；默认复用当前 tab（不动用户的现场）
     let tabId = null;
     let created = false;
+    let openedInBackground = false;
     if (args.new_tab) {
       const t = await chrome.tabs.create({
         url: args.url,
@@ -2611,6 +2671,7 @@ const tools = {
       });
       tabId = t.id;
       created = true;
+      openedInBackground = args.active === false;
     } else {
       tabId = await resolveTabId(args);
     }
@@ -2636,12 +2697,24 @@ const tools = {
     readPageSnapshots.delete(tabId);
     scriptRegistryMap.delete(tabId);
     let groupId = null;
+    // UX-235: 无任务上下文时落进「OWB 临时」暂存组。这里顺带数一下组里现有
+    // 多少 tab，回传给调用方——不改变行为，只是把「你正在往杂物抽屉里堆
+    // 东西」变成可见信息。数字自己会涨，涨起来就是该 task_begin 的信号。
+    let tempGroupCount = 0;
     if (created) {
       try {
-        // 有任务上下文时，桥新建的 tab 编到 task 组；否则照旧 OWB 分析组
-        groupId = currentTask
-          ? await ensureTaskGroup(tabId)
-          : await ensureOwbGroup(tabId);
+        // 有任务上下文时，桥新建的 tab 编到 task 组；否则进「OWB 临时」组
+        if (currentTask) {
+          groupId = await ensureTaskGroup(tabId);
+        } else {
+          groupId = await ensureOwbGroup(tabId);
+          try {
+            const inGroup = await chrome.tabs.query({ groupId });
+            tempGroupCount = inGroup.length;
+          } catch (e) {
+            // 数不到就不提示，不影响导航
+          }
+        }
       } catch (e) {
         // 编组失败不阻断导航（部分环境无 tabGroups UI）
       }
@@ -2751,6 +2824,28 @@ const tools = {
     if (httpErrorHint) out.httpErrorHint = httpErrorHint;
     // BUG-86: 附着失败必须在 navigate 就说破，别等到 read_page 才撞墙
     if (attachHint) out.attachHint = attachHint;
+    // UX-235: 无任务上下文时提示这条 tab 进了暂存组、组里已经堆了几个。
+    // 一次性看一眼没关系（这正是暂存组存在的意义），但多步任务应该先
+    // task_begin，这样 tab 进独立的 "task: 标题" 组，收尾一条命令全清。
+    // BUG-111: active:false 开的是后台 tab，它**不是**活动 tab，后续不带
+    // tabId 的调用会打到用户自己那一页上去（静默读错页面）。在创建的这一刻
+    // 就把要传的 tabId 说清楚，比事后让人去猜便宜得多。
+    if (openedInBackground) {
+      out.backgroundTabHint =
+        `opened in the background: tab ${tabId} is NOT the active tab. ` +
+        `Subsequent calls without an explicit tabId resolve to the ACTIVE ` +
+        `tab (the user's own page) — pass tabId: ${tabId} to read_page / ` +
+        "evaluate / wait_for / click, or they will silently act on the " +
+        "wrong page.";
+    }
+    if (tempGroupCount > 0) {
+      out.taskHint =
+        `no active task — this tab went into the "${OWB_GROUP_TITLE}" ` +
+        `scratch group (${tempGroupCount} tab(s) there now). Fine for a ` +
+        "one-off look. For multi-step work call task_begin first: new tabs " +
+        'then group under "task: <title>" and task_end + close_group ' +
+        "cleans the whole task up in one shot.";
+    }
     return out;
   },
 
@@ -2853,7 +2948,7 @@ const tools = {
     const all = await chrome.tabGroups.query({});
     const wanted = all.filter((g) => {
       const t = g.title || "";
-      if (t === OWB_GROUP_TITLE) return true;
+      if (isOwbTempGroupTitle(t)) return true; // 含改名前的旧组名
       if (t.startsWith("task: ")) return args.include_tasks !== false;
       if (t === HANDOFF_GROUP_TITLE) return args.include_handoff === true;
       return false;
@@ -5190,7 +5285,7 @@ const tools = {
           const group = await chrome.tabGroups.get(tab.groupId);
           const title = group.title || "";
           managed =
-            title === OWB_GROUP_TITLE ||
+            isOwbTempGroupTitle(title) || // 含改名前的旧组名
             title === HANDOFF_GROUP_TITLE ||
             title.startsWith("task: ");
         } catch (e) {}

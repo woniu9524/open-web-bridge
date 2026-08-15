@@ -1,6 +1,6 @@
 ---
 name: owb
-description: 用 owb 命令驱动用户自己的浏览器——带着用户已登录的账号去读页面、查资料、填表、走流程、调试网站、审计适配。当任务需要「打开某个网页看看」「把这几页内容整理一下」「帮我在某站上操作」「我的网站前端出问题了」，或任何需要用户登录态/真实浏览器环境才能完成的事情时使用。
+description: 用 owb 命令驱动用户自己的浏览器——带着用户已登录的账号去读页面、查资料、填表、走流程、调试网站、审计适配、抓包逆向。当任务需要「打开某个网页看看」「把这几页内容整理一下」「帮我在某站上操作」「我的网站前端出问题了」「这个请求的签名是怎么算的」，或任何需要用户登录态/真实浏览器环境才能完成的事情时使用。
 ---
 
 # owb — 驱动用户的真实浏览器
@@ -8,10 +8,25 @@ description: 用 owb 命令驱动用户自己的浏览器——带着用户已�
 `owb` 操作的是**用户此刻正在用的那个浏览器**：他登录过的账号、他的设置、他开着的标签页。
 所以你能看到只有登录后才存在的内容，也能替他完成需要身份的操作。
 
-同样因此：**你的每一步都作用在真人的账号上**。读可以随便读，改要先问。
+同样因此：**你的每一步都作用在真人的账号上**，而且**他很可能正在旁边同时用
+这个浏览器**。读可以随便读，改要先问；开页面用新标签页，别顶掉他正看的东西。
 
-以下所有做法都在 **217 个真实站点、六轮以上完整跑动**（累计 1300+ 站次）中
-验证过，标 ⚠️ 的是实测踩过的坑。
+## 这份文档怎么用
+
+**赶时间只看三节**：「开始之前」→「一次任务的完整形状」→「核心循环」。
+
+本文件只讲主干。**四份附文件在同一个目录里，按需读**：
+
+| 文件               | 什么时候读它                                        |
+| ---------------- | --------------------------------------------- |
+| `reference.md`   | 查某条命令有哪些参数、默认值、上限、返回字段——**写复杂调用前先查，别猜参数名**   |
+| `debugging.md`   | 调试/逆向：抓包、HAR 加工与断言、hook、断点、脚本搜索改写、离线验签、TLS 重放 |
+| `relay.md`       | 用户问「能不能远程控制我的浏览器」「中转模式怎么配」，或 `daemon-status` 显示 relay 模式 |
+| `field-notes.md` | 实测踩过的长尾怪现象详情（下面「现实环境」一节是症状索引，对上号了再去读细节）      |
+
+**命令没写到的怎么办**：本文件覆盖不了全部 82 条命令。
+`owb help` 看全部 16 组，`owb help <组名>` 看组内详情，
+`owb call <底层工具名> --args '<json>'` 直调任意底层工具。**别猜命令名，去查。**
 
 ## 开始之前
 
@@ -23,6 +38,77 @@ owb          # 自检
 - `✗ 扩展未连接` → **停下来告诉用户**点浏览器工具栏的扩展图标看状态。别硬调工具，
   只会一直 `NO_EXTENSION`
 - 命令不存在 → `npm i -g open-web-bridge` 然后 `owb setup`
+- 第一条命令跑出 `[owb] daemon 未运行，自动拉起…`（stderr）**不是错误**，
+  是 CLI 在拉 daemon，等它连上就好，别报给用户当故障
+
+自检里的「模式」有两种：**本地模式**（默认，daemon 和浏览器在同一台机器）
+和**中转模式**（浏览器在用户机器上、agent 在别处，经公网中转配对）。
+本地模式什么都不用配。中转模式的配置引导、能力差异、故障排查全在 `relay.md`。
+
+## 一次任务的完整形状
+
+**这是最该先看的一节。** 单条命令怎么用都写在后面，但如果不知道一次工作从哪
+开始、到哪结束，你会把几十个互不相关的标签页堆进同一个地方，收尾只能一个个
+关——实测就这么堆到过 25 个。
+
+多步任务（**只要不止"打开一个页面看一眼"，就算多步**）标准四步：
+
+```bash
+owb task begin "竞品定价调研"      # ① 开任务：建一个 task: 竞品定价调研 分组
+owb open <url> --new-tab true      # ② 干活：新开的 tab 自动进这个组
+owb page / click / fill / wait     #    …正常操作
+owb task end                       # ③ 收档：停录制、归档、返回产出了哪些 tab
+owb tab close-group                # ④ 清场：一条命令关掉本任务全部 tab
+```
+
+每一步都有**它自己的理由**，不是仪式：
+
+| 步骤                | 不做会怎样                                  |
+| ----------------- | -------------------------------------- |
+| `task begin`      | 所有 tab 涌进公共暂存组，跟别的任务、跟用户自己的 tab 混作一团   |
+| `--new-tab true`  | **直接顶掉用户当前正在看的页面**——这是真人的浏览器，不是你的      |
+| `task end`        | 录制不停、任务不归档；`flow save` 也会报 `NEED_TASK` |
+| `tab close-group` | 标签页无限堆积，越堆越难分清哪个是谁的                    |
+
+⚠️ **`task end` 不关标签页。** 它归档、清任务上下文、**报告**产出了哪些
+tabId，但页面还开着（有时你就是想留着看结果）。真要清场必须再来一条
+`tab close-group`。"end"这个词的字面预期和实际行为不一致，别想当然。
+
+`tab close-group` 一次关掉「OWB 临时」+ 全部「task:」组；**交接组默认保留**
+（那是用户正在操作的现场），要一起关得显式传 `--args '{"include_handoff":true}'`。
+反过来只想关暂存组、留着 task 组，传 `--args '{"include_tasks":false}'`。
+
+一次性查看不用起任务，直接 `owb open <url> --new-tab true` 就行，tab 会落进
+「OWB 临时」暂存组。返回里的 `taskHint` 会告诉你那个组里现在堆了几个——**数字
+在涨就是该 `task begin` 的信号**。
+
+⚠️ **扩展被回收会丢任务上下文。** MV3 的 service worker 空闲会被 Chrome 回收
+（见后文"扩展偶尔会掉线"），重启后 `currentTask` 没了：**组还在，但之后新建的
+tab 不再进那个组**，会散落回「OWB 临时」。症状是任务做到一半 tab 开始跑到别处
+去。发现了就重新 `task begin`（同名会复用同一个组）。
+
+## 你的 tab 和用户的 tab
+
+OWB 开在**用户此刻正在用的浏览器**里，所以浏览器里永远同时存在两批标签页。
+分不清这两批，轻则清场时误关用户的东西，重则**读错页面还不自知**。
+
+| 分组           | 颜色  | 谁的        | 何时产生                           |
+| ------------ | --- | --------- | ------------------------------ |
+| `task: <标题>` | 青   | 你的        | `task begin` 之后 `--new-tab` 建的 |
+| `OWB 临时`     | 蓝   | 你的        | 没有活动任务时 `--new-tab` 建的（暂存区）    |
+| `✋ OWB 等你操作` | 橙   | **交给用户的** | `owb handoff` 之后（验证码/登录现场）     |
+| 无分组          | —   | **用户自己的** | 用户自己开的，你绝不该动                   |
+
+**护栏**：`owb tab close` 只允许关前三类；关无分组的 tab 会直接报
+`FORBIDDEN` 拒绝。这是保护不是故障——撞到了先想"我是不是拿错 tabId 了"，
+而不是急着加 `--force true`。
+
+⚠️ **别假设一个 tab 还是你上次留下的那个。** 用户随时可能在同一个 tab 里
+改开别的网址，其他自动化也可能复用它。实测踩过：隔了一段时间后拿旧 tabId 去
+`eval` 读棋局，返回的却是完全无关的搜索结果页——**命令全部"成功"，数据全是错
+的**，这种错比报错难发现得多。隔轮之后要复用 tabId，先 `owb tab list`（或
+`owb tab find --url-pattern "<正则>"` 直接按 URL 找）确认它现在是什么，
+或者干脆开新的。
 
 ## 核心循环：看 → 指 → 动
 
@@ -30,12 +116,52 @@ owb          # 自检
 不用猜 CSS 选择器。
 
 ```bash
-owb open https://example.com
+owb open https://example.com --new-tab true   # ← 别省，见下
 owb page                      # @e1 @e2 … 各自带角色、文字、href
 owb fill @e3 "关键词"
-owb click @e5
+owb keys --keys Enter         # 提交：按真实回车键
 owb wait --text "结果"         # 等就绪，别 sleep
+owb click @e5
 ```
+
+⚠️ **`--new-tab true` 不是可选的。** 省掉它 = 在用户当前那个标签页里直接
+跳转，把他正看的东西顶掉。只有你**明确就是要操作当前这个页面**时才省。
+
+💡 **`--active false` 让新 tab 在后台打开**，不抢用户的屏幕焦点。批量开一堆
+页面来读时尤其该带上——用户不会被你的任务一次次弹走。
+（注意：后台 tab 有时会触发"没在渲染"的空快照，见后文 `renderNote`。）
+
+🚨 **但后台 tab 不是活动 tab，后面每一条命令都必须显式 `--tab`。**
+`page`/`eval`/`wait`/`click` 不给 `--tab` 时用的是**活动**标签页——你刚开的
+后台 tab 不是它，**用户自己正在看的那一页才是**。省掉 `--tab` 的后果不是报错，
+是**静默读了用户的私人页面还当成任务数据**（实测：`open` 返回 tabId A，
+紧接着的 `page` 读到的是用户的内部后台系统）。
+
+```bash
+owb open <url> --new-tab true --active false   # → 返回里记下 tabId
+owb page --tab <刚返回的 tabId>                 # ← 每一条都要带
+```
+
+`open` 的返回里有 `backgroundTabHint`，会把该传的 tabId 直接写给你。
+有活动任务时忘了带 `--tab` 会报 `AMBIGUOUS_TAB`（护栏，见「出错怎么办」），
+但**没有活动任务时没有这层保护**——这也是多步任务一定要先 `task begin` 的理由之一。
+
+### 键盘：`owb keys`
+
+`fill` 只把值塞进输入框，**不产生按键事件**。要提交搜索、关弹窗、走快捷键，
+都得用 `keys`：
+
+```bash
+owb keys --keys Enter                 # 提交
+owb keys --keys Escape                # 关弹窗/退出全屏
+owb keys --keys "ArrowDown ArrowDown Enter"   # 空格分隔，依次按
+owb keys --keys "Ctrl+a"              # 修饰键组合（Ctrl|Alt|Shift|Meta）
+owb keys --text "逐字输入的文本"        # 走 insertText，不产生逐键事件
+```
+
+⚠️ **`--text` 和 `--keys` 二选一，同时给会报 `BAD_ARGS`**。要先打字再回车就
+调两次。命名键：Enter Tab Escape Backspace Delete Home End PageUp PageDown
+方向键 Space F1–F12，单个字符和组合键也认。
 
 ### 快照怎么读
 
@@ -55,6 +181,8 @@ owb wait --text "结果"         # 等就绪，别 sleep
   都会标出来，`<select>` 会列出可选 `values=[...]`。
 - `iframes` 字段列出页面里的 iframe，`shadowRoots` 说明有多少内容来自 Web Component
   （快照会自动进 open shadow root，不会整片丢失）。
+- iframe 里的元素要操作，先 `owb frames` 看清单，再 `owb eval --frame-pattern <正则>`
+  定向求值；`contextId:null` 的是跨域框架，求值不了。
 
 ### ⚠️ 编号会过期
 
@@ -67,7 +195,7 @@ owb wait --text "结果"         # 等就绪，别 sleep
 `truncated: true` 和 `omittedNodes`。**看到就调大或缩小范围**：
 
 ```bash
-owb page --max-nodes 1200 --max-chars 60000    # 要全量
+owb page --max-nodes 1200 --max-chars 60000    # 要全量（max-nodes 硬顶 2000）
 owb page --mode article                         # 只要正文（文章页）
 ```
 
@@ -88,11 +216,11 @@ owb page --since-last true
 
 ## 三种读法，别用错
 
-| 模式 | 用在哪 | 返回字段 |
-|---|---|---|
-| `owb page`（默认 snapshot） | 要**操作**页面：找按钮、填表、点链接 | `lines` |
+| 模式                        | 用在哪                      | 返回字段      |
+| ------------------------- | ------------------------ | --------- |
+| `owb page`（默认 snapshot）   | 要**操作**页面：找按钮、填表、点链接     | `lines`   |
 | `owb page --mode article` | **文章页**读正文，输出干净 markdown | `content` |
-| `owb page --mode text` | 列表页、结构不规则的页面，要全部文字 | `text` |
+| `owb page --mode text`    | 列表页、结构不规则的页面，要全部文字       | `text`    |
 
 💡 **三种模式都有 `text` 字段**——它是各模式主字段的别名。写脚本处理输出时
 优先读 `text`，就不用按模式切字段名。
@@ -100,7 +228,7 @@ owb page --since-last true
 ⚠️ **列表页/论坛首页用 article 会返回 0 字**——它们本来就没有"正文"，这是正确行为
 不是故障（V2EX、牛客、各种榜单页都是如此）。空返回时看 `reason` 字段，会说明原因。
 
-## 等待：用 wait，不要用 sleep
+## 等待与超时
 
 ```bash
 owb wait --selector ".result-item"      # 等元素出现
@@ -109,9 +237,27 @@ owb wait --url-pattern "search"         # 等跳转
 owb wait --network-idle true            # 等请求停下（SPA 首选）
 ```
 
+四选一，**同时给两个会报 `BAD_ARGS`**。别用 sleep。
+
 ⚠️ **SPA 站点 `open` 返回 `loadCompleted:true` 不代表内容渲染完了**。实测澎湃新闻
 2.3 秒就返回完成，但快照只有 6 个元素。遇到快照异常少，先
 `owb wait --network-idle true` 再读一次。
+
+### ⚠️ 三层超时，别搞混（这里最容易白费功夫）
+
+| 哪一层        | 参数                | 默认                                        | 上限                       |
+| ---------- | ----------------- | ----------------------------------------- | ------------------------ |
+| CLI 等 ctl 结果 | `--timeout <秒>`   | 120                                       | 300                      |
+| 工具内部等待     | `--timeout-ms <毫秒>` | `open` 30000 / `wait` **10000** / `wait-user` 280000 | `wait` 110000            |
+| 单条 CDP 调用  | 无                 | **30 秒**                                  | **硬编码，任何参数都改不了**         |
+
+- ⚠️ **`--timeout` 不会传给工具**，它只放宽 CLI 等结果的那一层。想让 `owb open`
+  等一个慢站超过 30 秒，写 `--timeout-ms 60000`；写 `--timeout 60` **毫无效果**。
+- ⚠️ **`owb wait` 默认只等 10 秒**，不是"一直等"。等慢站要显式 `--timeout-ms 60000`。
+- ⚠️ 工具内部等待超过 110 秒时，要**同时**加 `--timeout` 放宽 CLI 层，否则先撞上
+  120 秒信封超时（报 `ctl call timeout`）。`wait-user` 是唯一例外，CLI 会自动放宽。
+- ⚠️ `owb shot`、`owb eval` 撞到的 30 秒是 CDP 层硬超时，**调参数没用**——
+  那是另一类病，见下面「`shot` 超时」。
 
 ## 常见任务
 
@@ -120,7 +266,7 @@ owb wait --network-idle true            # 等请求停下（SPA 首选）
 用户的登录态就在浏览器里，直接开：
 
 ```bash
-owb open <文章 URL>
+owb open <文章 URL> --new-tab true
 owb page --mode article
 ```
 
@@ -128,13 +274,12 @@ owb page --mode article
 
 ### 读评论区 / 论坛讨论串
 
-评论、回帖这类内容**不是文章正文**——`--mode article` 认不出来，只会返回 0 字
-（这是正确行为，见上表警告）；默认 `snapshot` 只画结构（谁在几分钟前发的、
-点赞/回复链接），同样看不到说了什么。两个都试了才想到用 `text` 模式就晚了，
+评论、回帖这类内容**不是文章正文**——`--mode article` 认不出来，只会返回 0 字；
+默认 `snapshot` 只画结构（谁在几分钟前发的、点赞/回复链接），同样看不到说了什么。
 **评论串直接跳过 snapshot/article，一步到位用 text**：
 
 ```bash
-owb open https://news.ycombinator.com/item?id=<id>
+owb open https://news.ycombinator.com/item?id=<id> --new-tab true
 owb page --mode text        # 实测：整串评论正文都在，snapshot/article 都是空的
 ```
 
@@ -142,16 +287,9 @@ owb page --mode text        # 实测：整串评论正文都在，snapshot/artic
 
 ### 跨站汇总 / 交叉验证
 
-真正有价值的用法。例：查一篇论文有没有可用的开源实现——
-
-```bash
-owb open https://arxiv.org/abs/XXXX
-owb eval '<抓摘要和页面里的代码链接>'
-owb open https://github.com/<抓到的仓库>
-owb eval '<读 star / 最近提交时间>'
-```
-
-结论（"代码是否真实存在、仓库活不活跃"）必须跨站才能得出，这是单站抓取做不到的。
+真正有价值的用法：arxiv 论文页抓到仓库链接 → 开 GitHub 读 star/最近提交 →
+得出"代码是否真实存在、仓库活不活跃"。这种结论必须跨站才能得出，单站抓取做不到。
+配合 `task begin` 把这一串 tab 收在一个组里。
 
 ### 结构化提取用 eval
 
@@ -172,70 +310,41 @@ owb eval 'JSON.stringify([...document.querySelectorAll(".item")].slice(0,20).map
 
 ### `click` 报成功但页面看起来什么都没发生
 
-`click` 走的是 `element.click()`（脚本触发，`isTrusted:false`）；`click-mouse`
-走真实 CDP 鼠标事件（`isTrusted:true`）。多数网站两者效果一样，但**有些站的
-自定义交互组件会读 `event.isTrusted`，只认真实事件**——`click` 在这类元素上
-会稳定复现"DOM 属性确实变了、但应用自己的状态没反应"：NYT Connections 选词卡
-就是这样，底层是个 `visually-hidden` 的原生 `<input type="checkbox">`，
-`click()` 后 `checked` 属性真的变成了 `true`，但格子不会高亮、"Submit"
-按钮也不会解锁——只有 `click-mouse` 点同一个 ref 才会让游戏自己的状态真正
-更新。Reddit 上点"分享"卡片、外链卡片时也遇到过同样的静默无效。
+`click` 走 `element.click()`（脚本触发，`isTrusted:false`）；`click-mouse` 走真实
+CDP 鼠标事件（`isTrusted:true`）。多数网站两者一样，但**有些自定义交互组件会读
+`event.isTrusted`，只认真实事件**——症状是"DOM 属性确实变了、应用自己的状态没
+反应"。实测 NYT Connections 选词卡：`click()` 后底层 checkbox 的 `checked` 真的
+变成 `true`，但格子不高亮、Submit 不解锁，换 `click-mouse` 点同一个 ref 才生效。
+Reddit 的分享/外链卡片也一样。
 
-判断依据：`click` 报了 `clicked:true` 却没有预期的视觉/状态变化（截图确认，
-别只信返回值），换 `click-mouse` 重试。反过来，`click` 更快、没有光标动画，
-普通表单/按钮优先用它，遇到这个具体症状再升级。
+判断依据：`click` 报了 `clicked:true` 却没有预期的视觉变化（**截图确认，别只信
+返回值**），换 `click-mouse` 重试。普通表单/按钮仍优先 `click`，它更快。
 
-⚠️ **`checked`/`aria-*` 这类底层 DOM 属性不能作为"选中成功"的证据**——它们
-可能被 `click()` 正常改动，但应用自己的状态（决定按钮是否可用、格子是否
-高亮）是另一套东西，两者可能脱节。真要确认，看视觉（截图）或看功能性的
-副作用（按钮解锁了没有），别只查 DOM 属性。
+⚠️ **`checked`/`aria-*` 不能作为"选中成功"的证据**——它们可能被 `click()` 正常
+改动，但应用自己的状态是另一套东西，两者可能脱节。看视觉或看功能性副作用
+（按钮解锁了没有），别只查 DOM 属性。
 
 ### 拖拽 / 画布绘图（canvas、看板、滑块）
 
-`click` / `click-mouse` 都是"落点即抬"，模拟不了拖拽——canvas 画图、看板卡片
-拖动排序、滑块、图片裁剪框都需要真正的 mousedown → 移动 → mouseup 序列。
-`owb cdp` 逃生舱直发三条 `Input.dispatchMouseEvent` 就够，实测在 Excalidraw
-上画矩形一次成功：
+`click` / `click-mouse` 都是"落点即抬"，模拟不了拖拽。**先试两次 `click-mouse`**
+（点起点、点终点）——实测 chess.com 的棋盘这样就够了。确认站点不支持点选，
+再上 `owb cdp` 三段式 `Input.dispatchMouseEvent`（mousePressed → mouseMoved →
+mouseReleased），实测 Excalidraw 画矩形、Google 地图平移都可行。
 
-```bash
-owb cdp --args '{"method":"Input.dispatchMouseEvent","params":
-  {"type":"mousePressed","x":300,"y":250,"button":"left","buttons":1,"clickCount":1}}'
-owb cdp --args '{"method":"Input.dispatchMouseEvent","params":
-  {"type":"mouseMoved","x":500,"y":400,"button":"left","buttons":1}}'
-owb cdp --args '{"method":"Input.dispatchMouseEvent","params":
-  {"type":"mouseReleased","x":500,"y":400,"button":"left","buttons":0,"clickCount":1}}'
-```
-
-⚠️ 中间的 `mouseMoved` 必须带 `buttons:1`（表示左键仍按住），否则页面收到的是
-"没按键的移动"，很多拖拽实现靠这个字段判断是否在拖——漏了这个参数，视觉上
-光标动了但元素纹丝不动。canvas 画图这类场景 `owb page` 的语义快照看不到
-任何东西（canvas 内容不是 DOM），只能靠 `owb shot` 截图确认画没画上。
-
-同样的三段式在 Google 地图这类 WebGL 瓦片地图上一样能用来拖动平移视野，
-实测成功；多试几个 `mouseMoved` 中间点（而不是只有起止两点）让轨迹更连续，
-拖拽实现更容易识别成真的在拖。⚠️ 但如果松手（`mouseReleased`）那一点正好
-落在一个带标签的兴趣点（地名、门店图标）上，地图会把这次操作同时当成
-"点了那个点"，弹出信息卡——这不是 bug，是地图自己用移动距离/轨迹分辨
-"拖拽"和"点击"，鼠标事件类型上看不出区别。只想纯平移、不想意外弹窗时，
-让终点落在空白区域（比如水面、空地），别正好停在图钉或文字标签上。
-
-⚠️ 不是所有棋盘/网格类界面都需要完整拖拽序列——先试**两次 `click-mouse`**
-（点起点选中，再点终点落子），比直接上三段式 `Input.dispatchMouseEvent`
-更简单。实测 chess.com 的棋盘就是这样：点一下棋子选中，再点一下目标格，
-跟真实鼠标拖棋子放下的效果完全一样，走法正确记谱。只有确认站点**不**支持
-点选（选中后目标格没有高亮提示、点了没反应）才需要升级成完整的
-mousedown→move→mouseup。
+⚠️ 中间的 `mouseMoved` **必须带 `buttons:1`**，漏了就是"光标动了元素没动"。
+canvas 内容不是 DOM，`owb page` 看不见，只能 `owb shot` 确认。
+**完整命令模板和地图类的坑在 `field-notes.md`。**
 
 ### 慢站提速
 
 `open` 默认等页面完全加载（所有图片、脚本）。只是要读内容的话，
 `--wait-until domcontentloaded` 明显更快，实测内容不减：
 
-| 站点 | 默认 | domcontentloaded |
-|---|---|---|
-| 开源中国 | 7.7s | **2.4s** |
-| CSDN | 9.6s | **5.0s** |
-| 新浪新闻 | 18.7s | **12.1s** |
+| 站点   | 默认    | domcontentloaded |
+| ---- | ----- | ---------------- |
+| 开源中国 | 7.7s  | **2.4s**         |
+| CSDN | 9.6s  | **5.0s**         |
+| 新浪新闻 | 18.7s | **12.1s**        |
 
 要点后面还要交互（点按钮、等 JS 绑定）时，仍用默认或配 `owb wait`。
 
@@ -245,47 +354,49 @@ mousedown→move→mouseup。
 **只有后者会把文件复制进沙盒 `work/downloads/` 目录**：
 
 - `owb download`——模拟浏览器自己触发下载（点下载按钮/链接），文件必然
-  落在用户真实的系统下载目录（Chrome 下载 API 本来就只能存到那儿，改不了）。
-  返回里**没有** `dir`/`originalPath` 字段，`path` 就是系统下载目录里的
-  真实路径，不会有 `work/downloads/` 版本。
-- `owb file fetch`（底层是 `daemon.download`）——daemon 自己直接拉取一个
-  URL，拉完再复制一份进 `work/downloads/`，返回同时给 `path`（沙盒内
-  复制件）、`originalPath`（真实下载目录原件）、`dir`（沙盒内相对路径）。
-  **要一个能在项目沙盒里稳定引用的路径，用这个，不是 `download`。**
+  落在**浏览器所在机器**真实的系统下载目录（Chrome 下载 API 只能存到那儿）。
+  返回里**没有** `dir`/`originalPath` 字段。
+- `owb file fetch`——daemon 自己直接拉取一个 URL，拉完再复制一份进
+  `work/downloads/`，返回同时给 `path`（沙盒内复制件）、`originalPath`、
+  `dir`。**要一个能在项目沙盒里稳定引用的路径，用这个。**
 
-实测在这两个命令之间搞混过一次——以为 `owb download` 也会给沙盒路径，
-结果拿到的 `path` 是用户系统下载目录的真实路径，返回里连 `dir` 字段都
-没有。两个命令都能正常工作，不是谁坏了，是命令选错了。
+⚠️ 中转模式下这两条落在**不同的机器上**（浏览器在用户机、daemon 在你这边），
+差别更要命，见 `relay.md`。
+
+### 上传文件
+
+⚠️ `owb upload` **不接受文件路径**，要的是 `files: [{name, base64}]`
+（页面内构造 File 派发 change，绕开文件系统，中转模式下也能用）。
+
+```bash
+node -e 'const fs=require("fs"),p=process.argv[1];
+console.log(JSON.stringify({ref:"@e12",files:[{name:require("path").basename(p),
+base64:fs.readFileSync(p).toString("base64")}]}))' "C:\Users\me\a.txt" > /tmp/up.json
+owb upload --args "$(cat /tmp/up.json)"
+```
 
 ### 调试用户自己的网站
 
-⚠️ **顺序很重要**：`net start` 必须在导航**之前**。
+⚠️ **顺序很重要**：`net start` 必须在导航**之前**，否则拿到的是一批没有 URL 的
+孤儿记录（`orphanRecordsHidden` 会告诉你丢了多少条）。
 
 ```bash
 owb net start                              # ← 先开
 owb open http://localhost:3000
-owb net list --sort-by duration --limit 10 # 最慢的十个
-owb net list --sort-by size --limit 10     # 最占带宽的十个
-owb net list --url-pattern "api/"          # 只看接口
+owb net list --sort-by duration --limit 10 # 最慢的十个（--sort-by size 看最重的）
 owb net detail --request-id <id>           # 单条完整头+body
 owb debug console                          # 页面报错
-```
-
-如果顺序反了（先 `open` 再 `net start` 再 `reload`），会收到一批只有响应事件、
-没有 URL 的记录——返回里 `orphanRecordsHidden` 会告诉你有多少条因此被丢掉。
-**看到这个数字大，就是在提醒你抓包起晚了。**
-
-**留证据给同事——录 HAR 的正确顺序**：
-
-```bash
-owb har start          # 开录
-owb open <目标页>       # 干活
-owb har save --args '{"filename":"排查记录"}'   # ← 停止 + 落盘，一步到位
+owb har start && owb open <页> && owb har save --args '{"filename":"排查记录"}'
 ```
 
 ⚠️ **不要写 `har stop` 再 `har save`**。`har save` 内部**已经包含 stop**；
 先手动 stop 会销毁录制器，`har save` 报 `NOT_RECORDING` 且**数据永久丢失**。
-`har stop` 只在你确实只想停、不想存时用。
+⚠️ 有活动任务时 `har save` 固定落到 `tasks/<任务 id>/recording.har`，
+**`filename` 会被忽略**（跟任务归档放一起），别以为参数没生效。
+
+抓包只是入口。**HAR 转重放脚本、两份 HAR 对比漂移、断言校验、hook 加密函数、
+下断点读冻结现场、全局搜脚本源码、改写脚本、离线验签、TLS 指纹重放——
+这一整条线在 `debugging.md`，遇到"这个参数怎么算出来的"类问题去读它。**
 
 ### 响应式适配审计
 
@@ -293,6 +404,7 @@ owb har save --args '{"filename":"排查记录"}'   # ← 停止 + 落盘，一�
 owb env set --width 390 --height 844 --mobile true --touch true
 owb shot --out mobile.png
 owb eval '<检查横向溢出、过小的字、过小的点击区>'
+owb env compare                             # 想核对模拟前后差异
 owb env reset                               # ⚠️ 必须恢复
 ```
 
@@ -301,7 +413,7 @@ owb env reset                               # ⚠️ 必须恢复
 
 ⚠️ `env set` 会一直生效到 `env reset`。用完不恢复，用户的浏览器会一直卡在模拟状态。
 
-视口用扁平参数；`network`/`geolocation` 是对象，走 `--args`：
+视口用扁平参数；`network`/`geolocation`/`permissions` 是对象，走 `--args`：
 
 ```bash
 owb env set --args '{"network":{"latency":300,"download":400000,"upload":400000}}'
@@ -313,224 +425,186 @@ owb env set --args '{"network":{"latency":300,"download":400000,"upload":400000}
 
 ```bash
 owb handoff --reason "请在这个页面完成扫码登录，好了告诉我"
-owb wait-user                    # 等他弄完，你自动接管
+owb wait-user --condition text --text "退出登录"    # ← 等一个"登录后才会出现"的标志
 ```
 
-然后**明确告诉用户你需要他做什么**。他弄完后用 `owb page` 确认状态（比如页面上
-出现了头像/用户名）再继续。
+⚠️ **`owb wait-user` 裸调等的是 URL 变化**（默认 `condition: url_change`），
+超时 280 秒。可扫码登录、SPA 登录**很多都不换 URL**——裸调会静默干等近五分钟
+然后超时。**登录场景一律显式给条件**：`--condition text --text "<登录后才出现的文字>"`
+或 `--condition selector --selector "<头像/用户名的选择器>"`。
+
+然后**明确告诉用户你需要他做什么**。他弄完后用 `owb page` 确认状态再继续。
 
 ### 保存登录态
 
 ```bash
 owb state save 某站      # cookie + localStorage + IndexedDB
+owb state list           # 看存了哪些
 owb state load 某站      # 换机器/换 profile 后恢复
+owb state delete 某站    # 过期了删掉
 ```
+
+⚠️ 存下来的是**明文登录凭据**，落在 `work/states/` 下（已 gitignore）。
+打包或分享仓库前注意别外泄。
 
 ### 固化流程，以后一条命令重放
 
-⚠️ `flow save` **必须先开任务上下文**——它按时间窗抓取这段时间里的操作：
+`flow save` 按**时间窗**抓取这段时间里的操作，所以必须在任务上下文里跑
+（没有活动任务会报 `NEED_TASK`）：
 
 ```bash
-owb task begin "每周报表"      # ← 先开，否则 flow save 报 NEED_TASK
-owb open <页面> && owb click @eN && ...
+owb task begin "每周报表"
+owb open <页面> --new-tab true && owb click @eN && ...
 owb flow save 周报
+owb task end && owb tab close-group
+owb flow list                  # 看有哪些
 owb flow run 周报              # 以后一条命令重放
 ```
 
 ⚠️ 两个回放注意事项：
+
 - **录制期间别做无关操作**。时间窗内的所有调用都会被录进去，包括你顺手开的
   别的标签页。
 - **回放需要安静的浏览器**。录制的 tabId 跨会话无意义会被剥掉，每步改用
   「当前活动标签页」解析；此时若用户正在切标签、或另有流程在跑，就会
-  `AMBIGUOUS_TAB`。
+  `AMBIGUOUS_TAB`。想保留原 tabId 传 `--keep-tab-ids true`；想让某步失败后
+  继续往下走传 `--continue-on-error true`。
 
 ## 参数与输出
 
 - `--foo-bar 值` → 工具参数 `foo_bar`；能 JSON 解析就解析（`--new-tab true`）
 - `--tab <id>` 指定标签页；不给就用当前活动的
 - `--out <文件>` 截图/PDF 落盘路径
-- `--args '<json>'` 传别名没覆盖的参数
+- `--args '<json>'` 传别名没覆盖的参数（优先级最高）
+- `--raw` 拿完整 result 信封（含 error 详情）、`--compact` 单行 JSON、
+  `--no-autostart` 不自动拉 daemon
 - 逃生口：`owb call <底层工具名> --args '<json>'`、`owb cdp` 直发 CDP
 
 输出规则：成功 → data JSON 到 stdout；失败 → stderr 一行 `error CODE: message`，
 退出码非 0（用法错误是 2）。
 
+**返回里这几个下划线开头的字段是 CLI 加的，不是页面数据**：
+
+| 字段                        | 含义                                       |
+| ------------------------- | ---------------------------------------- |
+| `_clipped` + `_hint`      | 返回超过 60KB 被截断了，按 `_hint` 缩小范围重取          |
+| `_nodesOmitted`           | `page` 的 `nodes` 结构化重复字段被摘掉了（内容都在 `lines` 里） |
+| `_harOmitted`             | HAR 正文没打到 stdout（该用 `har save` 落盘）       |
+
 ⚠️ **截图和 PDF 自动落盘**，stdout 只回 `{savedTo, bytes}`，不会把几百 KB 的
-base64 灌进你的上下文。任何工具返回超过 60KB 会被截断并附 `_hint` 说明怎么拿全量。
+base64 灌进你的上下文。长页面整页截图加 `--full-page true`。
+
+### ⚠️ 复杂 `--args` / `eval` 别在命令行里硬拼引号
+
+这是实测最浪费时间的一类失败——**不是工具的问题，是 shell 引号嵌套的问题**，
+但症状看着像工具坏了：
+
+```
+用法错误：--args 不是合法 JSON：Bad escaped character in JSON at position 38
+error EVAL_EXCEPTION: Uncaught: SyntaxError: missing ) after argument list
+```
+
+两个高频触发点：**Windows 路径**（`C:\Users\...` 里的 `\U` 在 JSON 里是非法转义）、
+**JS 表达式里套字符串**（三层引号必然打架）。
+
+**别硬转义，把内容落到文件再读进来**——表达式写进 `.js`，用 node 的
+`JSON.stringify` 包成 args，一次成功：
+
+```bash
+cat > /tmp/expr.js << 'EOF'
+(function(){ return JSON.stringify({ n: document.querySelectorAll("a").length }); })()
+EOF
+node -e 'console.log(JSON.stringify({expression:require("fs").readFileSync(process.argv[1],"utf8")}))' \
+  /tmp/expr.js > /tmp/eval-args.json
+owb eval --args "$(cat /tmp/eval-args.json)"
+```
+
+简单参数照旧直接写（`owb fill @e3 "关键词"`），这套只在引号打架时用。
 
 ### 滚动之后没有新内容？
 
-`owb scroll --args '{"to":"bottom"}'` 会返回 `{y, maxY, atBottom}` —— 先看这几个值
-确认真的滚到底了。滚到底但 `--since-last` 显示 `added=0`，通常是这三种情况：
+`owb scroll --args '{"to":"bottom"}'` 返回 `{y, maxY, atBottom}`，先看这几个值确认
+真滚到底了。滚到底但 `--since-last` 显示 `added=0`，三种可能：**该页本来就没有更多
+内容**（固定网格不是信息流）／**需要点「加载更多」**（回 `owb page` 找那个按钮）／
+**虚拟滚动**（DOM 节点数恒定，此时 `changed` > 0）。先用返回值区分，别急着认为工具失灵。
 
-1. **该页本来就没有更多内容**（很多首页是固定网格，不是信息流）
-2. **需要点「加载更多」**——回 `owb page` 找那个按钮
-3. 页面用了虚拟滚动，DOM 节点数恒定（此时 `changed` 会 > 0）
+## 现实环境：症状 → 判断
 
-别急着认为工具失灵，先用返回值和快照区分是哪一种。
+这些不是故障，是真实浏览器里必然会遇到的情况。**下表按症状索引，详情在
+`field-notes.md`**——对上号了再去读，别提前把全部细节读进上下文。
 
-## 现实环境里的几件事
+| 症状                                  | 一句话判断                                                        | 细节         |
+| ----------------------------------- | ------------------------------------------------------------ | ---------- |
+| 页面里有跟主题无关的浮层按钮（翻译/收藏/快捷设置）          | 是用户装的**别的扩展**注入的，`extensionUiHidden` 只剔得掉一部分。**别去点**          | field-notes |
+| 动画不动 / 视频卡 `readyState:0` / 游戏没反应   | **整个 Chrome 窗口没有系统焦点**（不是标签页没激活）。跑一次下面的诊断命令                    | field-notes |
+| `owb shot` 卡满 30 秒超时                | 先补一条 `owb eval "1+1"` 分叉：也超时=标签页真死了（关掉重开）；秒回=窗口没焦点（关了重开没用）     | field-notes |
+| 快照为空、带 `renderNote`                 | 标签页没在渲染，已自动前台化重试；`renderNote` 会说清是内容问题还是窗口焦点问题               | field-notes |
+| 403 / 空快照 / `httpErrorHint`         | 反爬拒绝（澎湃、知网、部分电商），**换思路**，别在空快照上反复分析                          | field-notes |
+| 任何操作都 `FORBIDDEN`，页面像是变了个样          | 标签页被 OneTab 一类扩展**整个换掉**了。`tab list` 确认，新标签页重开               | field-notes |
+| `FORBIDDEN` 且提到 interstitial        | Chrome 安全拦截页（证书错误），**无解**，让用户在浏览器里处理                         | field-notes |
+| PDF 网址三种模式都读不出正文                    | Chrome PDF 阅读器在独立沙盒视图里，**架构上够不到**。找 HTML 版本，或截图              | field-notes |
+| 搜索结果里出现 `derosnopS` 一类乱码词           | 反爬诱饵文本（人眼看不到），**当噪音跳过**                                      | field-notes |
+| 导航到 `docs.google.com/**/create`      | ⚠️ **光是访问就会在用户账号里真建一个文件**，且新建空文件删不掉。别导航到这类地址                 | field-notes |
+| stderr 出现 `扩展暂时不可达…N s 后重试`         | MV3 worker 被回收，**正常**，命令会自己重试（累计约 35 秒）到成功                   | 见下          |
+| 退避跑完仍 `NO_EXTENSION`                | 这次不是空闲回收，是**脚本本身崩了**，心跳唤不醒。**别再等**，直接报告用户                    | 见下          |
+| 导航就是慢                               | 219 站实测 p50 4.7s / p90 15s / p99 30s。超 30 秒基本是站点问题，用 `--timeout-ms` 放宽或换 `domcontentloaded` | —          |
 
-这些不是故障，是真实浏览器里必然会遇到的情况，知道了就不会误判。
-
-**页面里可能有别的扩展的东西**。用户装了翻译、收藏、标签管理类扩展时，
-它们会往页面注入悬浮按钮。快照会剔除已知框架（Plasmo/CRXJS）挂载的这类元素
-并记在 `extensionUiHidden` 里。
-
-但**剔不干净**——扩展的注入方式五花八门，且很多是划词/悬停时才出现，无法穷举。
-自己认一下：像 `图片翻译`、`语音翻译`、`快捷设置`、`添加到收藏夹`、`关闭(Esc)`
-这类**与当前页面主题毫无关系**的按钮，基本都是别的扩展的浮层，**别去点**。
-判断依据很简单——它和你正在做的事、和页面在讲的内容有关系吗？
-
-**电商站的搜索结果里可能混着看不懂的乱码词**。实测 eBay 搜索页 `text`
-模式里出现过 `derosnopS`——倒过来读是"Sponsored"，是网站专门放给爬虫看的
-诱饵（真实元素是 `color: transparent` + `aria-hidden="true"`，人眼和
-屏幕阅读器都看不到，只有不分可见性硬抓文字的工具才会读到）。遇到这种
-明显不是正常语言的短词，当噪音跳过就好，不用纠结它是什么意思。
-
-**⚠️ Google Docs/Sheets/Slides/Forms 的 `/create` 类地址，光是导航过去
-就会真的建一个文件**——不是"打开一个创建页面等你点确认"，是访问这个
-URL 本身（`docs.google.com/document/create`、`.../spreadsheets/create`、
-`.../forms/create` 等）就已经在用户真实的 Google 账号里落下一个持久化的
-空白文档/表格/表单，标题通常是"未命名的文档"这类默认值。实测踩过两次
-（一次 Sheets、一次 Forms），且两次都发现新建的空白文件"移到回收站"选项
-是**禁用**的（Google Workspace 对完全没有任何编辑过的全新文档就是这个
-行为，不是权限或工具的问题，手动在浏览器里点也一样删不掉，得等文档有
-过至少一次内容变更才能进回收站）。这类地址不是"看看创建页长什么样"就
-能无副作用撤销的——**如果任务不是真的要新建一个文档，就别导航到这类
-`/create` 地址**；如果已经手滑创建了，别在禁用的删除按钮上反复尝试，
-如实告诉用户账号里多了个空文件，他自己删更快。
-
-**标签页可能被别的扩展抢走**。OneTab 一类工具会把标签页整个换成自己的页面，
-此时任何操作都会报 `FORBIDDEN`。**别重试**，先 `owb tab list` 看这个 tab 现在
-是什么，然后用新标签页重开目标地址。
-
-**被站点拒绝是常态**。反爬严格的站点（澎湃、知网、部分电商）会直接回 403。
-`owb open` 会给出 `httpErrorHint` 点明这一点。看到它就换思路——别在空快照上
-反复分析。
-
-**空快照要看 `renderNote`**。标签页没在渲染时元素全无布局盒，工具会自动前台化
-重试并说明；如果仍空，让用户切到那个标签页。
-
-**Chrome 窗口不是系统前台窗口时，一整类靠 rAF/可见性驱动的页面行为会卡住**。
-不是"标签页不是激活页"这种 tab 内部状态，是**整个 Chrome 窗口**没有操作系统
-级焦点（被别的窗口挡住）——`Page.bringToFront` 救不了这个，它只能把标签页
-在自己窗口内切到激活位，管不到窗口本身有没有系统焦点。实测踩过三种表现：
-
-- YouTube：`<video>` 卡在 `readyState:0`（HAVE_NOTHING），画面转圈不进度
-- Ctrip：请求被拦截返回极简响应，页面渲染异常（间接受影响，非直接因果）
-- play2048.co：棋盘上的方块（`requestAnimationFrame` 驱动 + worker 渲染）
-  一个都不生成，按方向键完全没反应；同一个窗口后来自己变回系统前台
-  （不受控，纯粹是真实环境里窗口焦点会变化），同一个页面重新打开就
-  正常出方块、按键正常——反证了确实是窗口焦点的因果关系，不是巧合
-- claude.com 官方博客：`--mode article/text` 只读到页头页脚导航，正文一个
-  字都没有——真实原因是正文段落用了"滚动淡入"动画，一直
-  `visibility:hidden`，触发动画的机制卡住了没跑（这条工具侧已经加了
-  `hiddenContentNote` 自动提示，遇到别的类似情况可以照这个思路排查）
-- Flightradar24（WebGL 实时地图）以及同一批次里一个内容很普通的 IMDB
-  页面：`owb shot` 稳定卡满 30 秒超时，但 `owb eval "1+1"` 秒回——不是
-  标签页卡死，是**合成器不产出新帧**，`Page.captureScreenshot` 在等一个
-  永远等不到的帧（详见下面"`owb shot` 都超时"一节的完整判断步骤）
-
-共同根因：Chrome 对隐藏窗口里的页面做资源节流（`requestAnimationFrame`
-不触发、媒体缓冲暂停、合成器不产帧），这是浏览器的省电设计，不是 OWB 的
-故障，也没有 CDP 层面的绕过方法——试过 `Emulation.setFocusEmulationEnabled`，
-能把 `document.visibilityState` 骗成 `"visible"`，但 2048 的棋盘还是不
-出来：这个开关只改 JS 能读到的属性值（给"测试我的页面在隐藏时表现对不对"
-这种场景用的），改不了 Chrome 内部真正的渲染节流，没有必要再往这个方向试。
-
-⚠️ **诊断时 `document.visibilityState` 和 `document.hasFocus()` 只查一个
-会漏判——这两个信号会往不同方向脱节，各管各的症状**：
-
-- rAF/动画/视频类卡住（棋盘不出方块、视频卡在 `readyState:0`）跟的是
-  `visibilityState`。实测碰到过 `hasFocus()` 是 `true`（窗口其实有系统
-  焦点）但 `visibilityState` 仍是 `"hidden"` 的组合，rAF 照样不触发——
-  这条只信 `hasFocus()` 会漏判。
-- `owb shot` 卡满 30 秒超时跟的是 `hasFocus()`。实测在 Flightradar24 上
-  碰到过 `visibilityState` 是 `"visible"`（页面看着好好地显示在屏幕上）
-  但 `hasFocus()` 是 `false`（焦点在另一个 App 上）的组合，合成器照样不
-  产出新帧——这条只信 `visibilityState` 会漏判。
-
-**两个都查，别只查一个**：
+窗口焦点诊断（**两个信号都要查，只查一个会漏判**）：
 
 ```bash
 owb eval 'document.visibilityState + " hasFocus=" + document.hasFocus()'
 ```
 
-**凡是页面看起来"该动的没动"——动画卡住、视频不转、游戏没反应、按键点击
-了却没有任何视觉变化、或者连 `owb shot` 都超时**，跑一下上面这条，
-任一个不对劲就提醒用户把整个浏览器窗口切到系统前台，而不是反复重试或
-断定工具坏了。
+- rAF/动画/视频卡住 → 跟 `visibilityState` 走（实测有 `hasFocus()` 为 true
+  但 `visibilityState` 仍 hidden、rAF 照样不触发的组合）
+- `shot` 卡满 30 秒 → 跟 `hasFocus()` 走（实测有页面明明 `visible`、但
+  `hasFocus()` 为 false、合成器不产帧的组合）
 
-**慢站真的慢**。219 站实测导航耗时 p50 4.7 秒、p90 15 秒、p99 30 秒。
-超过 30 秒基本是站点问题不是工具问题，用 `--timeout` 放宽或换 `domcontentloaded`。
-
-**扩展偶尔会掉线，但会自愈——仅限"活着但空闲"这一种情况**。Chrome 会回收
-MV3 的后台脚本，扩展随后自动重连（约 30 秒内）。你会在 stderr 看到
-`[owb] 扩展暂时不可达（NO_EXTENSION），1.5s 后重试…`（1.5s→4s→10s→20s
-退避，累计约 35 秒）——**这是正常的，命令会自己重试到成功**，不用管。
-
-但**这条自愈只对"idle 被回收"生效，对"脚本本身崩了"完全无效**——如果
-单条命令自己的这轮退避（累计约 35 秒）都跑完了、还是 `NO_EXTENSION`，
-别再手动多等几轮指望它自己好：`chrome.alarms` 心跳只能唤醒"活着但空闲"
-的 worker，唤不醒"顶层解析就报错"的 worker（比如刚改过 background.js
-手滑引入语法错误、`reload-ext` 又把这份坏脚本加载了进去）——这种情况下
-心跳每次醒来重新执行的还是磁盘上同一份坏脚本，一样立刻失败，干等多久都
-不会变。单条命令的重试耗尽后仍失败，就是该停下直接报告用户的信号，见
-下面「出错怎么办」表的 `NO_EXTENSION` 行。
-
-**有些页面根本无法检查**。Chrome 的安全拦截页（证书错误、隐私设置错误、
-不安全下载警告）禁止 debugger 附着。`owb open` 会用 `attachHint` 提前告诉你，
-`page` 会报 `FORBIDDEN`。**这类页面没有变通办法**——告诉用户去浏览器里看那个
-标签页，证书有问题就修，或让他手动点过警告再继续。
-
-**超时先想主线程**。`TIMEOUT` 最常见的原因不是断点，而是页面主线程被重 JS
-占满（尤其还在加载时）。先 `owb wait --network-idle true` 再重试，别去找
-根本不存在的断点。
-
-**但如果连 `owb shot`（截图）都超时，先别急着当成"标签页卡死了"**。截图
-走的是合成器帧捕获，正常不需要 JS 参与，理论上主线程再忙也不该卡住它——
-但这条反过来也是诊断线索：**`shot` 超时时，先补一条 `owb eval "1+1"`**，
-两种走向指向完全不同的病因和修法：
-
-- **`eval` 也超时**（连最简单的表达式都没反应）：真的卡死了（渲染进程
-  层面，不是"脚本正忙"）。实测在 Google 表格上连续碰到：`open` 到别的
-  网址不生效（还停在原页面）、`eval "1+1"` 超时、`shot` 同样超时——
-  几分钟后依然如此，不是"忙一会就好"，`owb debug resume` 也无济于事
-  （`NOT_PAUSED`，不是断点问题）。**别在同一个标签页上反复重试**——
-  `owb tab close` 关掉这个标签页、`owb open --new-tab true` 重开一个，
-  新标签页立刻恢复正常响应。
-- **`eval` 秒回、只有 `shot` 卡**：标签页根本没死，是**窗口没有系统
-  焦点**的老问题（见上面"Chrome 窗口不是系统前台窗口"一节）换了个新
-  症状——之前记录的是 rAF/动画类内容卡住，这次实测在 Flightradar24
-  （WebGL 实时地图）和同一批次里一个普通的 IMDB 页面上都稳定复现：
-  `Page.captureScreenshot` 本身在等一帧"合成好的画面"，窗口不在前台时
-  合成器不产出新帧，这一等就是 30 秒硬超时，跟页面内容是不是 WebGL
-  无关（普通页面一样会卡）。补一条 `owb eval "document.hasFocus()"`
-  确认——`false` 就是这个原因，告诉用户把整个浏览器窗口切到前台，
-  `owb tab close` 反而是白做——标签页本来就没坏，关了重开新标签页
-  一样没有系统焦点，`shot` 照样卡 30 秒。
-
-**直接打开 PDF 网址，`page` 三种模式都读不出内容**。Chrome 内置 PDF 阅读器
-渲染在一个独立的沙盒视图里，DOM 和无障碍树（实测 `Accessibility.
-getFullAXTree` 也查过，同样查不到正文）都看不进去——不是选择器没写对，是
-架构上够不到，没有绕过办法。真要读 PDF 正文，找有没有 HTML 版本（arXiv 论文
-详情页通常有「HTML (experimental)」链接，跳过去之后 `--mode article`
-可以正常读）；没有 HTML 版本的 PDF 目前读不了正文，只能 `owb shot` 截图看，
-或者告诉用户直接在浏览器里看。
+任一个不对劲，就提醒用户**把整个浏览器窗口切到系统前台**，而不是反复重试或
+断定工具坏了。这是浏览器的省电节流设计，没有 CDP 层面的绕过办法
+（`Emulation.setFocusEmulationEnabled` 试过，无效，别再往这个方向试）。
 
 ## 出错怎么办
 
-| 错误 | 含义 | 动作 |
-|---|---|---|
-| `NO_EXTENSION` | 扩展没连 | 告诉用户检查扩展，**别重试**——`chrome.alarms` 30s 心跳只能唤醒"活着但空闲"的 worker，唤不醒"脚本本身崩了"的 worker（比如改 background.js 时手滑引入语法错误），干等心跳不会自愈，等了两三个周期还是 `NO_EXTENSION` 就该直接报告、别继续空转 |
-| `REF_STALE` | 编号过期 | 重新 `owb page` |
-| `AMBIGUOUS_TAB` | 多个标签页都匹配 | `owb tab list` 拿 id，加 `--tab` |
-| `PAUSED` | 页面停在断点 | `owb debug resume` |
-| `FRAME_NOT_FOUND` | iframe 找不到 | `owb frames` 看清单；`contextId:null` 的是跨域框架，求值不了 |
-| `TIMEOUT` | 页面主线程忙（最常见）/ 断点 / 模态框 | 先 `owb wait --network-idle true` 再重试，或加 `--timeout <秒>`；连 `shot` 都超时就是标签页卡死了，重试没用，`tab close` 重开 |
-| `FORBIDDEN` + 提到 interstitial | Chrome 安全拦截页 | 无解，让用户在浏览器里处理证书警告 |
-| 快照带 `renderNote` | 标签页没在渲染 | 已自动前台化重试；`renderNote` 会说清是内容问题还是**窗口没有系统焦点**（后者要让用户切整个浏览器窗口，不是切标签页，见下节） |
+| 错误                                           | 含义                | 动作                                                                                          |
+| -------------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------- |
+| `NO_EXTENSION`                               | 扩展没连              | CLI 已自动退避重试约 35 秒；**跑完还失败就别再等**（脚本崩了心跳唤不醒），告诉用户检查扩展                                          |
+| `REF_STALE`                                  | 编号过期              | 重新 `owb page`                                                                               |
+| `AMBIGUOUS_TAB`                              | 多个标签页都匹配，**或**你没给 `--tab` 而活动 tab 是用户自己的页面 | `owb tab list` 拿 id，加 `--tab`。后者多半是你用了 `--active false` 却没带 `--tab`——用 `open` 返回的那个 tabId |
+| `BAD_ARGS`                                   | 参数给错/给重了          | 错误消息里带合法值，照着改；不确定参数名去查 `reference.md`                                                       |
+| `PAUSED`                                     | 页面停在断点            | `owb debug resume`                                                                          |
+| `FRAME_NOT_FOUND`                            | iframe 找不到        | `owb frames` 看清单；`contextId:null` 的是跨域框架，求值不了                                               |
+| `TIMEOUT`                                    | 主线程忙（最常见）/ 断点 / 模态框 | 先 `owb wait --network-idle true` 再重试；要等更久用 **`--timeout-ms`**（不是 `--timeout`）。**连 `shot` 都超时时先补 `owb eval "1+1"` 分叉** |
+| `ctl call timeout`                           | 撞上 CLI 那层信封超时     | 你把工具内部等待调过 110 秒了，同时加 `--timeout <秒>`                                                       |
+| `NEED_TASK`                                  | 没有活动任务            | `owb task begin "<标题>"` 之后重来                                                                |
+| `NOT_RECORDING`                              | 录制器已销毁            | 你先 `har stop` 了；`har save` 自带 stop，数据已丢，重录                                                  |
+| `FORBIDDEN` + interstitial                   | Chrome 安全拦截页      | 无解，让用户在浏览器里处理证书警告                                                                           |
+| `FORBIDDEN` + not in an OWB-managed group    | 你在关一个**用户自己的** tab | 这是护栏不是故障。先 `owb tab list` 核对 tabId；确实该关再考虑 `--force true`                                    |
+| 快照带 `renderNote`                             | 标签页没在渲染           | 已自动前台化重试；`renderNote` 会说清是内容问题还是**窗口没有系统焦点**                                                |
+
+## 命令地图
+
+16 个组、82 条命令。**这里只列名字帮你知道"有没有"，参数去 `reference.md` 查，
+或 `owb help <组名>`。**
+
+| 组          | 命令                                                                     | 用途                     |
+| ---------- | ---------------------------------------------------------------------- | ---------------------- |
+| **基础**     | open back forward reload page shot click click-mouse fill keys scroll eval wait frames status cdp | 打开、读、点、填、按键、等          |
+| **tab**    | tab list / find / close / close-group                                  | 标签页与清场                 |
+| **net**    | net start / stop / list / detail / initiator / capture                 | 抓包 → `debugging.md`    |
+| **har**    | har start / save / stop / status / to-replay / diff / assert            | 录制与加工 → `debugging.md` |
+| **hook**   | hook preset / fn / remove / status / logs                              | 函数与请求钩子 → `debugging.md` |
+| **debug**  | debug break-xhr / break-fn / break-remove / frames / step / resume / console，oracle | 断点与调用帧 → `debugging.md` |
+| **script** | script list / source / search / patch / unpatch / watch / watch-remove  | 脚本搜索改写 → `debugging.md` |
+| **verify** | verify signer / replay / evidence                                      | 离线验签、TLS 重放、取证 → `debugging.md` |
+| **cookie** | cookie get / set / delete                                              | cookie 读写              |
+| **state**  | state save / load / list / delete / export / import                    | 登录态存取                  |
+| **env**    | env set / reset / compare                                              | 设备/网络/地理/UA 模拟         |
+| **file**   | download、upload、pdf、file fetch                                         | 下载、上传、导出 PDF           |
+| **task**   | task begin / end / list                                                | 任务分组与归档                |
+| **flow**   | flow save / run / list                                                 | 流程固化与回放                |
+| **human**  | handoff、wait-user                                                      | 人机交接                   |
+| **daemon** | daemon-status、reload-ext                                               | 看模式/中转状态、重载扩展          |
 
 ## 边界
 

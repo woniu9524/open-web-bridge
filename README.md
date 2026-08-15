@@ -50,8 +50,14 @@ owb setup                     # 引导：扩展安装路径、装 skill、连通
 平时用的那个浏览器（登录态在那儿，这正是本项目的意义），命令行代劳不了。
 
 装完跑一次 `owb` 自检，两个 ✓ 就绪。然后 `owb skill install` 把 skill 装进
-`~/.claude/skills/`（加 `--project` 则只装到当前项目）。其他 agent 直接把
-`owb-skills/owb/SKILL.md` 内容并进你的规则/系统提示即可，纯 markdown 无专有格式。
+`~/.claude/skills/`（加 `--project` 则只装到当前项目）。
+
+skill 是**一主四附**的渐进披露结构，`skill install` 会整目录装好：
+`SKILL.md`（主干：任务形状、核心循环、高频坑，每次会话都进上下文）+
+`reference.md`（82 条命令的参数速查）、`debugging.md`（抓包/HAR/hook/断点/逆向）、
+`relay.md`（中转模式配置引导）、`field-notes.md`（实测怪现象详情）——后四份由
+agent 按需读取。其他 agent 直接把这几份 markdown 并进规则/系统提示即可，
+无专有格式。
 
 ### 试一下
 
@@ -75,7 +81,7 @@ open-web-bridge/          ← npm 包根（package.json 在这里）
 ├── owb-daemon/tests/     测试（不进 npm 包）
 ├── owb-extension/        MV3 Chrome 扩展
 ├── owb-relay/            可选：Cloudflare Workers 公网中转（独立部署，不进 npm 包）
-└── owb-skills/owb/       给 AI agent 装的 skill
+└── owb-skills/owb/       给 AI agent 装的 skill（SKILL.md + 四份按需附文件）
 ```
 
 `npm i -g open-web-bridge` 会把 CLI、扩展文件、skill 一起装到本机——`owb setup`
