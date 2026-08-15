@@ -33,16 +33,48 @@ function check(name, cond, detail = "") {
 }
 
 // ---- 最小 DOM mock ----
+// BUG-105 回归用例需要 el.textContent（可以是纯空白）+ el.querySelector
+// 递归子元素找 img[alt] 兜底，所以这里补一个极简选择器匹配（只认
+// nameOf() 实际用到的 "tag[attr], [attr]" 这种形状，不是通用 CSS 引擎）。
+function matchesSimpleSelector(el, sel) {
+  const m = sel.trim().match(/^([a-zA-Z]*)((?:\[[a-zA-Z-]+\])*)$/);
+  if (!m) return false;
+  const [, tag, attrsPart] = m;
+  if (tag && el.tagName !== tag.toUpperCase()) return false;
+  for (const [, name] of (attrsPart || "").matchAll(/\[([a-zA-Z-]+)\]/g)) {
+    if (el.getAttribute(name) === null) return false;
+  }
+  return true;
+}
+function queryFirst(children, selectorList) {
+  const selectors = selectorList.split(",").map((s) => s.trim());
+  const stack = [...children];
+  while (stack.length) {
+    const el = stack.shift();
+    if (selectors.some((s) => matchesSimpleSelector(el, s))) return el;
+    if (el._children) stack.push(...el._children);
+  }
+  return null;
+}
 function makeEl(tag, attrs = {}, opts = {}) {
   return {
     tagName: tag.toUpperCase(),
     _attrs: { ...attrs },
+    _children: opts.children || [],
     innerText: opts.innerText !== undefined ? opts.innerText : "",
+    // textContent 独立于 innerText：不受 CSS 可见性影响，且会把子元素间的
+    // 纯空白文本节点也算进去（BUG-105 就卡在这一点上）。不显式传就跟
+    // innerText 一致，行为贴近没有子元素时的真实 DOM。
+    textContent: opts.textContent !== undefined ? opts.textContent :
+      (opts.innerText !== undefined ? opts.innerText : ""),
     value: opts.value,
     _rect: opts.rect || { width: 10, height: 10, x: 0, y: 0 },
     getAttribute(n) { return n in this._attrs ? this._attrs[n] : null; },
     setAttribute(n, v) { this._attrs[n] = String(v); },
     getBoundingClientRect() { return this._rect; },
+    querySelector(sel) { return queryFirst(this._children, sel); },
+    // 只认 nameOf() 实际调用的 closest("label")，不是真的沿父链走。
+    closest(sel) { return sel === "label" ? (opts.labelWrap || null) : null; },
   };
 }
 
@@ -196,6 +228,55 @@ const bare = makeEl("input", { type: "text", name: "username" });
 const r8 = runSnapshot([bare], 1);
 check("UX-105 无 label 的输入框用 name 兜底",
   (r8.nodes[0] || {}).name === "username", JSON.stringify(r8.nodes[0]));
+
+// ---- 场景 7：BUG-105 空白 textContent 不该挡住图片 alt 兜底 ----
+// 真实场景：<a href="..."> <img alt="Sony" ...> </a>，img 前后是源码缩进
+// 换行留下的纯空白文本节点。textContent 会拿到"  "（两个空格）——JS 里
+// 非空字符串是 truthy，如果不 trim 就会把 BUG-71 的 img[alt] 兜底堵死。
+const brandImg = makeEl("img", { alt: "Sony" });
+const brandLink = makeEl("a", { href: "/brand/sony" },
+  { innerText: "", textContent: "  ", children: [brandImg] });
+const r9 = runSnapshot([brandLink], 1);
+check("BUG-105 空白 textContent 不挡 img alt 兜底",
+  (r9.nodes[0] || {}).name === "Sony", JSON.stringify(r9.nodes[0]));
+
+// 有真实可见文字时，文字依旧优先于子元素 img 的 alt——确认 BUG-105 的
+// trim() 修复没有误伤"链接本来就有文字"这条更常见的路径。
+const labeledImg = makeEl("img", { alt: "图标" });
+const labeledLink = makeEl("a", { href: "/x" },
+  { innerText: "查看详情", children: [labeledImg] });
+const r10 = runSnapshot([labeledLink], 1);
+check("有文字时文字优先于 img alt（未被 BUG-105 修复误伤）",
+  (r10.nodes[0] || {}).name === "查看详情", JSON.stringify(r10.nodes[0]));
+
+// 同一隐患的姊妹路径：外层 <label> 只包着空白（没有直接可读文字），
+// closest("label") 拿到的 innerText 一样是纯空白，不 trim 会挡住后面
+// input 自己的 name 兜底。
+const wrapLabel = makeEl("label", {}, { innerText: "  " });
+const wrappedInput = makeEl("input", { type: "text", name: "search_q" },
+  { labelWrap: wrapLabel });
+const r11 = runSnapshot([wrappedInput], 1);
+check("BUG-105 姊妹路径：label 纯空白 innerText 不挡 name 兜底",
+  (r11.nodes[0] || {}).name === "search_q", JSON.stringify(r11.nodes[0]));
+
+// ---- 场景 8：BUG-107 aria-hidden="true" 的元素该整个从快照里剔除 ----
+// 实测大都会博物馆藏品页：每张部门卡片除了一个正常具名链接，还叠着一个
+// class 带 "redundant-link"、aria-hidden="true" 的整卡覆盖点击层，
+// 纯装饰/纯交互冗余，对无障碍技术本就该隐身。
+const redundantLink = makeEl("a",
+  { href: "/dept/african-art", "aria-hidden": "true" }, { innerText: "" });
+const realLink = makeEl("a", { href: "/dept/african-art" },
+  { innerText: "African Art" });
+const r12 = runSnapshot([redundantLink, realLink], 1);
+check("BUG-107 aria-hidden 元素不进快照",
+  r12.nodes.length === 1 && r12.nodes[0].name === "African Art",
+  JSON.stringify(r12.nodes));
+check("BUG-107 skippedAriaHidden 计数",
+  r12.skippedAriaHidden === 1, `skippedAriaHidden=${r12.skippedAriaHidden}`);
+
+// 正常、没有 aria-hidden 的元素不受影响（防止误伤所有链接）
+check("BUG-107 没有 aria-hidden 的元素不受影响",
+  r12.nodes.some((x) => x.name === "African Art"));
 
 console.log(`\n${passed}/${passed + failed} passed`);
 process.exit(failed ? 1 : 0);

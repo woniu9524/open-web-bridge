@@ -33,6 +33,21 @@
  *        ⚠️ wait_user timeout_ms 上限 280s；经 MCP 调用须把 timeout 调到 ≥ timeout_ms/1000 + 10
  *          （MCP 默认 120s 会在长等待中途掐断）
  *  安全: Fetch fail-safe（WS 断连即放行）+ 死开关（daemon 45s 不可达全量 detach）
+ *
+ * ⚠️ 编辑须知：文件里大段函数（nameOf/collect/READ_PAGE_SNAPSHOT_EXPR/
+ * READ_PAGE_ARTICLE_EXPR/CURSOR_OVERLAY_EXPR 等）是写在反引号模板字面量
+ * 内部的字符串（最终序列化后送进页面 eval），不是普通顶层代码。改这些函数
+ * 内部的注释时绝对不能用反引号包代码片段——会提前截断外层模板字面量，
+ * 截断点之后的内容被当成本文件自己的顶层 JS 解析，直接 SyntaxError，MV3
+ * service worker 顶层解析失败就整个起不来，一个监听器都注册不上（连
+ * chrome.alarms 心跳都救不了——心跳只能唤醒"活着但空闲"的 worker，救不了
+ * "脚本本身语法错误"的 worker）。改完这类函数、执行 reload-ext 之前，
+ * 先跑一遍 `node --check owb-extension/background.js` 确认语法没坏——
+ * 这一步零成本，能拦下几乎所有这类错误。如果还是打崩了：没有命令行/CDP
+ * 能救——浏览器没开远程调试端口，扩展对浏览器的控制全靠 chrome.debugger，
+ * 而这权限只有扩展自己活着才能用，唯一出路是人工去 chrome://extensions
+ * 点"重新加载"（或重启 Chrome）。详见 docs/field-test/FINDINGS.md 的
+ * "操作事故"记录。
  */
 
 // ---------------------------------------------------------------------------
@@ -1595,11 +1610,26 @@ const CDP_ERROR_RULES = [
     // 归因：用户装的标签管理类扩展（OneTab 等）会把标签页整个换成自己的
     // chrome-extension:// 页面，owb 正在操作的 tab 被第三方接管了。
     // 原文案只说「Chrome 禁止调试此 URL」，AI 会以为自己传错了 tabId 而反复重试。
+    // BUG-108: 原文案把 list_tabs 之后的下一步写死成"一定是标签管理扩展接管"，
+    // 但实测在 the-internet.herokuapp.com 上复现了一种不一样的组合：连续两个
+    // 全新标签页，list_tabs 全程显示的都是正常的 https 地址（不是
+    // chrome-extension:// 页面），chrome.debugger.attach 却稳定报同一句
+    // Chrome 原生错误——说明 OneTab 式整页接管不是这句 Chrome 错误的唯一
+    // 成因，只是"list_tabs 也显示 chrome-extension:// 地址"这个子情况的成因。
+    // 换一个域名（example.com）立刻恢复正常，说明这次卡住的是"这个具体域名
+    // 撞上了浏览器里别的什么东西"，不是全局性的附加失败——但没法再往下确定
+    // 是哪个扩展、什么机制，只能如实说"原因不止一种"，别再把不确定的归因
+    // 讲得那么笃定。
     "Chrome forbids debugging this URL (chrome://, the Web Store, devtools://, " +
     "or another extension's page); call list_tabs to see what this tab actually " +
-    "shows now — tab-manager extensions (OneTab and similar) replace tabs with " +
-    "their own page, which takes the tab out of reach. Re-open the target URL " +
-    "in a fresh tab"],
+    "shows now. If list_tabs ALSO shows a chrome-extension:// URL, a tab-manager " +
+    "extension (OneTab and similar) has replaced this tab — re-open the target " +
+    "URL in a fresh tab. If list_tabs shows the normal URL you expected but " +
+    "this error still fires (reproducible on a brand-new tab, and only for this " +
+    "one site/domain — try a different URL to confirm), the cause is something " +
+    "else entirely (unclear exactly what) intercepting this specific site; " +
+    "re-opening in a fresh tab may or may not help, and if it doesn't, this " +
+    "particular URL likely cannot be automated right now"],
   // BUG-86: Chrome 的安全拦截页（证书错误/隐私设置错误/不安全下载警告）
   // 禁止 debugger 附着，报的却是一句毫无线索的 "Cannot attach to this target"。
   // 知网连续三轮实测均卡在这里——页面标题是本地化的「隐私设置错误」，
@@ -2080,12 +2110,16 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
       try {
         const lab = (el.getRootNode() || document).querySelector(
           'label[for="' + CSS.escape(el.id) + '"]');
-        if (lab) v = lab.innerText || "";
+        // BUG-105 同款隐患：label 里如果只有一个 <img alt="..."> 加缩进空白
+        // （<label for="x"> <img alt="Email"> </label>），innerText 不算图片
+        // alt，拿到的是纯空白——不 trim 会把这串空白当成"已经有名字"，后面
+        // 更靠谱的兜底（value/textContent/图片 alt）就再也走不到了。
+        if (lab) v = (lab.innerText || "").trim();
       } catch (e) {}
     }
     if (!v && el.closest) {
       const wrap = el.closest("label");
-      if (wrap) v = wrap.innerText || "";
+      if (wrap) v = (wrap.innerText || "").trim();
     }
     // BUG-104: <input type="submit|button|reset"> 的可见文字来自 value 属性
     // （HTML 就是这么渲染的——<input type="submit" value="Calculate"> 按钮上
@@ -2099,12 +2133,18 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
       if (bt === "submit" || bt === "button" || bt === "reset") v = el.value || "";
     }
     if (!v) v = el.getAttribute("name") || el.getAttribute("title") || "";
-    if (!v) v = el.value || el.innerText || "";
+    if (!v) v = (el.value || el.innerText || "").trim();
     // BUG-70: innerText 遵循 CSS 可见性——元素在 visibility:hidden 的容器里
     // （悬停菜单、折叠导航很常见）时返回空串，但它仍有布局盒、仍会进快照。
     // 实测界面新闻首页 43% 的 ref 因此变成 @eN link ""，AI 只能靠 href 猜。
     // textContent 不依赖渲染，是这类元素唯一能拿到的文字。
-    if (!v) v = el.textContent || "";
+    // BUG-105: 这里必须 trim 再判断真假——链接源码里 img 前后常有纯空白
+    // 文本节点（HTML 缩进换行），textContent 拿到的是两个空格而不是空串，JS 里
+    // 非空字符串是 truthy，导致真假判断为假，直接跳过了下面 BUG-71 的
+    // img[alt] 兜底，最终 v 还是空白，走到末尾 trim() 才变成空串——链子断在
+    // 中间，img 兜底压根没机会跑。实测亚马逊商品页品牌 logo 链接（a 标签包一个
+    // img alt="Sony"），明明有清晰的 alt 文本，快照里却是空链接。
+    if (!v) v = (el.textContent || "").trim();
     // BUG-71: 纯图片链接/按钮（<a><img alt="..."></a>）自身没有任何文字，
     // alt 挂在子元素上，取不到就完全无名。
     if (!v && el.querySelector) {
@@ -2172,6 +2212,24 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     }
     return false;
   };
+  // BUG-107: checkVisibility() 管的是 CSS 可见性，不管 aria-hidden——这是
+  // 语义层面的"对无障碍技术隐藏"，跟布局盒/CSS 完全是两套东西，元素照样有
+  // 非零 rect、照样 checkVisibility()===true。实测大都会博物馆藏品页的部门
+  // 卡片：每张卡片除了一个正常可点的具名链接外，还叠着一个
+  // class 里带 "redundant-link"、显式 aria-hidden="true" + tabindex="-1"
+  // 的整卡覆盖层链接——纯粹是给"点卡片任意位置都能跳转"用的重复链接，
+  // 本来就该对无障碍技术（包括这个无障碍树式快照）隐身。没挡住的话，102
+  // 个 ref 里 21 个是这种空名字的重复项（角色是 link、名字是空字符串），
+  // AI 看不出旁边那条同去向、有正常名字的链接才是该点的那个。ARIA 规范里
+  // 子孙没法用 aria-hidden="false" 撤销祖先的隐藏，所以要顺着祖先链查，
+  // 不能只看元素自己。
+  let skippedAriaHidden = 0;
+  const isAriaHidden = (el) => {
+    for (let n = el; n && n !== document.documentElement; n = n.parentElement || (n.getRootNode && n.getRootNode().host)) {
+      if (n.getAttribute && n.getAttribute("aria-hidden") === "true") return true;
+    }
+    return false;
+  };
   for (const el of els) {
     if (nodes.length >= ${maxNodes}) { truncated = true; break; }
     const rect = el.getBoundingClientRect(); // 无布局盒 = 不可见，跳过
@@ -2180,6 +2238,7 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
         !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
       skippedHidden++; continue;
     }
+    if (isAriaHidden(el)) { skippedAriaHidden++; continue; }
     if (isExtensionInjected(el)) { extensionUi++; continue; }
     const role = roleOf(el);
     const name = nameOf(el);
@@ -2227,7 +2286,7 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     .filter((f) => f.src || f.name).slice(0, 20);
   return { url: location.href, title: document.title, nodes,
     nextRef: next, refsAssigned: assigned, truncated,
-    shadowRoots, iframes, skippedNoRect, skippedHidden, extensionUi, candidates: els.length };
+    shadowRoots, iframes, skippedNoRect, skippedHidden, skippedAriaHidden, extensionUi, candidates: els.length };
 })()`;
 
 // article 的页面内提取器：简化 readability——候选根按 <p> 文本总长评分取最优，
@@ -4535,11 +4594,28 @@ const tools = {
               rawLen = String(clone.textContent || "").replace(/\\s+/g, " ").trim().length;
             }
           } catch (e) {}
-          return { text, rawLen };
+          // BUG-109: innerText/textContent 都不认图片 alt——有些站的整块导航/
+          // 卡片区域文字其实是带 alt 的 <img>（logo 式项目名、图标化标题），
+          // rawLen 用的 textContent 一样看不见，跟 text 差不了多少，
+          // hiddenContentNote 那道"差距大就提示"的检查因此形同虚设。单独数
+          // 一遍可见图片的 alt 文字总量，跟 text/rawLen 各管各的病灶。
+          let imgAltLen = 0;
+          try {
+            for (const img of body ? body.querySelectorAll("img[alt]") : []) {
+              const alt = (img.getAttribute("alt") || "").trim();
+              if (!alt) continue;
+              const r = img.getBoundingClientRect();
+              if (!(r.width > 0 && r.height > 0)) continue;
+              if (typeof img.checkVisibility === "function" &&
+                  !img.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) continue;
+              imgAltLen += alt.length;
+            }
+          } catch (e) {}
+          return { text, rawLen, imgAltLen };
         })()`,
         returnByValue: true,
       });
-      const v = (res.result && res.result.value) || { text: "", rawLen: 0 };
+      const v = (res.result && res.result.value) || { text: "", rawLen: 0, imgAltLen: 0 };
       const text = v.text || "";
       const hiddenContentNote =
         v.rawLen > 500 && v.rawLen > text.length * 3 && v.rawLen - text.length > 1500
@@ -4549,6 +4625,18 @@ const tools = {
             'document.visibilityState is "hidden" (Chrome window not OS-focused), ' +
             "such animations can stall indefinitely; ask the user to bring the " +
             "window to the front and retry"
+          // BUG-109: 单独一条——图片 alt 撑起主要内容（logo 式项目名、图标化
+          // 标题）时，text/rawLen 都是空的，上面那条比例检查（rawLen 相对
+          // text 大很多）根本触发不了，必须单独判断 imgAltLen 是否本身就
+          // 占了明显比例。用 mode:snapshot 是因为它的 nameOf() 有 img[alt]
+          // 兜底，能拿到这些名字；text 模式没有这层兜底、加起来做不到
+          // "还原成一段连贯正文"，所以只提示改用 snapshot，不在这里硬凑。
+          : v.imgAltLen > 200 && v.imgAltLen > text.length
+          ? `read ${text.length} chars of text, but the page also has ~${v.imgAltLen} ` +
+            "chars of alt text on visible images that innerText doesn't include " +
+            "(common on sites that render project/product names as styled logo " +
+            "images instead of real text) — try mode:snapshot instead, its name " +
+            "resolution falls back to img[alt] and will surface these"
           : undefined;
       return {
         tabId,
@@ -4692,6 +4780,9 @@ const tools = {
       renderNote: renderNote || undefined,
       // BUG-79: 剔除了多少个「其他扩展注入的悬浮 UI」元素
       extensionUiHidden: v.extensionUi || undefined,
+      // BUG-107: 剔除了多少个 aria-hidden="true"（对无障碍技术隐身）的元素——
+      // 常见于"整卡覆盖点击用的重复链接"这类模式，数字大不是故障
+      ariaHiddenSkipped: v.skippedAriaHidden || undefined,
       // UX-214: 快照里有多少内容来自 shadow DOM（0 = 该页没用 Web Component）
       shadowRoots: v.shadowRoots || undefined,
       // UX-100: iframe 的存在必须让 AI 知道，否则找不到的元素永远找不到

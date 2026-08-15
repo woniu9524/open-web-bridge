@@ -935,3 +935,254 @@ false`）能改动底层 DOM 属性、但触发不了应用自己的状态更新
 **验证**：BMI 计算器上，修复前 `@e14 button "x"`，修复后 `@e14 button
 "Calculate"`；同一页面的普通文本框（age/height/weight 输入框）修复前后都
 正确显示 `name` 属性作为兜底名字（"cage"/"cheightfeet"等），没有被误伤。
+
+### BUG-105 · 纯空白 `textContent` 挡住图片 alt 兜底，图片链接/图标按钮仍然无名 🔴 高影响
+
+**现象**：亚马逊商品页品牌 logo 链接在快照里是 `@e54 link ""`——完全没有
+名字，AI 只能靠一长串 href 猜这是什么。但这个 `<a>` 标签里明明包着一个
+`<img alt="Sony">`，alt 文本清清楚楚。
+
+**影响面比最初看到的更大**：根因（见下）不挑元素类型，只要命中
+`nameOf()` 里"自身无文字 → 靠子元素 img alt 兜底"这条链路就会中招。真正
+高频的场景其实是**图标按钮**——`<button><img alt="关闭"></button>` 这种
+关闭/汉堡菜单/展开折叠按钮在真实站点上到处都是，比品牌 logo 链接常见得
+多。本轮升级成 🔴 高影响正是因为这一点：之前七轮 217 站扫描里记录的
+"blank ref 在正常波动区间内、大多是纯装饰元素"这类判断，很可能把一部分
+本该有名字、只是撞上这个 bug 的图标按钮也算作了"正常空白"——扩展重连后
+应该重新跑一轮扫描，看 blank-ref 占比是否有可观测的下降。
+
+**根因**：这类元素真实 HTML 是
+`<a href="..."> <img alt="Sony" ...> </a>`——`<img>` 前后各有一个来自源码
+缩进换行的纯空白文本节点。`nameOf()` 的兜底链走到
+`if (!v) v = el.textContent || "";` 这一步时，`el.textContent` 拿到的是
+两个空格（不是空字符串）——JS 里非空字符串是 truthy，`v` 被赋成
+`"  "`，紧接着 `if (!v && el.querySelector)` 这个判断因为 `v` 已经"有值"
+直接被跳过，BUG-71 专门为这种纯图片链接写的 `img[alt]` 兜底压根没机会跑。
+最终 `v` 带着两个空格走到函数末尾的 `.trim()`，变回空字符串——链子从中间
+断掉，兜底逻辑本身没错，只是永远走不到。
+
+**修复**：`el.innerText`/`el.textContent` 两处兜底赋值时立即 `.trim()`
+（`(el.textContent || "").trim()`），让空白内容在这一步就被判定为"仍然没
+名字"，从而正确继续往下走到 BUG-71 的图片 alt 兜底。代码审查时发现
+`nameOf()` 里另外两处结构完全相同的隐患——`label[for]` 关联标签、
+`closest("label")` 外层包裹标签，取的都是 `lab.innerText || ""` 不
+trim，同样会被"标签只包一张图 + 缩进空白"的写法（`<label for="x">
+<img alt="Email"></label>`）卡住——一并加了 `.trim()`。
+
+**验证**：`node --check` 确认模板字面量语法完整；给
+`owb-daemon/tests/read_page_test.js` 的 mock 补上了 `textContent`（可以
+是纯空白）+ 极简 `querySelector`（递归子元素，只认 nameOf() 实际用到的
+`tag[attr], [attr]` 形状），新增两条回归用例：① `<a>` 包一个纯空白
+textContent + 子元素 `<img alt="Sony">`，修复前拿到的名字是空字符串、
+修复后是`"Sony"`；② 链接本身有可见文字时文字依旧优先于子元素 img 的
+alt，确认 trim() 没有误伤更常见的"有文字"路径；③ 姊妹路径——外层
+`<label>` 只有纯空白 innerText 时，不会挡住输入框自己的 `name` 兜底。
+37/37 全绿。真实页面上的
+端到端复验因扩展在修复过程中意外崩溃（见下方"操作事故"记录）暂时搁置，
+等扩展恢复连接后需要重新在亚马逊商品页确认 `@e54`/`@e71` 显示为
+`"Sony"` / 完整商品名。
+
+### 操作事故 · 模板字面量里的注释写反引号，直接打崩扩展 Service Worker 🔴 高影响（自己引入，非产品缺陷）
+
+**现象**：修复 BUG-105 时，在 `nameOf()` 函数的中文注释里用反引号包代码片段
+（比如 `` `!v` ``、`` `<a><img alt="Sony"></a>` ``）来做"行内代码"排版。
+存进文件、调用 `reload-ext` 之后，扩展彻底断线，`daemon-status` 里
+`extension_connected` 卡在 `false` 不动，`page`/`eval` 等所有命令全部报
+`NO_EXTENSION`，连等了两轮 30 秒的 `chrome.alarms` 心跳都没能自愈。
+
+**根因**：`nameOf()`、`collect()` 这些函数不是独立的顶层代码——它们整段
+写在 `READ_PAGE_SNAPSHOT_EXPR` 这个用反引号包起来的模板字面量字符串
+**内部**（这个字符串最终会被序列化后送进页面上下文 `eval`）。注释里任何
+一个反引号都会把这个外层模板字面量提前截断，截断点之后的内容（包括
+`!v` 这种代码）被当成 background.js 自己的顶层 JS 来解析——`node --check`
+直接报 `SyntaxError: Unexpected token '!'`。MV3 扩展的 service worker
+在顶层解析就失败的脚本完全启动不起来，一个监听器都注册不上，所以哪怕
+`chrome.alarms` 心跳按之前的调度正常触发、把 worker 唤醒，唤醒后重新执行
+的还是磁盘上那份仍然语法错误的脚本，一样立刻失败——心跳救不了语法错误，
+只能救"活着但空闲太久被回收"的 worker。更麻烦的是 `reload-ext` 命令本身
+要靠这条 WS 连接才能送达扩展——扩展已经死了，没有东西能收这条命令，
+形成了死锁：唯一能自动修好它的通道，恰好是坏掉的那个通道本身。
+
+**修复**：把注释里的反引号代码片段全部改写成不用反引号的中文描述（比如
+"真假判断"代替 `` `!v` ``），`node --check` 校验语法通过。但脚本改对之后
+仍然拿不回连接——磁盘上的文件虽然改好了，扩展当前"已安装"的那份脚本
+（造成崩溃的那份）不会自己重新去读盘；MV3 unpacked 扩展的重载只在
+`chrome.runtime.reload()` 被成功调用时才会重新从磁盘取文件，而这条命令
+本身又要靠扩展活着才能收到——所以死锁无法从代码层面自解。等到用户醒来后
+需要手动在 `chrome://extensions` 页面点一次"重新加载"（或者干脆重启
+Chrome）；这之后扩展会用磁盘上已经修好的文件重新启动，一切恢复正常。
+
+**教训**：
+1.（已写进 `background.js` 文件头注释）编辑里面任何定义在模板字面量内部的
+   函数（`nameOf`、`collect`、`READ_PAGE_ARTICLE_EXPR`、
+   `CURSOR_OVERLAY_EXPR` 等一整片带 `${...}` 插值的代码）时，**注释里
+   绝对不能出现反引号**——哪怕只是想引用一小段代码做行内高亮。改用中文
+   引号「」或直接不加代码引用。
+2.（同样写进了文件头注释）每次编辑这类文件后，`reload-ext` 之前先跑一遍
+   `node --check background.js` 确认语法没坏——这个检查快且零成本，能在
+   把扩展打崩之前拦下几乎所有这一类错误。
+3.（已写进 SKILL.md「出错怎么办」表的 `NO_EXTENSION` 行）如果
+   `reload-ext` 之后扩展真的没能重新连上（`daemon-status` 长时间
+   `extension_connected: false`），不要指望等 `chrome.alarms` 心跳自愈——
+   心跳只能救活着的 worker，救不了顶层解析就失败的脚本。这种情况下唯一
+   出路是人工去 `chrome://extensions` 点重新加载，没有已知的命令行/CDP
+   替代路径（浏览器本身没开远程调试端口，扩展对浏览器的全部控制都要经过
+   `chrome.debugger`，而这个权限只有扩展自己活着才能用——扩展死了就没有
+   任何自动化通道能把它救回来）。
+
+### BUG-106 · 窗口没有系统焦点时 `owb shot` 卡满 30 秒，且 `visibilityState` 测不出来 🟠 中影响
+
+**现象**：Flightradar24（WebGL 实时地图）上 `owb shot` 稳定卡满 30 秒后
+报 `TIMEOUT: cdpCall timeout: Page.captureScreenshot`，但同一个 tab 上
+`owb eval "1+1"` 秒回、结果正确——不是标签页卡死。换一个内容很普通的
+IMDB 页面复现同样的症状，排除了"WebGL 页面特有"的可能。
+
+**根因**：跟 BUG-93 是同一个大类（Chrome 窗口没有操作系统级焦点时的资源
+节流），但挂的是不同的子机制。BUG-93 挂的是 `requestAnimationFrame`，由
+`document.visibilityState` 门控；这次挂的是合成器帧产出，
+`Page.captureScreenshot` 在等一帧新画面，窗口不在系统前台时合成器不产出
+新帧，CDP 调用就一直等到硬超时。关键是这次门控信号**不是**
+`visibilityState`——实测 `document.visibilityState` 读出来是
+`"visible"`（页面确实显示在屏幕上，没被遮挡/最小化），只有
+`document.hasFocus()` 是 `false`。反过来 BUG-93 实测过的组合是
+`hasFocus()` 为 `true`、`visibilityState` 为 `"hidden"`。两个信号会往
+两个不同方向脱节，各自门控不同的子系统（rAF 跟 visibilityState，合成器
+跟 hasFocus），只查其中一个都会在另一种组合下漏判——这是本次探索里最
+反直觉的一点：本以为这两个属性该是同步的，实测发现完全不是。
+
+**影响**：沿用 SKILL.md 里原有的"连 `owb shot` 都超时就是标签页真的卡死了，
+`tab close` 重开"这条建议在这种情况下是错的——标签页根本没坏，关掉重开
+一个新标签页一样没有系统焦点，`shot` 照样卡 30 秒，白做一轮。
+
+**修复**：这是浏览器省电设计造成的，不是代码缺陷，没有代码层面的修复。
+把诊断步骤写进了 SKILL.md：`owb shot` 超时时先补一条 `owb eval "1+1"`
+确认标签页没死，再查 `document.hasFocus()`（不是 `visibilityState`）
+确认是不是窗口焦点问题；同时把"Chrome 窗口不是系统前台窗口"一节的诊断
+建议从"只查 visibilityState"改成"两个信号都要查，各管各的症状"。
+
+### BUG-107 · 快照不认 `aria-hidden="true"`，整卡覆盖用的重复链接混进结果 🟠 中影响
+
+**现象**：大都会博物馆藏品页（metmuseum.org/art/collection）快照里 102 个
+ref 中有 21 个是空名字的 `link ""`。逐个查发现每一个空链接旁边都紧跟着
+一个去向完全相同、名字正常的具名链接（比如 `@e19 link ""` 和
+`@e20 link "African Art in The Michael C. Rockefeller Wing"` href 一模
+一样）——不是真的没名字，是同一个目的地被链接了两遍。
+
+**根因**：查了 `@e19` 的 `outerHTML`，class 里带
+`redundant-link-module-scss-module`，还显式写了 `aria-hidden="true"`
+和 `tabindex="-1"`——这是常见的卡片整体可点模式：一张部门卡片里放一个
+正常、具名的链接（标题/图片），再叠一个铺满整张卡片的透明链接方便"点卡片
+任意位置都能跳转"，后者天然是给鼠标用的、对无障碍技术毫无意义，站点自己
+用 `aria-hidden="true"` + `tabindex="-1"` 明确标了要对无障碍树隐身。
+问题是 `read_page` 的可见性过滤只检查 `checkVisibility()`（CSS 可见性：
+display/visibility/opacity）和布局盒（`getBoundingClientRect()`），完全
+不看 `aria-hidden`——这是两套不同的隐藏机制：`aria-hidden` 是语义层面
+"对无障碍技术隐身"的声明，跟元素在 CSS/布局上是否可见没有任何关系，一个
+`aria-hidden="true"` 的元素完全可以有非零的布局盒、通过所有 CSS
+可见性检查，因为它对鼠标用户来说必须可点。快照自称"无障碍树式读页"
+（文件头注释原话），却漏了无障碍树最基本的一条过滤规则。
+
+**影响面**：这个模式（整卡/整行铺一个 `aria-hidden` 透明链接 + 旁边放
+具名内容）是现代前端很常见的"卡片可点"实现方式，不止博物馆网站一家在用，
+预计在图片墙、商品网格、文章列表卡片类页面上都会复现。虽然 AI 靠旁边那条
+具名链接依然能找对地方，但重复的空 ref 白占了近五分之一的快照配额，且
+容易让 AI 误以为两条是不同的东西。
+
+**修复**：在可见性过滤链里加一道 `isAriaHidden()` 检查——顺着祖先链查
+`aria-hidden="true"`（ARIA 规范里子孙没法用 `aria-hidden="false"` 撤销
+祖先的隐藏，所以必须查链条不能只查元素自己），命中就整个跳过，不进
+`nodes`。新增 `skippedAriaHidden` 计数器，随快照结果一起回传到顶层
+`ariaHiddenSkipped` 字段（跟已有的 `extensionUiHidden` 同一挂）方便
+诊断，数字大是正常现象不是故障。
+
+**验证**：`read_page_test.js` 新增 3 条用例（aria-hidden 元素不进
+`nodes`、`skippedAriaHidden` 计数正确、没有 aria-hidden 的正常元素不
+受影响），40/40 全绿。真实页面复验：博物馆藏品页快照从 102 ref / 21
+空名字降到 82 ref / 1 空名字（`ariaHiddenSkipped: 20`），剩下那 1 个
+空名字查了一下是另一码事——一个纯 SVG 图标的提交按钮，DOM 里确实没有
+任何文字/aria-label/title，站点自己没给无障碍名字，不是这条修复能力
+所及。
+
+**教训（本次编辑 `background.js` 又手滑犯了一次同样的错）**：又一次在
+模板字面量内部函数的注释里用了反引号包代码片段（这次是
+"AI 看到一堆 `link \"\"`"），`node --check` 立刻抓到。这次因为先养成了
+"改完先 `node --check` 再 `reload-ext`"的习惯，在打崩扩展之前就拦下了——
+BUG-105 那次的教训确实管用，值得继续坚持。
+
+### BUG-108 · FORBIDDEN 错误文案把"原因不止一种"讲成了"原因只有一种"，且这一种还不一定对 🟡 低影响
+
+**现象**：在 `the-internet.herokuapp.com/login`（老牌 Selenium/自动化测试
+练习站）上，`owb open` 正常返回（`loadCompleted:true`、标题/URL 都正常），
+但 `owb page`/`eval` 稳定报
+`FORBIDDEN: Cannot access a chrome-extension:// URL of different extension`。
+连续开了三个全新标签页复现三次，`owb tab list` 全程显示的都是正常的
+`https://the-internet.herokuapp.com/login`，**不是** `chrome-extension://`
+地址。换一个域名（example.com）立刻恢复正常——不是全局性故障，就是这一个
+站点打不开。
+
+**根因**：这条错误码原来的文案（BUG-83 定的）把成因写死成一种：
+"OneTab 这类标签管理扩展把标签页整个换成了自己的
+`chrome-extension://` 页面"，并且原文案建议的诊断步骤"`list_tabs` 看看
+现在是什么"，**隐含的前提是 list_tabs 会证实这个归因**（即也显示
+`chrome-extension://` 地址）。但这次实测 `list_tabs` 全程证伪了这个
+归因——它看到的是正常地址。既然 Chrome 原生抛出的错误文本（"Cannot
+access a chrome-extension:// URL of different extension"）确实是真的
+（不是 owb 编出来的），说明 `chrome.debugger.attach()` 内部解析到的
+"当前调试目标"跟 `chrome.tabs.query()` 看到的不是一回事——最可能的
+解释是浏览器里别的某个扩展在这个具体域名上做了什么（注入了自己的
+frame/target、拦截了导航），但具体是哪个扩展、通过什么机制，从 owb
+这一层完全看不到，没法进一步坐实。BUG-83 的原始三个复现案例
+（东方财富、知网、npm 登录）大概率真的是 OneTab 式整页接管——那个归因
+对那三个案例仍然成立，问题是原文案把"这是我们目前知道的一种成因"写成
+了"这是唯一的成因"，遇到不吻合的新案例就会把 AI 导向错误的诊断方向
+（去纠结"是不是传错了 tabId"或"是不是 OneTab"，而真实情况可能完全
+是另一回事）。
+
+**修复**：错误文案改成先给判定步骤（查 `list_tabs` 看到的是不是也是
+`chrome-extension://` 地址），再按结果分叉给两条不同的解释和建议——
+命中就是 BUG-83 的 OneTab 场景（重开新标签页有效）；没命中（`list_tabs`
+显示正常地址但错误依旧、换个站点又正常）就如实说"原因不止一种、这次
+具体是什么看不清楚"，不再把不确定的归因讲得斩钉截铁，也提醒这种情况下
+重开新标签页不一定管用，这个 URL 眼下可能就是打不开。
+
+**没有解决的部分**：没能查出这次具体是哪个扩展/机制在拦截这个站点——
+owb 的可见范围到 `chrome.debugger`/`chrome.tabs` API 为止，看不到其他
+扩展内部在做什么。如果之后再复现，值得让用户在 `chrome://extensions`
+里挨个临时禁用排查一遍，缩小范围。
+
+### BUG-109 · `text` 模式认不出图片 alt 撑起的正文，`hiddenContentNote` 的比例检查也测不出来 🟠 中影响
+
+**现象**：`neal.fun`（一个作品集/小项目导航站）上 `owb page --mode text`
+只读到 245 个字符（页头、页脚、联系方式），完全没有页面主体——一整屏项目
+名字（"Wiki Spy"、"Cursor Camp"、"Sandboxels"……几十个）一个字都没读到。
+但同一个页面用默认 `mode:snapshot` 能正常拿到 `@e2 link "Wiki Spy"` 这类
+具名 ref，说明这些名字明明存在，`text` 模式却完全看不见。
+
+**根因**：单独 eval 查了其中一个项目链接的 `innerText`/`textContent`，
+两个都是空字符串——这些项目名字不是真文字，是 `<img alt="Wiki Spy">`
+这类带 alt 的图片（大概率是站点自己设计的 logo 式项目卡片）。
+`snapshot` 模式的 `nameOf()` 本来就有 BUG-71 定的 img[alt] 兜底，所以能
+拿到名字；`text` 模式用的是 `document.body.innerText`，天生不认图片
+alt，读不到不奇怪。真正的问题是**已有的 `hiddenContentNote` 保护机制
+在这种情况下形同虚设**——它靠"剥了 script/style 的 `textContent` 长度
+（rawLen）比 `innerText` 长很多"来判断"是不是有内容被藏起来了"，但
+`textContent` 跟 `innerText` 一样不认图片 alt，两边缺的是同一块，
+差值算出来很小，触发不了提示。AI 拿到一个几乎空的 `text` 结果和一个
+"一切正常"的 `hiddenContentNote`（根本没出现），完全没有线索知道这页
+其实有内容只是没读到。
+
+**修复**：在 `text` 模式的页面内表达式里单独数一遍可见、非空 alt 的
+图片文字总量（`imgAltLen`，走跟快照可见性判断一致的
+`checkVisibility`/rect 检查，避免把隐藏的装饰图算进去），跟原有的
+`rawLen` 比例检查并列，各自判断各自的病灶。命中就提示"页面上还有约
+N 个字符的图片 alt 文字没读到，换 `mode:snapshot`"——不在 `text` 模式
+里硬凑一份夹杂 alt 文字的输出（顺序、上下文关系跟 snapshot 的
+per-元素兜底完全不是一回事，硬拼只会更乱），而是明确指向已经能正确
+处理这种情况的另一个模式。
+
+**验证**：`node --check` 语法通过，`read_page_test.js` 34/34（这条改动
+在 `text` 模式的独立表达式里，不在 `read_page_test.js` 覆盖的
+`READ_PAGE_SNAPSHOT_EXPR` 范围内，未新增专门用例）。真实页面复验：
+`neal.fun` 上 `hiddenContentNote` 从"不出现"变成
+"read 245 chars of text, but the page also has ~633 chars of alt text
+on visible images..."，准确指向 `mode:snapshot` 这个真正能用的替代方案。
