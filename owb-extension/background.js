@@ -1128,8 +1128,14 @@ const HOOK_PRESETS = {
 const FN_HOOK_TEMPLATE = "hooks/fn_hook.js";
 // 占位符用正则匹配（吃掉两个标记之间的任意内容）：字面量匹配太脆，格式化器
 // 一动 fn_hook.js 的空白/分号就整体失配，hook_function 直接不可用。
+// BUG-122: 原来只匹配那对标记本身，而 fn_hook.js 的注释里**原样引用过一对标记**
+// 举例（那条注释恰恰是在警告"别把占位符弄坏"）。replace 用非全局正则只换第一处，
+// 于是 JSON 被塞进注释、真正的 `const OPTS` 保持 null → 模板第一行就 return，
+// **hook_function / hook_preset 整条第③级台阶静默失效**：报 registered、给
+// identifier、页面照常刷新，但什么都没挂上，hook logs 永远是空的。
+// 锚定到赋值语句本身，注释里再出现标记也不会抢匹配。
 const FN_OPTS_SENTINEL_RE =
-  /\/\*__OWB_OPTS__\*\/[\s\S]*?\/\*__OWB_OPTS_END__\*\//;
+  /const OPTS = \/\*__OWB_OPTS__\*\/[\s\S]*?\/\*__OWB_OPTS_END__\*\//;
 const HOOK_BINDING_NAME = "__owbReport";
 const HOOK_REGISTRY_KEY = "hookRegistry";
 
@@ -1200,7 +1206,20 @@ async function loadFnHookSource(opts) {
   }
   // 函数式 replace：opts 里带用户 hook_code，字符串形式会把 $& / $1 当替换模式解释
   const json = JSON.stringify(opts);
-  return template.replace(FN_OPTS_SENTINEL_RE, () => json);
+  const source = template.replace(FN_OPTS_SENTINEL_RE, () => `const OPTS = ${json}`);
+  // BUG-122: 替换失败必须**当场报错**。以前失败是静默的——注入一份 OPTS 仍为
+  // null 的模板，页面上第一行就 return，调用方却看到 registered + identifier，
+  // 一路以为钩子挂上了。宁可这里炸，也别让整条钩子链假装在工作。
+  if (!/const OPTS = \{/.test(source)) {
+    throw new ToolError(
+      "PRESET_LOAD_FAILED",
+      "fn_hook.js: OPTS placeholder was not substituted — the hook would " +
+        "silently do nothing. Check that the template still has a line " +
+        "starting with `const OPTS = ` followed by the sentinel pair, and " +
+        "that no comment nearby quotes that pair verbatim.",
+    );
+  }
+  return source;
 }
 
 // ---------------------------------------------------------------------------
@@ -4534,8 +4553,26 @@ const tools = {
     const buf = getBuffer(tabId);
     const before = new Set(buf.keys());
 
-    if (args.trigger && args.trigger.expression) {
-      await tools.evaluate({ tabId, expression: args.trigger.expression });
+    // BUG-121: 这里原来只认 `trigger: {expression: "..."}`，而 debugging.md 教的
+    // 是 `--args '{"trigger":"...click()"}'`（**字符串**）。照文档写 → 取
+    // `args.trigger.expression` 得到 undefined → **触发动作被静默跳过** →
+    // 干等到超时，然后报「没有匹配 url_pattern 的请求」，把人引去改正则，
+    // 而真正的问题是那一下点击根本没发生。两种写法都收。
+    let triggerExpr = null;
+    if (typeof args.trigger === "string") {
+      triggerExpr = args.trigger;
+    } else if (args.trigger && typeof args.trigger.expression === "string") {
+      triggerExpr = args.trigger.expression;
+    } else if (args.trigger != null) {
+      throw new ToolError(
+        "BAD_ARGS",
+        "capture_request: trigger must be a JS expression string (or " +
+          '{expression: "..."}), got ' + JSON.stringify(args.trigger).slice(0, 80),
+        false,
+      );
+    }
+    if (triggerExpr) {
+      await tools.evaluate({ tabId, expression: triggerExpr });
     }
 
     const deadline = Date.now() + (args.timeout_ms || 15000);
@@ -4551,9 +4588,15 @@ const tools = {
       await sleep(200);
     }
     if (!found) {
+      // 说清「触发动作到底跑没跑」——不然这条超时看着像 url_pattern 写错了
       throw new ToolError(
         "TIMEOUT",
-        `no request matching ${args.url_pattern} within timeout`,
+        `no request matching ${args.url_pattern} within timeout` +
+          (triggerExpr
+            ? " (the trigger did run — check the pattern, or the action may " +
+              "not fire a request)"
+            : " (NO trigger was given, so nothing was clicked — pass " +
+              "trigger: \"<js that fires the request>\")"),
         true,
       );
     }

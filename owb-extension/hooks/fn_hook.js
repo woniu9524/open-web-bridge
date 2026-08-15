@@ -17,9 +17,13 @@
  * 超时报 phase:"error"。已存在则同步安装/报错。
  */
 (() => {
-  // ⚠️ 占位符必须保持这一整串（含分隔位置）：注入前由 background.js 整体替换成
-  // JSON。格式化器把它拆成 "/*__OWB_OPTS__*/ null; /*__OWB_OPTS_END__*/" 会让
-  // hook_function 直接报 PRESET_LOAD_FAILED（f2b170d 就这么坏过一次）。
+  // ⚠️ 下面这行的占位符注入前由 background.js 整体替换成 JSON。
+  // 替换的正则**锚定在 "const OPTS =" 上**，所以这一行必须保持这个开头。
+  // BUG-122: 这里原来有一条警告注释，里面**原样引用了一对占位符标记**举例
+  // "格式化器拆成什么样会坏"。而替换用的是非全局正则（只替换第一处匹配），
+  // 于是 JSON 被塞进了那条注释里，真正的 OPTS 保持 null——hook 静默失效。
+  // **写警告的注释本身成了它警告的那个 bug。** 所以：这附近的注释里
+  // 永远不要成对写出那两个标记。
   const OPTS = /*__OWB_OPTS__*/null/*__OWB_OPTS_END__*/;
   if (!OPTS || !OPTS.path) return;
   window.__owbFnHooked = window.__owbFnHooked || {};

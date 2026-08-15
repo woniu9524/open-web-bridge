@@ -118,6 +118,17 @@ owb hook logs --source hook:fn
 `--non-overridable true` 防止页面 SDK 后续把你的钩子覆盖掉。
 目标函数注入时还不存在也没关系，模板会轮询等它出现（最多 15 秒）。
 
+⚠️ **`hook fn` 只拦得住「走这个路径打进来」的调用。** 它替换的是
+`app.sign` 这个**属性**，而页面内部往往拿的是闭包里的局部引用
+（`var s = sign(...)` 而不是 `app.sign(...)`）——那种调用**完全不经过你的钩子**。
+症状：钩子明明装上了（`window.__owbFnHooked` 里有键、函数体变成
+`function sign() { [native code] }`），点按钮触发了真实请求，`hook logs` 却只有
+一条 `installed`，一条调用都没有。**这不是钩子坏了**，是它按定义就拦不到。
+实测：直接 `owb eval 'app.sign({...})'` 立刻就有 `return` 事件，点按钮则一条没有。
+
+要抓内部调用，改用 ④ 级的 `debug break-fn`（断在函数对象上，谁调都断得住），
+或 ⑤ 级的 `script patch` 直接改源码。
+
 ⚠️ **`hook logs` 的返回字段叫 `events`，不是 `logs`**；`--since-seq` 增量拉取
 （写成 `--since` 也认）；多 tab 同时挂钩子时用 `--tab` 过滤，否则事件是混的
 （返回里 `filtered_other_tabs` 会告诉你滤掉了多少）。
