@@ -627,13 +627,13 @@ owb eval 'document.visibilityState + " hasFocus=" + document.hasFocus()'
 | **net**    | net start / stop / list / detail / initiator / capture                 | 抓包 → `debugging.md`    |
 | **har**    | har start / save / stop / status / to-replay / diff / assert            | 录制与加工 → `debugging.md` |
 | **hook**   | hook preset / fn / remove / status / logs                              | 函数与请求钩子 → `debugging.md` |
-| **debug**  | debug break-xhr / break-fn / break-remove / frames / step / resume / console，oracle | 断点与调用帧 → `debugging.md` |
+| **debug**  | debug break-xhr / break-fn / break-remove / frames / step / resume / console；**`oracle` 是顶层命令**（写 `owb oracle`，不是 `owb debug oracle`） | 断点与调用帧 → `debugging.md` |
 | **script** | script list / source / search / patch / unpatch / watch / watch-remove  | 脚本搜索改写 → `debugging.md` |
 | **verify** | verify signer / replay / evidence                                      | 离线验签、TLS 重放、取证 → `debugging.md` |
 | **cookie** | cookie get / set / delete                                              | cookie 读写              |
 | **state**  | state save / load / list / delete / export / import                    | 登录态存取                  |
 | **env**    | env set / reset / compare                                              | 设备/网络/地理/UA 模拟         |
-| **file**   | download、upload、pdf、file fetch                                         | 下载、上传、导出 PDF           |
+| **file**   | download、upload、pdf 是**顶层**命令；只有 `file fetch` 带 `file ` 前缀        | 下载、上传、导出 PDF           |
 | **task**   | task begin / end / list                                                | 任务分组与归档                |
 | **flow**   | flow save / run / list                                                 | 流程固化与回放                |
 | **human**  | handoff、wait-user                                                      | 人机交接                   |

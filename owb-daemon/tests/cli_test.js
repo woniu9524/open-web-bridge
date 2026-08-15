@@ -143,6 +143,32 @@ async function main() {
       && pv(["page", "--max-nodes", "1200"]).max_nodes === 1200
       && pv(["page", "--tab", "612684020"]).tabId === 612684020);
 
+    // 6c. BUG-120: help 的组摘要行必须是「能照着敲」的真实命令形态。
+    // 原来一律只取最后一段，于是 `debug break-xhr`（要前缀）和 `oracle`
+    // （顶层）长得一样；file 组正好相反。照着敲 `owb debug oracle` /
+    // `owb file download` / `owb fetch` 全报未知命令。
+    r = await runCli(["help"], env);
+    const groupLines = r.out.split(/\r?\n/).filter((l) => /^\s*\[/.test(l));
+    const unrunnable = [];
+    for (const line of groupLines) {
+      const m = line.match(/^\s*\[([^\]]+)\]\s*(.*)$/);
+      if (!m) continue;
+      const [, gname, rest] = m;
+      const shown = rest.includes(" / ") ? rest.split(" / ") : rest.trim().split(/\s+/);
+      for (const name of shown.map((x) => x.trim()).filter(Boolean)) {
+        // 照着这行敲：要么它本身是命令，要么补上组名前缀是命令
+        if (!COMMANDS.has(name) && !COMMANDS.has(`${gname} ${name}`)) {
+          unrunnable.push(`[${gname}] ${name}`);
+        }
+      }
+    }
+    check("BUG-120 help 里列出的每条命令都能照着敲",
+      unrunnable.length === 0, unrunnable.join(", "));
+    // 具体守住两个混用组
+    check("BUG-120 debug 组把顶层的 oracle 与带前缀的区分开",
+      /debug break-xhr/.test(r.out) && /(^| )oracle( |$)/m.test(r.out));
+    check("BUG-120 file 组标出只有 fetch 带前缀", /file fetch/.test(r.out));
+
     // 7. BUG-110：经符号链接调用（npm link / pnpm / 全局 bin）入口守卫仍要成立。
     // Node 把 import.meta.url 解析到 realpath，argv[1] 却保留软链路径；旧守卫
     // 直接比这两者，于是 main() 静默不跑——无输出、无报错、退出码 0。

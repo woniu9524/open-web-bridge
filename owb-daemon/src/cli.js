@@ -572,9 +572,22 @@ function printHelp(groupName) {
     out.push("  owb help <组>          组内命令详情");
     out.push("  owb call <工具> --args '<json>'   直调任意 ctl 工具");
     out.push("");
+    // BUG-120: 原来一律 `n.split(" ").pop()` 只取最后一段，于是「要带组名前缀的」
+    // 和「顶层的」在这一行里长得一模一样。debug 组里 7 条要写 `owb debug xxx`、
+    // 唯独 oracle 是 `owb oracle`；file 组正好相反（download/upload/pdf 是顶层、
+    // 只有 fetch 要写 `owb file fetch`）。照着这行敲 `owb debug oracle`、
+    // `owb file download`、`owb fetch` 全都报「未知命令」。
+    // 组内前缀一致时照旧省略（组名本身就说明了前缀）；**混用的组打印完整命令**。
     for (const [gname, group] of Object.entries(GROUPS)) {
-      const names = Object.keys(group).map((n) => n.split(" ").pop());
-      out.push(`  [${gname}] ${[...new Set(names)].join(" ")}`);
+      const keys = Object.keys(group);
+      const prefix = `${gname} `;
+      const mixed =
+        keys.some((k) => k.startsWith(prefix)) &&
+        keys.some((k) => !k.startsWith(prefix));
+      const names = mixed
+        ? keys
+        : keys.map((n) => (n.startsWith(prefix) ? n.slice(prefix.length) : n));
+      out.push(`  [${gname}] ${[...new Set(names)].join(mixed ? " / " : " ")}`);
     }
     out.push("");
     out.push("通用 flag：--tab <id> --timeout <s> --out <文件> --raw --compact --no-autostart --args '<json>'");
