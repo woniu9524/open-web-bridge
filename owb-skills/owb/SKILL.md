@@ -228,6 +228,16 @@ owb page --since-last true
 ⚠️ **列表页/论坛首页用 article 会返回 0 字**——它们本来就没有"正文"，这是正确行为
 不是故障（V2EX、牛客、各种榜单页都是如此）。空返回时看 `reason` 字段，会说明原因。
 
+💡 **正文读成 0 字、但 `hiddenContentNote` 说 DOM 里有上万字 → 改用 `--mode text`。**
+这是滚动淡入动画没触发（Chrome 窗口没有系统焦点时会无限期卡住）。
+`text` 模式会**自动回退到 `textContent`** 把正文捞出来，并在返回里标
+`textSource: "textContent-fallback"`。实测 claude.com 博客：`article` 模式 3 字、
+`text` 模式回退后 25161 字。
+
+⚠️ 回退来的文本是 **DOM 顺序不是视觉顺序**，且会带上整块导航菜单、隐藏的
+无障碍文本。当正文用没问题，**别拿它判断页面布局**。用户在场时，让他把窗口切到
+前台再读一次更干净。
+
 ## 等待与超时
 
 ```bash
@@ -540,6 +550,7 @@ owb eval --args "$(cat /tmp/eval-args.json)"
 | `owb shot` 卡满 30 秒超时                | 先补一条 `owb eval "1+1"` 分叉：也超时=标签页真死了（关掉重开）；秒回=窗口没焦点（关了重开没用）     | field-notes |
 | 快照为空、带 `renderNote`                 | 标签页没在渲染，已自动前台化重试；`renderNote` 会说清是内容问题还是窗口焦点问题               | field-notes |
 | 403 / 空快照 / `httpErrorHint`         | 反爬拒绝（澎湃、知网、部分电商），**换思路**，别在空快照上反复分析                          | field-notes |
+| `FORBIDDEN` + `cannot be scripted` / `chrome-extension:// URL` | 这类地址 Chrome **结构上就不允许调试**（见下），**不是故障，重试无用**，换条路 | 见下 |
 | 任何操作都 `FORBIDDEN`，页面像是变了个样          | 标签页被 OneTab 一类扩展**整个换掉**了。`tab list` 确认，新标签页重开               | field-notes |
 | `FORBIDDEN` 且提到 interstitial        | Chrome 安全拦截页（证书错误），**无解**，让用户在浏览器里处理                         | field-notes |
 | PDF 网址三种模式都读不出正文                    | Chrome PDF 阅读器在独立沙盒视图里，**架构上够不到**。找 HTML 版本，或截图              | field-notes |
@@ -548,6 +559,21 @@ owb eval --args "$(cat /tmp/eval-args.json)"
 | stderr 出现 `扩展暂时不可达…N s 后重试`         | MV3 worker 被回收，**正常**，命令会自己重试（累计约 35 秒）到成功                   | 见下          |
 | 退避跑完仍 `NO_EXTENSION`                | 这次不是空闲回收，是**脚本本身崩了**，心跳唤不醒。**别再等**，直接报告用户                    | 见下          |
 | 导航就是慢                               | 219 站实测 p50 4.7s / p90 15s / p99 30s。超 30 秒基本是站点问题，用 `--timeout-ms` 放宽或换 `domcontentloaded` | —          |
+
+### Chrome 结构性禁止调试的地址
+
+有一类 URL **`open` 会成功、之后每一条命令都 `FORBIDDEN`**：
+
+- `chromewebstore.google.com`（错误文案：`The extensions gallery cannot be scripted`）
+- `chrome://*`（设置、扩展管理、历史…）
+- `devtools://*`
+- **别的扩展**的 `chrome-extension://` 页面
+
+这是 Chrome 自己的安全边界，不是 OWB 的 bug，**换标签页、重试、加 `--force` 全都没用**。
+`open` 的返回里会带 `attachHint` 提前说破——看到它就别再往下调 `page`/`eval` 了。
+
+绕法只有换信息源：Web Store 的条目改用它的公开分享页或搜索引擎缓存；
+`chrome://` 的信息（装了哪些扩展、设置项）**只能让用户自己看**，你够不到。
 
 窗口焦点诊断（**两个信号都要查，只查一个会漏判**）：
 

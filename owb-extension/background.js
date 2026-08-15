@@ -2456,8 +2456,10 @@ const READ_PAGE_ARTICLE_EXPR = `(() => {
         "chars of text in the DOM that isn't currently visible (innerText excludes it) " +
         "— likely a scroll-reveal/fade-in animation that hasn't triggered. If " +
         "document.visibilityState is \\"hidden\\" (Chrome window not OS-focused), such " +
-        "animations can stall indefinitely; ask the user to bring the window to the " +
-        "front and retry"
+        "animations can stall indefinitely. BUG-113: mode:text recovers this " +
+        "automatically (it falls back to textContent and reports " +
+        "textSource:\\"textContent-fallback\\") — use mode:text here. Having the " +
+        "user focus the window and re-reading still gives the cleanest result."
       : undefined;
   return { title: document.title, content,
     root: best.tagName.toLowerCase() + (best.className ? "." + String(best.className).split(/\\s+/)[0] : ""),
@@ -2696,6 +2698,10 @@ const tools = {
     readPageNextRef.delete(tabId);
     readPageSnapshots.delete(tabId);
     scriptRegistryMap.delete(tabId);
+    // BUG-112: 这个变量只在「本次调用新建了 tab」时才被赋值，可复用已有 tab
+    // 导航时它一直是 null——返回里就报成 groupId:null，而那个 tab 其实好好地
+    // 待在 task 组里。看到 null 会误判成"任务分组没生效"。收尾时用 tab 的
+    // 真实 groupId 兜底（Chrome 用 -1 表示未分组，统一成 null）。
     let groupId = null;
     // UX-235: 无任务上下文时落进「OWB 临时」暂存组。这里顺带数一下组里现有
     // 多少 tab，回传给调用方——不改变行为，只是把「你正在往杂物抽屉里堆
@@ -2809,7 +2815,7 @@ const tools = {
       url: tab.url,
       title: tab.title,
       loadCompleted: settled,
-      groupId,
+      groupId: groupId != null ? groupId : tab.groupId >= 0 ? tab.groupId : null,
     };
     // UX-65/BUG-4: loadCompleted=false 既不是错误也没有指引，AI 只会无视它继续
     // 操作半加载的页面。这里点明下一步。
@@ -4682,11 +4688,23 @@ const tools = {
           const body = document.body;
           const text = String((body && body.innerText) || "");
           let rawLen = 0;
+          let rawText = "";
           try {
             const clone = body ? body.cloneNode(true) : null;
             if (clone) {
-              clone.querySelectorAll("script, style, noscript, template").forEach((n) => n.remove());
+              clone.querySelectorAll("script, style, noscript, template, svg").forEach((n) => n.remove());
               rawLen = String(clone.textContent || "").replace(/\\s+/g, " ").trim().length;
+              // BUG-113: textContent 会把整页糊成一行——块级元素之间补个换行，
+              // 回退出来的正文才有段落结构，能当文章读。
+              clone.querySelectorAll(
+                "p, div, section, article, header, footer, li, br, tr, h1, h2, h3, h4, h5, h6"
+              ).forEach((n) => { try { n.insertAdjacentText("beforebegin", "\\n"); } catch (e) {} });
+              rawText = String(clone.textContent || "")
+                .replace(/[ \\t\\u00a0]+/g, " ")
+                .replace(/\\n[ ]*/g, "\\n")
+                .replace(/\\n{3,}/g, "\\n\\n")
+                .trim()
+                .slice(0, ${maxChars});
             }
           } catch (e) {}
           // BUG-109: innerText/textContent 都不认图片 alt——有些站的整块导航/
@@ -4706,20 +4724,36 @@ const tools = {
               imgAltLen += alt.length;
             }
           } catch (e) {}
-          return { text, rawLen, imgAltLen };
+          return { text, rawLen, rawText, imgAltLen };
         })()`,
         returnByValue: true,
       });
       const v = (res.result && res.result.value) || { text: "", rawLen: 0, imgAltLen: 0 };
-      const text = v.text || "";
+      let text = v.text || "";
+      // BUG-113: innerText 被 CSS 可见性饿死时，正文其实好端端躺在 DOM 里
+      // （实测 claude.com 博客：innerText 0 字，textContent 28637 字）。
+      // 以前这里只是「提示一下」，然后建议用户把窗口切到前台——可无人值守
+      // 跑的时候根本没有用户，等于死路。既然剥掉 script/style 的 textContent
+      // 已经量出来了，就直接用它兜底，并如实标注这是回退来源。
+      const starved =
+        v.rawLen > 500 && v.rawLen > text.length * 3 && v.rawLen - text.length > 1500;
+      let textSource;
+      if (starved && v.rawText) {
+        text = v.rawText;
+        textSource = "textContent-fallback";
+      }
       const hiddenContentNote =
-        v.rawLen > 500 && v.rawLen > text.length * 3 && v.rawLen - text.length > 1500
-          ? `read ${text.length} chars but the page has ~${v.rawLen} chars of text ` +
-            "in the DOM that isn't currently visible (innerText excludes it) — likely " +
-            "a scroll-reveal/fade-in animation that hasn't triggered. If " +
-            'document.visibilityState is "hidden" (Chrome window not OS-focused), ' +
-            "such animations can stall indefinitely; ask the user to bring the " +
-            "window to the front and retry"
+        starved
+          ? `innerText saw only ${(v.text || "").length} chars but the DOM holds ` +
+            `~${v.rawLen} — a scroll-reveal/fade-in that never triggered ` +
+            '(typical when document.visibilityState is "hidden", i.e. the Chrome ' +
+            "window lacks OS focus). " +
+            (textSource
+              ? "Returned the textContent fallback instead, so the body text " +
+                "above IS the real content — but it is DOM order, not visual " +
+                "order, and may include hidden/duplicate nav or a11y-only text. " +
+                "For a faithful reading, have the user focus the window and re-read."
+              : "Could not recover it; have the user bring the window to the front.")
           // BUG-109: 单独一条——图片 alt 撑起主要内容（logo 式项目名、图标化
           // 标题）时，text/rawLen 都是空的，上面那条比例检查（rawLen 相对
           // text 大很多）根本触发不了，必须单独判断 imgAltLen 是否本身就
@@ -4738,6 +4772,7 @@ const tools = {
         mode,
         text: text.length > maxChars ? text.slice(0, maxChars) : text,
         truncated: text.length > maxChars,
+        textSource,
         hiddenContentNote,
       };
     }
