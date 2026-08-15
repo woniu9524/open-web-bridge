@@ -18,8 +18,10 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
+
+import { isMainModule } from "./ismain.js";
 
 import { EvidenceStore } from "./evidence.js";
 import { verify_signer, dry_run_signer } from "./verify.js";
@@ -668,7 +670,9 @@ export class Bridge {
     }
     // ---- task 归档命名空间：work/tasks/<id>/ ----
     if (name === "task_begin") {
-      const title = String(args.title || "").trim();
+      // BUG-110: 也认 args.name —— CLI 曾把位置参数传成 name，直接调工具的
+      // 调用方可能沿用了那个形状；两个都收，别再静默丢标题。
+      const title = String(args.title || args.name || "").trim();
       let taskId = tsId();
       if (title) {
         const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-")
@@ -1202,9 +1206,7 @@ export async function serve(workDir = WORK_DIR) {
 }
 
 // 仅作为主模块直接运行时才启动（供测试 import 时不监听）
-const isMain = process.argv[1] &&
-  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
-if (isMain) {
+if (isMainModule(import.meta.url)) {
   serve().catch((e) => {
     console.error(e);
     process.exit(1);

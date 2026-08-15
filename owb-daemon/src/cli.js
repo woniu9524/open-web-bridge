@@ -27,8 +27,9 @@ import WebSocket from "ws";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
+import { isMainModule } from "./ismain.js";
 import { HOST, PORT } from "./server.js";
 
 const CTL_URL = `ws://${HOST}:${PORT}/ctl`;
@@ -66,7 +67,7 @@ const GROUPS = {
     "tab list": { ctl: "list_tabs", desc: "列出全部 tab" },
     "tab find": { ctl: "find_tab", pos: ["url_pattern"], desc: "按 url 正则找 tab" },
     "tab close": { ctl: "close_tab", desc: "关 tab（--tab 指定）" },
-    "tab close-group": { ctl: "close_group", desc: "关掉「OWB 分析」组全部 tab" },
+    "tab close-group": { ctl: "close_group", desc: "一键清场：关掉「OWB 临时」+ 全部「task:」组的 tab" },
   },
   net: {
     "net start": { ctl: "network_start", desc: "开始抓包" },
@@ -136,7 +137,10 @@ const GROUPS = {
     "file fetch": { ctl: "daemon.download", desc: "daemon 侧直接下载 URL" },
   },
   task: {
-    "task begin": { ctl: "daemon.task_begin", pos: ["name"], desc: "任务开始（归档 + 标签）" },
+    // BUG-110: 位置参数原来映射成 name，但 daemon 侧 task_begin 读的是
+    // args.title —— 标题一路丢到底，任务组退化成 "task: <时间戳>"，
+    // 「一个任务一个可读分组」这个核心卖点直接失效。
+    "task begin": { ctl: "daemon.task_begin", pos: ["title"], desc: "任务开始（建任务组 + 归档）" },
     "task end": { ctl: "daemon.task_end", desc: "任务结束（自动收尾 HAR 入档）" },
     "task list": { ctl: "daemon.task_list", desc: "任务列表" },
   },
@@ -688,10 +692,7 @@ async function main() {
   }
 }
 
-const isMain =
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
-if (isMain) {
+if (isMainModule(import.meta.url)) {
   main();
 }
 

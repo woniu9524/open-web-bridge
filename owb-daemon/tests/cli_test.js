@@ -124,6 +124,31 @@ async function main() {
     check("help 列出命令组", /\[基础\]/.test(r.out) && /\[net\]/.test(r.out) && /\[state\]/.test(r.out));
     r = await runCli(["help", "基础"], env);
     check("help <组> 展开详情", /owb open/.test(r.out) && /owb click/.test(r.out));
+
+    // 7. BUG-110：经符号链接调用（npm link / pnpm / 全局 bin）入口守卫仍要成立。
+    // Node 把 import.meta.url 解析到 realpath，argv[1] 却保留软链路径；旧守卫
+    // 直接比这两者，于是 main() 静默不跑——无输出、无报错、退出码 0。
+    const linkDir = path.join(workdir, "linked-src");
+    let linked = false;
+    try {
+      fs.symlinkSync(path.join(DAEMON_DIR, "src"), linkDir,
+        process.platform === "win32" ? "junction" : "dir");
+      linked = true;
+    } catch (e) {
+      console.log(`[SKIP] BUG-110 软链入口守卫（无法创建符号链接：${e.code || e.message}）`);
+    }
+    if (linked) {
+      const p = spawn(process.execPath, [path.join(linkDir, "cli.js"), "help"], {
+        cwd: DAEMON_DIR, env, stdio: ["ignore", "pipe", "pipe"],
+      });
+      let lout = "", lerr = "";
+      p.stdout.on("data", (d) => { lout += d; });
+      p.stderr.on("data", (d) => { lerr += d; });
+      const lcode = await new Promise((res) => p.on("close", res));
+      check("BUG-110 经符号链接调用 CLI 仍执行 main()",
+        lcode === 0 && /\[基础\]/.test(lout),
+        `code=${lcode} out=${lout.slice(0, 80) || "(空)"} err=${lerr.slice(0, 80)}`);
+    }
   } finally {
     await killProc(daemon);
   }

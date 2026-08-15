@@ -10,9 +10,7 @@
  * ctl 通道直连（本地信任模型，无 token）。
  */
 import WebSocket from "ws";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
-
+import { isMainModule } from "./ismain.js";
 import { PORT } from "./server.js";
 
 const DOC = `命令行控制器（测试用）：
@@ -93,9 +91,7 @@ async function main() {
 }
 
 // 仅作为主模块直接运行时才执行（供 import 时不触发 CLI）
-const isMain = process.argv[1] &&
-  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
-if (isMain) {
+if (isMainModule(import.meta.url)) {
   main()
     .then((code) => { process.exitCode = code; })
     .catch((e) => {

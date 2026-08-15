@@ -21,6 +21,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { isMainModule } from "../src/ismain.js";
 import { HOST, makeChecker, freePort, waitPort, killProc, onceOpen, tk } from "./kit.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -515,7 +516,7 @@ async function main() {
     check("navigate new_tab 自动编组", !!gid && !!newTid,
       jstr(res).slice(0, 200));
     res = await ctl.call("list_tabs", {});
-    const grouped = ((res.data || {}).tabs || []).filter((t) => t.group === "OWB 分析");
+    const grouped = ((res.data || {}).tabs || []).filter((t) => t.group === "OWB 临时");
     check("list_tabs 可见 OWB 分组",
       grouped.some((t) => t.tabId === newTid),
       jstr(grouped).slice(0, 200));
@@ -606,7 +607,7 @@ async function main() {
     const taskTid2 = (res.data || {}).tabId;
     res = await ctl.call("list_tabs", {});
     const grp2 = ((res.data || {}).tabs || []).find((t) => t.tabId === taskTid2) || {};
-    check("clear 后 navigate 回 OWB 组", grp2.group === "OWB 分析",
+    check("clear 后 navigate 回 OWB 组", grp2.group === "OWB 临时",
       jstr(grp2).slice(0, 200));
     for (const tid of [taskTid, taskTid2]) {  // 清场，别留在用户浏览器里
       await ctl.call("close_tab", { tabId: tid });
@@ -759,9 +760,7 @@ async function main() {
   return summarize();
 }
 
-const isMain = process.argv[1]
-  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) {
+if (isMainModule(import.meta.url)) {
   main().then((rc) => process.exit(rc)).catch((e) => {
     console.error("[FAIL] 测试异常:", e);
     process.exit(1);
