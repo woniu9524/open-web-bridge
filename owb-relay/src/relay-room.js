@@ -62,10 +62,17 @@ export class RelayRoom {
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
-  // 配对后纯转发：把本端收到的消息原样发给「另一个 ws」。
-  // 客户端在收到 relay_paired 前不发消息；若提前发，这里因无对端自然丢弃。
+  // 配对后转发：**定向**发给对端 role，不是广播给「除自己以外的所有人」。
+  // 原来用无 tag 的 getWebSockets() 遍历：同 role 顶替后，被 close 但尚未从
+  // 注册表移除的幽灵连接也会收到帧——把本该点对点的控制流量发给了一个正在
+  // 关闭的旧连接。按 tag 定向既准确又省一次遍历。
   async webSocketMessage(ws, event) {
-    for (const peer of this.state.getWebSockets()) {
+    const tags = this.state.getTags(ws) || [];
+    const mine = tags.includes(ROLE_EXT) ? ROLE_EXT
+      : tags.includes(ROLE_CTL) ? ROLE_CTL : null;
+    if (!mine) return;
+    const other = mine === ROLE_EXT ? ROLE_CTL : ROLE_EXT;
+    for (const peer of this.state.getWebSockets(other)) {
       if (peer === ws) continue;
       try {
         peer.send(event);

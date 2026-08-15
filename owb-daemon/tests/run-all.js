@@ -89,7 +89,17 @@ for (const f of files) {
   results.push({ name: f, ok });
 }
 
-// ---- 3. 汇总 ----
+// ---- 3. 中转（在另一个包里，纯 Node mock、无外部依赖，照样该跑）----
+// 它此前只挂在 owb-relay 自己的 test 脚本上，根 npm test 从不调用 —— 而中转是
+// 「让远程 agent 驱动用户已登录浏览器」这条链路上唯一的公网组件。
+const RELAY_TEST = path.join(REPO_ROOT, "owb-relay", "test", "relay_test.mjs");
+if (fs.existsSync(RELAY_TEST)) {
+  console.log(bold("\n=== owb-relay/relay_test.mjs ==="));
+  const ok = await run(process.execPath, [RELAY_TEST], REPO_ROOT);
+  results.push({ name: "owb-relay/relay_test.mjs", ok });
+}
+
+// ---- 4. 汇总 ----
 const failed = results.filter((r) => !r.ok);
 console.log(bold("\n=== summary ==="));
 for (const r of results) {

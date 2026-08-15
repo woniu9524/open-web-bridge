@@ -243,19 +243,52 @@ function scheduleReconnect() {
 // ---------------------------------------------------------------------------
 
 const DEADMAN_MS = 45000;
+const DEADMAN_KEY = "deadmanSince";
 let deadmanTimer = null;
 
+// 断连起点存进 storage.session：内存变量活不过 SW 回收，而回收恰恰是死开关
+// 最需要生效的场景。session 域随浏览器关闭自动清，正合语义。
+function deadmanStore() {
+  return chrome.storage.session || chrome.storage.local;
+}
+
+/**
+ * 脱管本扩展附着的所有 debugger target。
+ *
+ * 关键是枚举**真实附着态**而不是内存里的 attachedTabs：SW 冷启后那个 Set 是
+ * 空的，原来的 for 循环一次都不会执行——也就是说死开关在「SW 被回收 + daemon
+ * 不可达」这个它专门要防的场景里根本不存在，用户页面上的 debugger 黄条和
+ * emulation 覆盖会永久残留。
+ */
+async function detachAllDebuggers() {
+  const ids = new Set(attachedTabs);
+  try {
+    for (const t of await chrome.debugger.getTargets()) {
+      if (t.attached && t.tabId != null) ids.add(t.tabId);
+    }
+  } catch (e) { /* 拿不到就只按内存里的来 */ }
+  if (!ids.size) return 0;
+  log(`deadman: daemon unreachable, detaching ${ids.size} debugger target(s)`);
+  let n = 0;
+  for (const tabId of ids) {
+    try {
+      await chrome.debugger.detach({ tabId });
+      n++;
+    } catch (e) { /* 本来就没附着 / tab 已关 */ }
+  }
+  attachedTabs.clear();
+  return n;
+}
+
+// setTimeout 这条路只负责「daemon 短暂断连、SW 还活着」的快速触发；
+// 真正扛得住 SW 回收的判定在 30s keepalive alarm 里（见 onAlarm）。
 function scheduleDeadman() {
+  deadmanStore().set({ [DEADMAN_KEY]: Date.now() }).catch(() => {});
   if (deadmanTimer) return;
   deadmanTimer = setTimeout(async () => {
     deadmanTimer = null;
     if (wsOpen() && helloAcked) return; // 已恢复，无需脱管
-    log("deadman: daemon unreachable, detaching all debuggers");
-    for (const tabId of [...attachedTabs]) {
-      try {
-        await chrome.debugger.detach({ tabId });
-      } catch (e) {}
-    }
+    await detachAllDebuggers();
   }, DEADMAN_MS);
 }
 
@@ -264,6 +297,7 @@ function cancelDeadman() {
     clearTimeout(deadmanTimer);
     deadmanTimer = null;
   }
+  deadmanStore().remove(DEADMAN_KEY).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -276,9 +310,25 @@ function startKeepalive() {
   chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 }
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== KEEPALIVE_ALARM) return;
   if (!wsOpen()) connect();
+  // 死开关的**真正**判定点：alarm 活得过 SW 回收，setTimeout 活不过。
+  // SW 被回收时连 ws.onclose 都不会触发，所以这里也负责补打断连标记。
+  try {
+    if (wsOpen() && helloAcked) {
+      await deadmanStore().remove(DEADMAN_KEY);
+      return;
+    }
+    const cur = await deadmanStore().get(DEADMAN_KEY);
+    const since = cur && cur[DEADMAN_KEY];
+    if (!since) {
+      await deadmanStore().set({ [DEADMAN_KEY]: Date.now() });
+      return;
+    }
+    // 标记保留到重连为止：脱管完之后已无附着目标，重复触发是空转
+    if (Date.now() - since >= DEADMAN_MS) await detachAllDebuggers();
+  } catch (e) { /* 死开关不该把心跳弄挂 */ }
 });
 
 // ---------------------------------------------------------------------------

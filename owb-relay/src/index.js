@@ -39,6 +39,20 @@ async function handle(request, env) {
       return new Response("token required: wss://<relay>/<token>?role=...\n", { status: 400 });
     }
 
+    // token 门槛：**在实例化 DO 之前**校验形状。
+    // 原来任意非空路径都会 idFromName → 建出一个新 Durable Object，于是只要
+    // 知道你的 workers.dev 地址（半可猜），就能用随机路径批量建房，把免费额度
+    // （每月 1M DO 请求）打空——而「额度耗尽」恰好是 README 里记录在案的常见
+    // 故障。真实 token 是 32 字节 base64url（43 字符），这道门槛不影响任何
+    // 合法用户，顺带也让 token 不可能撞上 /health。
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(token)) {
+      return new Response(
+        "bad token: expected 32-128 base64url chars " +
+        "(generate one in the extension popup)\n",
+        { status: 400 },
+      );
+    }
+
     const upgrade = (request.headers.get("upgrade") || "").toLowerCase();
     if (upgrade !== "websocket") {
       return new Response("expect websocket upgrade\n", { status: 426 });

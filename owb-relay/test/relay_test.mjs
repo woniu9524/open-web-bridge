@@ -61,6 +61,11 @@ class FakeState {
       .filter((r) => !r.ws._closed && (tag === undefined || r.tags.includes(tag)))
       .map((r) => r.ws);
   }
+  // 真实 DurableObjectState 的 API：转发要按对端 role 定向就得用它
+  getTags(ws) {
+    const hit = this._reg.find((r) => r.ws === ws);
+    return hit ? hit.tags : [];
+  }
 }
 
 // ---- 辅助 ----
@@ -182,6 +187,57 @@ async function test_bad_role_rejected() {
   ok(state.getWebSockets().length === 0, "无连接被接受");
 }
 
+// ---- Worker 入口（此前零覆盖）----
+
+// index.js 只用到 request.url 和 request.headers.get("upgrade")
+function makeWorkerReq(path, upgrade) {
+  return {
+    url: `https://relay.example.workers.dev${path}`,
+    headers: { get: (k) => (String(k).toLowerCase() === "upgrade" ? upgrade || null : null) },
+  };
+}
+
+const fakeEnv = {
+  RELAY_ROOM: {
+    idFromName: (name) => ({ name }),
+    get: (id) => ({ fetch: async () => new Response("routed", { status: 101, webSocket: id.name }) }),
+  },
+};
+
+// 32 字节 base64url ≈ 43 字符，扩展 popup 生成的就是这个形状
+const GOOD_TOKEN = "a".repeat(43);
+
+async function test_worker_entry() {
+  console.log("\n[test] Worker 入口路由与 token 门槛");
+  const { default: worker } = await import("../src/index.js");
+
+  let res = await worker.fetch(makeWorkerReq("/health"), fakeEnv);
+  ok(res.status === 200, "/health → 200");
+
+  res = await worker.fetch(makeWorkerReq("/"), fakeEnv);
+  ok(res.status === 400, "空 token → 400");
+
+  // token 门槛：不加这道闸，任意随机路径都会实例化一个新 Durable Object，
+  // 只要知道 workers.dev 地址就能批量建房打空免费额度（每月 1M DO 请求）。
+  res = await worker.fetch(makeWorkerReq("/short", "websocket"), fakeEnv);
+  ok(res.status === 400, "过短 token → 400（不建 DO）");
+
+  res = await worker.fetch(makeWorkerReq(`/${"!".repeat(40)}`, "websocket"), fakeEnv);
+  ok(res.status === 400, "非 base64url 字符 → 400");
+
+  res = await worker.fetch(makeWorkerReq(`/${GOOD_TOKEN}`), fakeEnv);
+  ok(res.status === 426, "合法 token 但非 websocket → 426");
+
+  res = await worker.fetch(makeWorkerReq(`/${GOOD_TOKEN}`, "WebSocket"), fakeEnv);
+  ok(res.status === 101, "合法 token + 升级 → 转给 DO");
+
+  // 同 token 必须稳定寻址到同一个 DO，否则两端永远配不上
+  const a = await worker.fetch(makeWorkerReq(`/${GOOD_TOKEN}`, "websocket"), fakeEnv);
+  const b = await worker.fetch(makeWorkerReq(`/${GOOD_TOKEN}`, "websocket"), fakeEnv);
+  ok(a.webSocket === b.webSocket && /^[0-9a-f]{64}$/.test(a.webSocket),
+    "同 token → 同一个 sha256 寻址的 DO");
+}
+
 // ---- 运行 ----
 
 (async () => {
@@ -191,6 +247,7 @@ async function test_bad_role_rejected() {
   await test_same_role_replace();
   await test_different_tokens_isolated();
   await test_bad_role_rejected();
+  await test_worker_entry();
   console.log(`\n结果: ${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();

@@ -297,6 +297,25 @@ export class Bridge {
     ws.on("message", (data) => {
       const raw = data.toString();
       if (gotHello) {
+        // 中转模式下同一条 socket 可能被**重新配对**：中转在同 role 顶替时
+        // 用 close() 关掉旧的对端，而服务端主动 close 不触发 webSocketClose，
+        // 于是 daemon 这一侧的 socket 还活着，新扩展配对后会在这条连接上再发
+        // 一次 hello。原来这条 hello 被丢进 _onExtensionMessage —— 那里只认
+        // pong/event/tool_result，静默丢弃，hello_ack 永不返回。扩展侧
+        // helloAcked 卡在 false（popup 永久显示未连接），而 socket 是 open 的
+        // 所以 onclose 不触发、重连与 deadman 都不启动，**没有任何自动恢复
+        // 路径**，只能人工点重连。这里认出重握手并如实重置状态。
+        let maybe;
+        try { maybe = JSON.parse(raw); } catch (e) { maybe = null; }
+        if (maybe && maybe.type === "hello") {
+          console.log("[owb-daemon] extension RE-HANDSHAKE on the same socket");
+          this.extension = ws;
+          this.extension_info = maybe.payload || {};
+          this._failPending("extension re-paired");
+          ws.send(JSON.stringify({ type: "hello_ack", payload: { ok: true } }));
+          this._audit({ dir: "ext<-", type: "hello", payload: this.extension_info });
+          return;
+        }
         this._onExtensionMessage(raw);
         return;
       }
@@ -424,15 +443,22 @@ export class Bridge {
     const mtype = msg.type;
     if (mtype === "call") {
       const name = String(msg.name || "");
-      // timeout 缺省 30s、上限 300s；坏输入回退 30
+      // timeout 缺省 30s、上限 300s；坏输入回退 30。
+      // 下界同样必要：timeout:0 / 负数会让 setTimeout(…,0) 立刻触发，每次调用
+      // 必然返回 TIMEOUT，而错误文案还建议「提高超时重试」——把调用方送进死循环。
       const t = Number(msg.timeout ?? 30);
-      const timeout = Number.isNaN(t) ? 30 : Math.min(t, 300);
+      const timeout = Number.isNaN(t) ? 30 : Math.max(1, Math.min(t, 300));
       let result;
       if (name.startsWith("daemon.")) {
         // 本地工具也要进审计日志（全部 tool_call 按序落盘）
         this._audit({ dir: "ctl->", type: "tool_call", id: msg.id ?? null,
                       payload: { name, args: msg.args || {} } });
-        result = await this.call_local(name.slice(7), msg.args || {});
+        // daemon 侧工具原来完全不受调用方 timeout 约束：CLI 在 ~130s 判失败
+        // 返回，daemon 却继续对用户的真实浏览器执行剩下的步骤（workflow_run
+        // 每步 60s、步数无上限）。「命令已失败、副作用还在发生」是自动化工具
+        // 里最难排查的一类问题。这里把预算作为硬闸门套上去。
+        result = await this._withBudget(name, timeout,
+                                        this.call_local(name.slice(7), msg.args || {}));
         this._audit({ dir: "ctl<-", type: "tool_result", id: msg.id ?? null,
                       payload: result });
       } else {
@@ -606,6 +632,7 @@ export class Bridge {
         ws.off("message", tempMsg);
         handedOff = true;
         resetBackoff();
+        this._relayState = { paired: true, since: Date.now() / 1000, failures: 0 };
         console.log("[owb-daemon] relay paired, handing off to extension channel");
         // 复用扩展通道：之后扩展的 hello/hello_ack/tool_result/event 全部原样走
         this.handleExtension(ws);
@@ -616,6 +643,15 @@ export class Bridge {
         clearTimeout(pairTimer);
         // 已交接时 handleExtension 的 close 负责 this.extension/fail pending；
         // 这里只管重连调度。
+        const st = this._relayState || { failures: 0 };
+        this._relayState = {
+          paired: false,
+          since: Date.now() / 1000,
+          // 连续配对失败计数：status 要能把「中转配好了」和「拨了半天没人应」
+          // 分开，否则 token 打错 / 中转挂了，daemon 只会安静地无限重连，
+          // 而 status 依旧一脸「relay 模式正常」。
+          failures: handedOff ? 0 : (st.failures || 0) + 1,
+        };
         if (!handedOff) console.log("[owb-daemon] relay closed before pair");
         scheduleReconnect();
       });
@@ -630,7 +666,11 @@ export class Bridge {
   async call_local(name, args) {
     if (name === "status") {
       const relayMode = !!(OWB_RELAY_URL && OWB_RELAY_TOKEN);
-      return { ok: true, data: {
+      // mode 原来只反映「环境变量配齐了没有」，与是否真的配对上无关：token
+      // 打错、中转挂掉，status 照样报 mode:"relay" + relay_url，唯一的真信号
+      // 是 extension_connected。把真实配对态一起报出来。
+      const rs = this._relayState;
+      const out = {
         mode: relayMode ? "relay" : "local",
         relay_url: relayMode ? OWB_RELAY_URL : null,
         extension_connected: this.extension !== null,
@@ -639,7 +679,19 @@ export class Bridge {
         pending: this.pending.size,
         subscribers: this.subscribers.size,
         current_task: this.current_task ? this.current_task.id : null,
-      } };
+      };
+      if (relayMode) {
+        out.relay_paired = !!(rs && rs.paired);
+        if (rs && !rs.paired && rs.failures > 0) {
+          out.relay_pair_failures = rs.failures;
+          out._hint =
+            `relay configured but not paired (${rs.failures} attempt(s) closed ` +
+            "before pairing). The browser side has not joined this room — check " +
+            "that the extension popup has the same relay URL and token, and that " +
+            "the URL is wss://.";
+        }
+      }
+      return { ok: true, data: out };
     }
     if (name === "shutdown") {
       // 升级路径的最后一步：老进程退出，下一条 owb 命令 autostart 时跑的就是
@@ -986,14 +1038,26 @@ export class Bridge {
       let passed = 0;
       let failed = 0;
       const steps = wf.steps || [];
+      // 回放的每一步都在动用户的真实浏览器。原来每步硬编码 60s、步数无上限，
+      // 于是总耗时没有天花板：CLI 早就判失败返回了，daemon 还在替用户点下去。
+      // 给一个总预算（默认贴着 ctl 上限 300s，可用 timeout_s 调），到点就停，
+      // 并在结果里说清停在第几步——宁可少做，也不要在调用方已经放弃之后
+      // 继续产生副作用。
+      const budgetS = Math.max(10, Math.min(Number(args.timeout_s) || 280, 600));
+      const deadline = Date.now() + budgetS * 1000;
+      let ranOutOfTime = false;
       for (let i = 0; i < steps.length; i++) {
+        const remainMs = deadline - Date.now();
+        if (remainMs <= 0) { ranOutOfTime = true; break; }
         const step = steps[i];
         const stepArgs = { ...(step.args || {}) };
         if (!keepTabIds) {
           // 录制的 tabId 跨会话无意义，默认剥掉重放解析到当前活动 tab
           delete stepArgs.tabId;
         }
-        const res = await this.call_tool(step.name, stepArgs, 60);
+        // 每步超时同时受总预算约束：剩 5s 就别再起一个 60s 的调用
+        const stepTimeout = Math.max(1, Math.min(60, Math.ceil(remainMs / 1000)));
+        const res = await this.call_tool(step.name, stepArgs, stepTimeout);
         const ok = Boolean(res.ok);
         const rec = { i, name: step.name ?? null, ok };
         if (ok) {
@@ -1018,7 +1082,14 @@ export class Bridge {
         passed,
         failed,
         results,
-        _hint: failed
+        timed_out: ranOutOfTime || undefined,
+        _hint: ranOutOfTime
+          ? `ran out of the ${budgetS}s replay budget after step ` +
+            `${results.length}/${total} — the remaining steps were NOT run ` +
+            "(deliberately: they would keep driving the user's browser after " +
+            "the caller had already given up). Re-run with a larger " +
+            "timeout_s, or split the workflow."
+          : failed
           ? (!continueOnError && results.length < total
               ? `stopped at step ${results.length}/${total} (first failure); ` +
                 "pass continue_on_error:true to run the rest. "
@@ -1348,6 +1419,36 @@ export class Bridge {
       }
     }
     return out;
+  }
+
+  /**
+   * 给 daemon 侧工具套上调用方的时间预算。
+   *
+   * ⚠️ 这是「按时回话」，不是「取消执行」——JS 没法中断一个已经在跑的
+   * async 函数，编排型工具（workflow_run / download）内部的 call_tool 各自
+   * 有超时，会自己收尾。要点在于**调用方不再无限等**，且拿到的是一个说清了
+   * 状况的错误，而不是 CLI 侧那个信息量为零的 `ctl call timeout`。
+   */
+  async _withBudget(name, timeoutS, promise) {
+    let timer = null;
+    const budget = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({
+        ok: false,
+        error: {
+          code: "TIMEOUT",
+          message: `${name} exceeded the ${timeoutS}s budget for this call. ` +
+            "It may still be finishing daemon-side — check daemon.task_list / " +
+            "flow list before retrying, and pass a larger timeout if the work " +
+            "legitimately takes longer.",
+          retryable: true,
+        },
+      }), timeoutS * 1000);
+    });
+    try {
+      return await Promise.race([promise, budget]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   _audit(entry) {
