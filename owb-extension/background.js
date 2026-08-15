@@ -2415,6 +2415,83 @@ const READ_PAGE_SNAPSHOT_EXPR = (nextRef, maxNodes) => `(() => {
     shadowRoots, iframes, skippedNoRect, skippedHidden, skippedAriaHidden, extensionUi, candidates: els.length };
 })()`;
 
+// 「页面已渲染但正文近空」的分诊采集器：text/article 模式正文过薄时跑一次，
+// 把此前混作一团的三类原因拆开——没等够（CSR 还在加载）/ 反爬拦截页 /
+// SPA 壳挂载了但数据没回。只采信号，结论在 thinPageTriage 里拼。
+const THIN_PAGE_TRIAGE_EXPR = `(() => {
+  const out = { readyState: document.readyState };
+  const q = (s) => { try { return !!document.querySelector(s); } catch (e) { return false; } };
+  let bodyChars = 0;
+  try {
+    const clone = document.body ? document.body.cloneNode(true) : null;
+    if (clone) {
+      clone.querySelectorAll("script, style, noscript, template, svg").forEach((n) => n.remove());
+      bodyChars = String(clone.textContent || "").replace(/\\s+/g, "").length;
+    }
+  } catch (e) {}
+  out.bodyChars = bodyChars;
+  out.botWall =
+    q('#challenge-running, .cf-browser-verification, [id^="cf-chl"], #px-captcha') ||
+    q('iframe[src*="challenges.cloudflare.com"], iframe[src*="/recaptcha/"], ' +
+      'iframe[src*="hcaptcha.com"], iframe[src*="geo.captcha-delivery.com"]') ||
+    /just a moment|checking your browser|verify you are human|attention required|请稍候|安全验证/i
+      .test(String(document.title || ""));
+  const root = document.querySelector("#root, #app, #__next, #__nuxt, [data-reactroot]");
+  out.spaShell = !!root && String(root.textContent || "").replace(/\\s+/g, "").length < 40;
+  let pending = 0;
+  try {
+    pending = performance.getEntriesByType("resource").filter((e) => !e.responseEnd).length;
+  } catch (e) {}
+  out.pendingResources = pending;
+  return out;
+})()`;
+
+// 正文近空时的分诊提示。采集本身失败就闭嘴——分诊是锦上添花，
+// 不能反过来把 read_page 弄挂。
+async function thinPageTriage(tabId) {
+  let t;
+  try {
+    t = await evaluateJs(tabId, THIN_PAGE_TRIAGE_EXPR);
+  } catch (e) {
+    return undefined;
+  }
+  if (!t) return undefined;
+  if (t.botWall) {
+    return (
+      "page looks like a bot-check interstitial (Cloudflare/captcha marker " +
+      "present) — waiting rarely clears it; use handoff to let the user pass " +
+      "the check, then wait-user to take back over"
+    );
+  }
+  if (t.readyState !== "complete" || t.pendingResources > 0) {
+    return (
+      `page is still loading (readyState=${t.readyState}, ` +
+      `${t.pendingResources} resource(s) in flight) — run owb wait ` +
+      "--network-idle (or wait --selector on a content element), then re-read"
+    );
+  }
+  if (t.spaShell) {
+    return (
+      "the SPA root element is mounted but empty — the app rendered no data " +
+      "(a data request may have failed, or content loads on interaction). " +
+      "Check owb net list for failing API calls, or wait --selector on the " +
+      "expected content"
+    );
+  }
+  if (t.bodyChars >= 200) {
+    return (
+      `the DOM holds ~${t.bodyChars} chars but extraction returned almost ` +
+      "nothing — content may live in an iframe (owb frames) or render as " +
+      "non-text elements; try --mode snapshot (or --mode text)"
+    );
+  }
+  return (
+    "the page is fully loaded yet the body is nearly empty — content likely " +
+    "appears only after interaction (cookie banner, tab switch) or lives in " +
+    "an iframe (owb frames); take a screenshot to see what is actually shown"
+  );
+}
+
 // article 的页面内提取器：简化 readability——候选根按 <p> 文本总长评分取最优，
 // 再将其 h1-h6/p/li/blockquote/pre 后代压成 markdown。不引库。
 // BUG-32/BUG-51 + UX-199 重写。旧算法把 document.body 也当候选根，而 body 的
@@ -3083,10 +3160,16 @@ const tools = {
         );
       }
     }
+    // CLI 把 --flag 一律蛇形化（--await-promise → await_promise），而这两个
+    // 参数历史上镜像 CDP 的驼峰名（同工具的 frame_pattern 又是蛇形）——只读
+    // 驼峰时，文档承诺的 flag 会静默失效：Promise 求值稳定返回 {}，改走
+    // call --args 传驼峰却正常，看起来像"行为不稳定"。两种命名都收。
+    const returnByValue = (args.returnByValue ?? args.return_by_value) !== false;
+    const awaitPromise = !!(args.awaitPromise ?? args.await_promise);
     const res = await cdpCall(tabId, "Runtime.evaluate", {
       expression: args.expression,
-      returnByValue: args.returnByValue !== false,
-      awaitPromise: !!args.awaitPromise,
+      returnByValue,
+      awaitPromise,
       contextId,
     });
     if (res.exceptionDetails) {
@@ -3102,16 +3185,44 @@ const tools = {
     // 否则 oracle_call 的 object_id 模式拿不到句柄，AI 只能改走 cdp 逃生舱。
     const r = res.result || {};
     const out = { value: r.value, type: r.type };
-    if (args.returnByValue === false) {
+    if (!returnByValue) {
       if (r.objectId !== undefined) out.objectId = r.objectId;
       if (r.subtype !== undefined) out.subtype = r.subtype;
       if (r.className !== undefined) out.className = r.className;
       if (r.description !== undefined) out.description = r.description;
     }
-    // UX-18/183/195/226/228: returnByValue 对 function / DOM 节点 / Symbol /
-    // BigInt 一律回 undefined 或 {}，AI 只看到 "空结果" 判断不了发生了什么。
-    // 补一个 description，并点明取值方式。
-    if (out.value === undefined && r.type !== "undefined") {
+    // UX-227: 不带 awaitPromise 求值 Promise，returnByValue 会把它序列化成
+    // {} —— value 不是 undefined，原先挂在下面 undefined 分支里的提示恰好在
+    // 它要救的场景不触发。实测 returnByValue:true 时 CDP 连 subtype 都不给
+    // （结果只有 {type:"object", value:{}}），没有可精确点名 Promise 的字段，
+    // 所以按「序列化成空对象」兜底：Promise / Map / Set / 类实例 / DOM 节点
+    // 在 JSON 里全长这样，一并讲清各自的取值方式。
+    if (r.subtype === "promise" && !awaitPromise) {
+      // returnByValue:false 的路径才有 subtype——能精确点名就精确点名
+      out.subtype = "promise";
+      if (r.className !== undefined) out.className = r.className;
+      out._hint =
+        "expression returned a pending Promise — pass --await-promise " +
+        "(awaitPromise:true) to get the resolved value (rejections then " +
+        "surface as EVAL_EXCEPTION)";
+    } else if (
+      r.type === "object" && r.subtype === undefined &&
+      out.value && typeof out.value === "object" &&
+      !Array.isArray(out.value) && Object.keys(out.value).length === 0
+    ) {
+      out._hint =
+        "result serialized to an empty object {} — an un-awaited Promise, " +
+        "Map/Set, class instance or DOM node all look like this in JSON. " +
+        (awaitPromise
+          ? ""
+          : "If the expression returns a Promise, pass --await-promise " +
+            "(awaitPromise:true) to get the resolved value. ") +
+        "Otherwise return a primitive projection (Array.from(map), " +
+        "el.textContent, …)";
+    } else if (out.value === undefined && r.type !== "undefined") {
+      // UX-18/183/195/226/228: returnByValue 对 function / DOM 节点 / Symbol /
+      // BigInt 一律回 undefined 或 {}，AI 只看到 "空结果" 判断不了发生了什么。
+      // 补一个 description，并点明取值方式。
       if (r.description !== undefined) out.description = r.description;
       if (r.subtype !== undefined) out.subtype = r.subtype;
       if (r.className !== undefined) out.className = r.className;
@@ -3123,12 +3234,7 @@ const tools = {
         object: "DOM nodes / cyclic objects are not serializable — return " +
           "specific fields (el.outerHTML, el.textContent, …)",
       };
-      out._hint =
-        // UX-227: 不带 awaitPromise 求值 Promise 会拿到空对象，看着像成功
-        (r.subtype === "promise"
-          ? "expression returned a pending Promise — pass awaitPromise:true " +
-            "to get the resolved value (rejections then surface as EVAL_EXCEPTION)"
-          : byType[r.type]) ||
+      out._hint = byType[r.type] ||
         "value is not JSON-serializable; return a primitive projection instead";
     }
     return out;
@@ -4126,7 +4232,9 @@ const tools = {
     // addScriptToEvaluateOnNewDocument 只对之后创建的 document 生效
     let reloaded = false;
     if (args.reload !== false) {
-      await cdpCall(tabId, "Page.reload", { ignoreCache: !!args.ignoreCache });
+      await cdpCall(tabId, "Page.reload", {
+        ignoreCache: !!(args.ignoreCache ?? args.ignore_cache),
+      });
       reloaded = true;
     }
     // UX-39/115 + BUG-14: reload 默认为真（不 reload hook 根本不生效），但 AI
@@ -4223,7 +4331,9 @@ const tools = {
     await saveHookRegistry();
     let reloaded = false;
     if (args.reload !== false) {
-      await cdpCall(tabId, "Page.reload", { ignoreCache: !!args.ignoreCache });
+      await cdpCall(tabId, "Page.reload", {
+        ignoreCache: !!(args.ignoreCache ?? args.ignore_cache),
+      });
       reloaded = true;
     }
     return { tabId, registered: [{ preset: key, identifier }], reloaded };
@@ -4871,6 +4981,13 @@ const tools = {
             "images instead of real text) — try mode:snapshot instead, its name " +
             "resolution falls back to img[alt] and will surface these"
           : undefined;
+      // 既有两条诊断（starved 要求 DOM 文本量大、imgAlt 要求 alt 文字多）都
+      // 覆盖不到「DOM 本身就没内容」——CSR 页标题正常、正文空这种最常见的
+      // 空读场景以前只能拿到一个静默空串。近空且没有别的解释时跑分诊。
+      const thinHint =
+        !hiddenContentNote && text.replace(/\s+/g, "").length < 120
+          ? await thinPageTriage(tabId)
+          : undefined;
       return {
         tabId,
         mode,
@@ -4878,6 +4995,7 @@ const tools = {
         truncated: text.length > maxChars,
         textSource,
         hiddenContentNote,
+        _hint: thinHint,
       };
     }
 
@@ -4887,6 +5005,12 @@ const tools = {
         content: "",
       };
       const full = v.content || "";
+      // 正文近空 → 分诊（没等够 / 反爬 / SPA 空壳），reason 只解释提取器
+      // 为什么没提出来，分诊解释页面为什么没有可提的。
+      const thinHint =
+        full.replace(/\s+/g, "").length < 120
+          ? await thinPageTriage(tabId)
+          : undefined;
       return {
         tabId,
         mode,
@@ -4902,6 +5026,7 @@ const tools = {
         root: v.root,
         reason: v.reason, // BUG-51/UX-199: 空正文要说明原因，不是静默空串
         hiddenContentNote: v.hiddenContentNote, // BUG-101
+        _hint: thinHint,
       };
     }
 
