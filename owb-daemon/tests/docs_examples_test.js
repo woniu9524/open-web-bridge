@@ -55,6 +55,18 @@ function resolveCommand(line) {
   const { positionals } = parseArgv(argv);
   if (!positionals.length) return { special: "bare" }; // 裸 `owb` 自检
   const first = positionals[0];
+  // seq 的每个位置参数本身就是一条命令行——递归逐步校验，文档里写了
+  // 一个不存在的步骤命令一样要被拦下（与单条命令同等待遇）。
+  if (first === "seq") {
+    for (const step of positionals.slice(1)) {
+      const s = String(step).trim();
+      if (s.startsWith("{")) continue; // JSON 步骤：工具名属运行时校验
+      const head = s.split(/\s+/)[0];
+      if (["seq", "help", "skill", "update", "setup"].includes(head)) return null;
+      if (!resolveCommand(`owb ${s}`)) return null;
+    }
+    return { special: "seq" };
+  }
   if (NOT_COMMANDS.has(first)) return { special: first };
   const two = positionals.slice(0, 2).join(" ");
   if (COMMANDS.has(two)) return { cmd: two };
@@ -68,6 +80,11 @@ for (const bad of ["owb debug oracle", "owb file download", "owb fetch"]) {
   check(`检测器认得出坏写法：${bad}`, resolveCommand(bad) === null,
     JSON.stringify(resolveCommand(bad)));
 }
+// seq 步骤同等待遇：坏步骤要拦，好步骤要放
+check("检测器认得出坏 seq 步骤",
+  resolveCommand('owb seq "open https://x.com" "frobnicate"') === null);
+check("检测器放行合法 seq",
+  resolveCommand('owb seq "open https://x.com" "page --mode text"') !== null);
 for (const good of ["owb oracle", "owb download", "owb file fetch",
                     "owb debug break-xhr", "owb flow save 周报"]) {
   check(`检测器认得出好写法：${good}`, resolveCommand(good) !== null);

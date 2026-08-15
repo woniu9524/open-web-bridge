@@ -109,7 +109,7 @@ directory:
 
 ```
 owb/SKILL.md                     the trunk — enters context on every trigger
-owb/references/commands.md       arguments for all 82 commands
+owb/references/commands.md       arguments for all 80 commands
 owb/references/recipes.md        longer per-task procedures
 owb/references/debugging.md      capture / HAR / hooks / breakpoints / reverse engineering
 owb/references/field-notes.md    real-world oddities, indexed by symptom

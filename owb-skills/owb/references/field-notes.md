@@ -90,10 +90,10 @@ the content, not for judging layout.
 
 ## 2. Drag and canvas: the three-step template
 
-`click` and `click-mouse` both press and release at one point, so neither can
-simulate a drag.
+`click` (plain and `--mouse true` alike) presses and releases at one point, so
+neither form can simulate a drag.
 
-⚠️ **Try two `click-mouse` calls first** (click the origin, then the destination)
+⚠️ **Try two `click --mouse true` calls first** (click the origin, then the destination)
 — much simpler than the three-step sequence. Measured: chess.com's board works
 this way, and the move is recorded correctly. Only escalate once you have
 confirmed the site does **not** support click-to-select (no highlight after

@@ -68,9 +68,10 @@ owb open <target page> --new-tab true
 owb har save --args '{"filename":"investigation"}'
 ```
 
-⚠️ **Never call `har stop` and then `har save`.** `save` already stops for you;
-stopping first destroys the recorder, so `save` reports `NOT_RECORDING` and
-**the data is gone for good**.
+⚠️ **`har save` is the only command that stops AND keeps the recording** —
+`har discard` also stops but throws the data away (its job: abandoning a
+recording). Discard first and `save` reports `NOT_RECORDING`; **the data is
+gone for good**.
 ⚠️ With an active task it always writes `tasks/<task id>/recording.har` and
 ignores `filename`.
 
@@ -174,11 +175,11 @@ inside the closure**. For those, break.
 owb debug break-xhr --url-substring "/api/sign"    # XHR breakpoint
 # or: owb debug break-fn --function-path "app.sign"
 owb click @e5                                      # trigger it
-owb debug frames --max-frames 3 --prop-limit 40    # read frames and scopes at the frozen moment
+owb debug stack --max-frames 3 --prop-limit 40     # read frames and scopes at the frozen moment
 owb debug resume                                   # let it go
 ```
 
-- `debug frames` **does not auto-resume** (pass `--auto-resume true` for that),
+- `debug stack` **does not auto-resume** (pass `--auto-resume true` for that),
   because auto-resuming would interrupt consecutive inspections of the same
   breakpoint. Remember to `debug resume` afterwards, or the page stays frozen and
   every later command reports `PAUSED`.
@@ -228,7 +229,7 @@ owb oracle --function-path "app.sign" --args '{"call_args":["hello",123]}'
 
 `--freeze` defaults to true, freezing time and randomness during the call so the
 same input yields the same output. You can also pass `--object-id` (a closure
-function reference obtained from `debug frames`) to call private functions.
+function reference obtained from `debug stack`) to call private functions.
 ⚠️ **A misspelled argument name errors out** rather than silently calling with no
 arguments and returning a plausible-looking `null`.
 

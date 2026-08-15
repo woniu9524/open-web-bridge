@@ -88,7 +88,7 @@ skill 是渐进披露结构，`skill install` 会把整个目录装好：
 
 ```
 owb/SKILL.md                     主干——每次触发都进上下文
-owb/references/commands.md       82 条命令的参数速查
+owb/references/commands.md       80 条命令的参数速查
 owb/references/recipes.md        按任务查的长配方
 owb/references/debugging.md      抓包 / HAR / hook / 断点 / 逆向
 owb/references/field-notes.md    实测怪现象，按症状索引

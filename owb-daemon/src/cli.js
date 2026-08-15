@@ -5,13 +5,15 @@
  * 设计：
  *   - 任何能跑 shell 的 agent（Claude Code / Kimi Code / Codex …）直接调用，
  *     零客户端配置；配套 skill 见仓库 owb-skills/owb/SKILL.md。
- *   - 79 个桥工具收敛为「高频顶层动词 + 12 个命令组」，`owb help` 渐进披露。
+ *   - 底层桥工具收敛为「高频顶层动词 + 16 个命令组」，`owb help` 渐进披露。
+ *     顶层别名的准入标准：高频动词，或名字猜不出来的工具；长尾一律走 call。
  *   - daemon 未启动时自动拉起（--no-autostart 关闭），用户从「装完就能用」开始。
  *
  * 用法：
  *   owb                          自检（daemon/扩展连接状态 + 下一步提示）
  *   owb <命令> [位置参数] [--flag value ...]
  *   owb call <ctl工具名> [--args '<json>']    通用逃生口（别名之外的调法）
+ *   owb seq "<步骤>" "<步骤>" ...             一条连接连跑多步（--file / --delay-ms / --keep-going）
  *   owb help [组名]              命令清单 / 组内详情
  *
  * 参数规则：
@@ -52,8 +54,7 @@ const GROUPS = {
     reload: { ctl: "history", preset: { action: "reload" }, desc: "reload (--bypass-cache for a hard reload)" },
     page: { ctl: "read_page", desc: "semantic snapshot (@eN refs for click/fill); --mode article|text, --since-last for a diff" },
     shot: { ctl: "screenshot", desc: "screenshot" },
-    click: { ctl: "click", pos: [TARGET], desc: "click an @ref or selector (--mouse switches to real mouse events)" },
-    "click-mouse": { ctl: "mouse_click", pos: [TARGET], desc: "click with real mouse events (isTrusted, with a visible cursor animation)" },
+    click: { ctl: "click", pos: [TARGET], desc: "click an @ref or selector (--mouse: real mouse events, isTrusted, visible cursor)" },
     fill: { ctl: "fill", pos: [TARGET, "value"], desc: "fill an input (native setter, works with React controlled components)" },
     keys: { ctl: "send_keys", desc: "keyboard input: --text uses insertText, --keys sends real key events (pick one)" },
     scroll: { ctl: "scroll", desc: "scroll the page" },
@@ -80,7 +81,10 @@ const GROUPS = {
   har: {
     "har start": { ctl: "record_start", desc: "start recording (full HAR 1.2)" },
     "har save": { ctl: "daemon.har_save", desc: "stop recording and write to disk (use this when done, it stops for you)" },
-    "har stop": { ctl: "record_stop", desc: "stop without saving; when done recording use har save directly, stopping first makes save fail" },
+    // 原名 "har stop"：与 har start 成对的名字诱导 start→stop→save 的错误序列，
+    // 文档三处警告 + NOT_RECORDING 错误码都在为这个名字打补丁。discard 名字
+    // 自带语义：丢弃不落盘；要留数据的唯一正确出口是 har save。
+    "har discard": { ctl: "record_stop", desc: "stop AND throw the recording away (no file); to keep it, use har save — the only command that stops and writes" },
     "har status": { ctl: "record_status", desc: "recording status" },
     "har to-replay": { ctl: "daemon.har_to_replay", desc: "HAR to a python/curl/node replay script" },
     "har diff": { ctl: "daemon.har_diff", desc: "diff two HARs for drift" },
@@ -94,10 +98,11 @@ const GROUPS = {
     "hook logs": { ctl: "daemon.hook_logs", desc: "pull hook events (polling)" },
   },
   debug: {
-    "debug break-xhr": { ctl: "break_xhr", desc: "XHR breakpoint (pair with debug frames to read the frozen state)" },
+    "debug break-xhr": { ctl: "break_xhr", desc: "XHR breakpoint (pair with debug stack to read the frozen state)" },
     "debug break-fn": { ctl: "break_function", desc: "function breakpoint" },
     "debug break-remove": { ctl: "break_remove", desc: "remove a breakpoint" },
-    "debug frames": { ctl: "frame_read", desc: "read call frames at a breakpoint (frozen snapshot)" },
+    // 原名 "debug frames"：与顶层 frames（列 iframe）同词异义，照直觉敲必错
+    "debug stack": { ctl: "frame_read", desc: "read call frames at a breakpoint (frozen snapshot)" },
     "debug step": { ctl: "step", desc: "step" },
     "debug resume": { ctl: "resume", desc: "resume execution" },
     "debug console": { ctl: "console_stream", desc: "stream console output" },
@@ -122,8 +127,8 @@ const GROUPS = {
     "state load": { ctl: "daemon.state_load", pos: ["name"], desc: "restore a saved login" },
     "state list": { ctl: "daemon.state_list", desc: "list saved logins" },
     "state delete": { ctl: "daemon.state_delete", pos: ["name"], desc: "delete a saved login" },
-    "state export": { ctl: "export_state", desc: "export the current page storage (extension-side primitive)" },
-    "state import": { ctl: "import_state", desc: "import storage (extension-side primitive)" },
+    // export_state/import_state 是 save/load 的扩展侧原语，不占命令表——
+    // 直接操作原语走 owb call export_state / import_state
   },
   env: {
     "env set": { ctl: "emulate", desc: "emulate device / network throttling / geolocation / timezone / locale / UA" },
@@ -170,6 +175,25 @@ const COMMANDS = new Map();
 for (const group of Object.values(GROUPS)) {
   for (const [name, spec] of Object.entries(group)) COMMANDS.set(name, spec);
 }
+
+// 修剪/改名过的命令：报错时指路，不做静默别名——命令表就是文档，
+// 藏一个表里没有的可用名字等于让表说谎（docs 测试也会跟着失明）。
+const RENAMED = new Map([
+  ["click-mouse",
+    'removed — use "owb click <target> --mouse true" (same real mouse events, isTrusted)'],
+  ["har stop",
+    'renamed — "owb har discard" stops and throws the recording away; ' +
+    'to keep the data use "owb har save" (stops and writes in one step)'],
+  ["debug frames",
+    'renamed — "owb debug stack" (same tool: call frames at a breakpoint; ' +
+    'top-level "owb frames" still lists iframes)'],
+  ["state export",
+    'removed from the table — "state save" covers the workflow; ' +
+    'the raw primitive is "owb call export_state"'],
+  ["state import",
+    'removed from the table — "state load" covers the workflow; ' +
+    'the raw primitive is "owb call import_state"'],
+]);
 
 // ---------------------------------------------------------------------------
 // ctl 客户端（与旧 mcp_server 同款薄封装）
@@ -350,6 +374,8 @@ function parseArgv(argv) {
       case "raw": cli.raw = true; if (val !== undefined && eq < 0) { positionals.push(val); } continue;
       case "compact": cli.compact = true; if (val !== undefined && eq < 0) { positionals.push(val); } continue;
       case "no-autostart": cli.autostart = false; if (val !== undefined && eq < 0) { positionals.push(val); } continue;
+      // seq 的裸布尔 flag：不加这条，--keep-going 会把紧跟的步骤吞成自己的值
+      case "keep-going": args.keep_going = true; if (val !== undefined && eq < 0) { positionals.push(val); } continue;
       case "args": cli.rawArgs = val; continue;
       case "out": cli.out = val; continue;   // 二进制结果落盘路径
       case "tab": args.tabId = parseValue(val); continue;
@@ -427,7 +453,7 @@ function dropRedundant(data) {
     delete out.har;
     out._harOmitted =
       `HAR body (${n} entries) not printed — it belongs on disk, not in stdout. ` +
-      'Next time use "owb har save" instead of "har stop" (save includes stop).';
+      'har discard throws the recording away; to keep it on disk use "owb har save" (stops and writes in one step).';
   }
   // ⚠️ 只删 nodes，**不要删 text 别名**。text 是扩展侧刻意加的统一字段
   // （三种模式正文分别叫 lines/content/text，别名让调用方不必按模式切字段）；
@@ -673,8 +699,11 @@ async function cmdUpdate(sub) {
   } catch (e) { /* 直连失败 → 走 npm 兜底 */ }
   if (!latest) latest = await npmViewLatest();
   if (!latest) {
+    // 读 stdout 的是 agent：把「别汇报」写进结果本身，光靠 skill 一句弱提示
+    // 拦不住模型的汇报本能
     process.stdout.write(
-      `? could not reach the npm registry - current version ${PKG_INFO.version}, latest unknown\n`);
+      `? could not reach the npm registry - current version ${PKG_INFO.version}, ` +
+      "latest unknown. Say nothing to the user and don't retry.\n");
     return;
   }
   if (cmpVersion(latest, PKG_INFO.version) > 0) {
@@ -686,7 +715,8 @@ async function cmdUpdate(sub) {
       `  4. owb reload-ext                     dev-mode (Load unpacked) extension reloads the new files;\n` +
       `                                        store installs update themselves - skip this step\n`);
   } else {
-    process.stdout.write(`✓ owb ${PKG_INFO.version} is up to date\n`);
+    process.stdout.write(
+      `✓ owb ${PKG_INFO.version} is up to date — nothing to do, say nothing to the user\n`);
   }
 }
 
@@ -710,6 +740,9 @@ function printHelp(groupName) {
     out.push("  owb update check       check npm for a newer version (prints the upgrade steps)");
     out.push("  owb help <group>       details for one group");
     out.push("  owb call <tool> --args '<json>'   call any underlying tool directly");
+    out.push('  owb seq "<step>" "<step>" …       run several commands over one connection');
+    out.push("                         (each step is a full owb command minus the owb prefix;");
+    out.push("                          --file <path> one step per line / --delay-ms <n> / --keep-going)");
     out.push("");
     // BUG-120: 原来一律 `n.split(" ").pop()` 只取最后一段，于是「要带组名前缀的」
     // 和「顶层的」在这一行里长得一模一样。debug 组里 7 条要写 `owb debug xxx`、
@@ -758,6 +791,183 @@ async function doctor(ctl, autostart) {
       "  Click the extension icon in the toolbar to see its status, and Reconnect if needed.\n",
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// 单条命令 → ctl 调用：main 与 seq 共用的解析
+// （命令表最长匹配、位置参数、--args 合并、click --mouse / wait_user 特例）
+// ---------------------------------------------------------------------------
+
+function resolveInvocation(positionals, args, cli) {
+  // 命令解析：先试两词（'tab list'），再试一词（'open'），再 call 直调
+  let spec = null;
+  let consumed = 0;
+  const two = positionals.slice(0, 2).join(" ");
+  if (COMMANDS.has(two)) { spec = COMMANDS.get(two); consumed = 2; }
+  else if (COMMANDS.has(positionals[0])) { spec = COMMANDS.get(positionals[0]); consumed = 1; }
+  else if (positionals[0] === "call" && positionals[1]) {
+    spec = { ctl: positionals[1], pos: [] };
+    consumed = 2;
+  }
+  if (!spec) {
+    const renamed = RENAMED.get(two) ?? RENAMED.get(positionals[0]);
+    if (renamed) {
+      throw new UsageError(`${RENAMED.has(two) ? two : positionals[0]}: ${renamed}`);
+    }
+    throw new UsageError(`unknown command: ${positionals[0]} (run owb help for the list)`);
+  }
+
+  const callArgs = { ...(spec.preset || {}) };
+  applyPositionals(spec, positionals.slice(consumed), callArgs);
+  Object.assign(callArgs, args);
+  if (cli.rawArgs) {
+    let extra;
+    try {
+      extra = JSON.parse(cli.rawArgs);
+    } catch (e) {
+      throw new UsageError(`--args is not valid JSON: ${e.message}`);
+    }
+    Object.assign(callArgs, extra);
+  }
+  // click --mouse → 换 mouse_click 工具（真实鼠标事件 + AI 光标动画）
+  let ctlName = spec.ctl;
+  if (ctlName === "click" && callArgs.mouse === true) {
+    delete callArgs.mouse;
+    ctlName = "mouse_click";
+  }
+  // wait_user 内部默认 280s 超过 CLI 默认 120s：未显式给 --timeout 时自动放宽
+  let timeout = cli.timeout;
+  if (ctlName === "wait_user" && cli.timeout === CALL_TIMEOUT_S) {
+    timeout = Math.ceil((Number(callArgs.timeout_ms) || 280000) / 1000) + 10;
+  }
+  return { ctlName, callArgs, timeout };
+}
+
+// ---------------------------------------------------------------------------
+// seq：一次进程、一条 ctl 连接连跑多步。省的是每步 ~100-200ms 的 node 冷启动
+// 与 WS 握手——高频单步往返（游戏连招、多字段表单、点开即读）被这块开销支配。
+// 与 flow save/run（录制 → 确定性回放）互补：seq 的步骤是现场编排的一次性序列。
+// ---------------------------------------------------------------------------
+
+// 步骤行切词：只认 '…' 和 "…" 包组（保住 @ref 和含空格的值），**不做反斜杠
+// 转义**——Windows 路径（C:\Users\…）必须原样活到参数层。
+function tokenizeStep(line) {
+  const toks = [];
+  let cur = "";
+  let quote = null;
+  let quoted = false; // 空引号也是一个 token（fill '@e1' ""）
+  for (const ch of String(line)) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else cur += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; quoted = true; continue; }
+    if (/\s/.test(ch)) {
+      if (cur || quoted) { toks.push(cur); cur = ""; quoted = false; }
+      continue;
+    }
+    cur += ch;
+  }
+  if (quote) throw new UsageError(`seq: unclosed ${quote} quote in step: ${line}`);
+  if (cur || quoted) toks.push(cur);
+  return toks;
+}
+
+// CLI 本地命令做不了 seq 步骤（不进 ctl，也没有一步一结果的语义）
+const SEQ_FORBIDDEN = new Set(["seq", "help", "skill", "update", "setup"]);
+
+async function cmdSeq(ctl, stepSources, topArgs, cli) {
+  const steps = stepSources.map(String);
+  if (topArgs.file != null) {
+    let raw;
+    try {
+      raw = fs.readFileSync(String(topArgs.file), "utf8");
+    } catch (e) {
+      throw new UsageError(`seq --file: ${e.message}`);
+    }
+    for (const line of raw.split(/\r?\n/)) {
+      const t = line.trim();
+      if (t && !t.startsWith("#")) steps.push(t);
+    }
+  }
+  if (!steps.length) {
+    throw new UsageError(
+      'seq: no steps — owb seq "open https://example.com" "page --mode text" …, ' +
+      "or --file <path> (one step per line, # for comments)");
+  }
+  const keepGoing = topArgs.keep_going === true;
+  const delayMs = Math.max(0, Number(topArgs.delay_ms) || 0);
+  let ok = 0;
+  let failed = 0;
+  let ranTo = 0;
+  for (let i = 0; i < steps.length; i++) {
+    const src = steps[i];
+    const line = { step: i + 1, cmd: src };
+    ranTo = i + 1;
+    try {
+      let inv;
+      let stepCli = cli;
+      if (src.trimStart().startsWith("{")) {
+        // JSON 步骤 {"tool":"fill","args":{…}}：引号地狱的逃生口（--file 里尤其）
+        const spec = JSON.parse(src);
+        if (!spec || typeof spec.tool !== "string") {
+          throw new UsageError('JSON step must look like {"tool":"fill","args":{...}}');
+        }
+        inv = { ctlName: spec.tool, callArgs: { ...(spec.args || {}) }, timeout: cli.timeout };
+      } else {
+        const parsed = parseArgv(tokenizeStep(src));
+        if (!parsed.positionals.length) throw new UsageError("empty step");
+        if (SEQ_FORBIDDEN.has(parsed.positionals[0])) {
+          throw new UsageError(`${parsed.positionals[0]} cannot be a seq step`);
+        }
+        stepCli = parsed.cli;
+        inv = resolveInvocation(parsed.positionals, parsed.args, parsed.cli);
+        // 顶层 --timeout 作为各步默认（步骤自己的 --timeout / wait_user 放宽优先）
+        if (inv.timeout === CALL_TIMEOUT_S && cli.timeout !== CALL_TIMEOUT_S) {
+          inv.timeout = cli.timeout;
+        }
+      }
+      if (topArgs.tabId != null && inv.callArgs.tabId == null) {
+        inv.callArgs.tabId = topArgs.tabId; // 顶层 --tab 作为各步默认
+      }
+      const res = await callWithAutostart(ctl, inv.ctlName, inv.callArgs, inv.timeout, cli.autostart);
+      if (res.ok) {
+        ok++;
+        line.ok = true;
+        line.data = shapeForAgent(inv.ctlName, res.data, stepCli) ?? null;
+      } else {
+        failed++;
+        const err = res.error || {};
+        line.ok = false;
+        line.error = {
+          code: err.code || "INTERNAL",
+          message: err.message !== undefined ? err.message : String(err),
+        };
+        if (err.retryable) line.error.retryable = true;
+      }
+    } catch (e) {
+      failed++;
+      line.ok = false;
+      line.error = {
+        code: e instanceof UsageError ? "USAGE" : "INTERNAL",
+        message: String((e && e.message) || e),
+      };
+    }
+    // 一步一行 JSONL：失败步也占一行，agent 能对着行号定位是哪步断的
+    process.stdout.write(JSON.stringify(line) + "\n");
+    if (!line.ok && !keepGoing) break;
+    if (delayMs && i < steps.length - 1) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  const summary = { steps: steps.length, ok, failed };
+  if (ranTo < steps.length) {
+    summary.stoppedAt = ranTo;
+    summary.skipped = steps.length - ranTo;
+  }
+  process.stdout.write(JSON.stringify({ seq: summary }) + "\n");
+  if (failed) process.exitCode = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -812,45 +1022,12 @@ async function main() {
       await cmdSetup(ctl, cli.autostart);
       return;
     }
-
-    // 命令解析：先试两词（'tab list'），再试一词（'open'），再 call 直调
-    let spec = null;
-    let consumed = 0;
-    const two = positionals.slice(0, 2).join(" ");
-    if (COMMANDS.has(two)) { spec = COMMANDS.get(two); consumed = 2; }
-    else if (COMMANDS.has(positionals[0])) { spec = COMMANDS.get(positionals[0]); consumed = 1; }
-    else if (positionals[0] === "call" && positionals[1]) {
-      spec = { ctl: positionals[1], pos: [] };
-      consumed = 2;
-    }
-    if (!spec) {
-      throw new UsageError(`unknown command: ${positionals[0]} (run owb help for the list)`);
+    if (positionals[0] === "seq") {
+      await cmdSeq(ctl, positionals.slice(1), args, cli);
+      return;
     }
 
-    const callArgs = { ...(spec.preset || {}) };
-    applyPositionals(spec, positionals.slice(consumed), callArgs);
-    Object.assign(callArgs, args);
-    if (cli.rawArgs) {
-      let extra;
-      try {
-        extra = JSON.parse(cli.rawArgs);
-      } catch (e) {
-        throw new UsageError(`--args is not valid JSON: ${e.message}`);
-      }
-      Object.assign(callArgs, extra);
-    }
-    // click --mouse → 换 mouse_click 工具（真实鼠标事件 + AI 光标动画）
-    let ctlName = spec.ctl;
-    if (ctlName === "click" && callArgs.mouse === true) {
-      delete callArgs.mouse;
-      ctlName = "mouse_click";
-    }
-    // wait_user 内部默认 280s 超过 CLI 默认 120s：未显式给 --timeout 时自动放宽
-    let timeout = cli.timeout;
-    if (ctlName === "wait_user" && cli.timeout === CALL_TIMEOUT_S) {
-      timeout = Math.ceil((Number(callArgs.timeout_ms) || 280000) / 1000) + 10;
-    }
-
+    const { ctlName, callArgs, timeout } = resolveInvocation(positionals, args, cli);
     const res = await callWithAutostart(ctl, ctlName, callArgs, timeout, cli.autostart);
     if (cli.raw) {
       process.stdout.write(JSON.stringify(res, null, cli.compact ? 0 : 2) + "\n");
@@ -884,4 +1061,4 @@ if (isMainModule(import.meta.url)) {
   main();
 }
 
-export { GROUPS, COMMANDS, parseArgv };
+export { GROUPS, COMMANDS, RENAMED, parseArgv, tokenizeStep, resolveInvocation };

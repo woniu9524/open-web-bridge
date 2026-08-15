@@ -18,7 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { makeChecker, freePort, waitPort, killProc } from "./kit.js";
-import { COMMANDS, parseArgv } from "../src/cli.js";
+import { COMMANDS, parseArgv, tokenizeStep, resolveInvocation } from "../src/cli.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DAEMON_DIR = path.resolve(__dirname, "..");
@@ -74,7 +74,11 @@ async function main() {
       && covered("daemon_har_save") && covered("daemon_replay"));
     check("录制/环境/人机工具在命令表",
       covered("record_start") && covered("emulate") && covered("emulate_reset")
-      && covered("handoff") && covered("wait_user") && covered("mouse_click"));
+      && covered("handoff") && covered("wait_user"));
+    // mouse_click 走 click --mouse 开关，不再占命令表一行
+    check("click --mouse 切到 mouse_click 工具",
+      resolveInvocation(["click", "@e5"], { mouse: true },
+        { timeout: 120, rawArgs: null }).ctlName === "mouse_click");
 
     // 2. daemon-status → ok，data 落 stdout
     let r = await runCli(["daemon-status", "--compact"], env);
@@ -193,6 +197,69 @@ async function main() {
         lcode === 0 && /\[core\]/.test(lout),
         `code=${lcode} out=${lout.slice(0, 80) || "(空)"} err=${lerr.slice(0, 80)}`);
     }
+
+    // 8. seq：一条连接连跑多步，一步一行 JSONL + 汇总行
+    r = await runCli(["seq", "daemon-status", "call daemon.status --compact"], env);
+    let seqLines = r.out.trim().split(/\r?\n/).map(parseOut);
+    check("seq 两步全成 + 汇总行",
+      r.code === 0 && seqLines.length === 3
+      && seqLines[0] && seqLines[0].step === 1 && seqLines[0].ok === true
+      && seqLines[1] && seqLines[1].ok === true && "mode" in (seqLines[1].data || {})
+      && seqLines[2] && seqLines[2].seq
+      && seqLines[2].seq.ok === 2 && seqLines[2].seq.failed === 0,
+      r.out.slice(0, 300) + r.err.slice(0, 100));
+
+    // 8b. 失败即停：坏步 → USAGE，后续跳过，退出码 1
+    r = await runCli(["seq", "frobnicate", "daemon-status"], env);
+    seqLines = r.out.trim().split(/\r?\n/).map(parseOut);
+    check("seq 失败即停 + skipped 计数",
+      r.code === 1 && seqLines.length === 2
+      && seqLines[0] && seqLines[0].ok === false
+      && seqLines[0].error && seqLines[0].error.code === "USAGE"
+      && seqLines[1] && seqLines[1].seq
+      && seqLines[1].seq.stoppedAt === 1 && seqLines[1].seq.skipped === 1,
+      r.out.slice(0, 300));
+
+    // 8c. --keep-going：坏步不拦后面的好步，但退出码仍标失败
+    r = await runCli(["seq", "--keep-going", "frobnicate", "daemon-status"], env);
+    seqLines = r.out.trim().split(/\r?\n/).map(parseOut);
+    check("seq --keep-going 继续执行",
+      r.code === 1 && seqLines.length === 3
+      && seqLines[1] && seqLines[1].ok === true
+      && seqLines[2] && seqLines[2].seq
+      && seqLines[2].seq.ok === 1 && seqLines[2].seq.failed === 1,
+      r.out.slice(0, 300));
+
+    // 8d. 步骤切词：引号保 @ref / 含空格值整体；反斜杠不转义（Windows 路径）；
+    // 未闭合引号报用法错误
+    check("seq 切词保引号整体",
+      JSON.stringify(tokenizeStep(`fill '@e3' "hello world"`))
+        === JSON.stringify(["fill", "@e3", "hello world"]));
+    check("seq 切词不吃 Windows 反斜杠路径",
+      JSON.stringify(tokenizeStep("file fetch --url C:\\Users\\a"))
+        === JSON.stringify(["file", "fetch", "--url", "C:\\Users\\a"]));
+    check("seq 未闭合引号 → 用法错误", (() => {
+      try { tokenizeStep("fill '@e3"); return false; } catch (e) { return true; }
+    })());
+
+    // 9. 命令表修剪：砍/改过的名字必须给指路错误（退出码 2），新名必须在表里
+    check("har discard / debug stack 在命令表，旧名不在",
+      COMMANDS.has("har discard") && COMMANDS.get("har discard").ctl === "record_stop"
+      && COMMANDS.has("debug stack") && COMMANDS.get("debug stack").ctl === "frame_read"
+      && !COMMANDS.has("har stop") && !COMMANDS.has("debug frames")
+      && !COMMANDS.has("click-mouse") && !COMMANDS.has("state export"));
+    r = await runCli(["click-mouse", "@e5"], env);
+    check("click-mouse 指路 click --mouse", r.code === 2 && /click.*--mouse/.test(r.err),
+      `code=${r.code} ${r.err.slice(0, 120)}`);
+    r = await runCli(["har", "stop"], env);
+    check("har stop 指路 har discard / har save", r.code === 2 && /har discard/.test(r.err),
+      `code=${r.code} ${r.err.slice(0, 120)}`);
+    r = await runCli(["debug", "frames"], env);
+    check("debug frames 指路 debug stack", r.code === 2 && /debug stack/.test(r.err),
+      `code=${r.code} ${r.err.slice(0, 120)}`);
+    r = await runCli(["state", "export"], env);
+    check("state export 指路 call export_state", r.code === 2 && /export_state/.test(r.err),
+      `code=${r.code} ${r.err.slice(0, 120)}`);
   } finally {
     await killProc(daemon);
   }

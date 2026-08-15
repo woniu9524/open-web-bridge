@@ -4,12 +4,16 @@ SKILL.md covers the core loop and the things you must not get wrong. This file
 holds the longer recipes for specific jobs — read the one you need.
 
 **Contents**: [Structured extraction](#structured-extraction-with-eval) ·
-[click vs click-mouse](#click-reports-success-but-nothing-seems-to-happen) ·
-[Drag and canvas](#dragging-and-canvas-drawing) · [Slow sites](#speeding-up-slow-sites) ·
+[Live data provenance](#live-data-record-provenance-and-keep-multiple-match-keys) ·
+[click vs click --mouse](#click-reports-success-but-nothing-seems-to-happen) ·
+[Drag and canvas](#dragging-and-canvas-drawing) ·
+[Rich text editors](#rich-text-editors-when-fill-isnt-enough) ·
+[Slow sites](#speeding-up-slow-sites) ·
 [Downloading and uploading](#downloading-files--the-two-commands-differ) ·
 [Debugging a site](#debugging-the-users-own-site) ·
 [Responsive / a11y audits](#responsive-and-accessibility-audits) ·
-[Saving a login](#saving-a-login-session) · [Flows](#turning-a-flow-into-one-repeatable-command)
+[Saving a login](#saving-a-login-session) · [Flows](#turning-a-flow-into-one-repeatable-command) ·
+[High-frequency sequences](#high-frequency-sequences-owb-seq)
 
 ## Structured extraction with eval
 
@@ -33,21 +37,45 @@ list. Use one **specific enough** selector, and sanity-check the count first.
 paths, nested strings). Don't escalate the escaping — write the expression to a
 file and read it back; the pattern is in `commands.md`.
 
+## Live data: record provenance and keep multiple match keys
+
+Two habits that repeatedly decide whether live-data missions (dashboards,
+trackers, markets — anything with an "updated" stamp) survive later scrutiny:
+
+**Every extracted number carries three fields of provenance.** A value copied
+without them cannot be re-verified, compared across sites, or trusted an hour
+later:
+
+- `source` — the URL (and page area) it came from
+- `observedAt` — your own clock at the moment you read it
+- `updated` — the page's **own** freshness stamp when it shows one ("updated 3
+  min ago", a corner timestamp). A page can keep rendering stale data long
+  after it stopped refreshing; without this field you cannot tell.
+
+**Cross-site entities need every key you can get.** The same flight / vessel /
+product appears under different primary keys on different platforms, and a
+single key that fails to match on the second site strands the whole
+comparison. Measured with flights: keep the flight number **and** the aircraft
+registration **and** the airport IATA/ICAO codes — for any single one of them,
+some pair of sites disagreed. Record all candidate keys at extraction time
+(they cost nothing then) instead of re-scraping after a failed join.
+
 ## `click` reports success but nothing seems to happen
 
-`click` uses `element.click()` (script-triggered, `isTrusted:false`);
-`click-mouse` sends real CDP mouse events (`isTrusted:true`). Most sites treat
-them the same, but **some custom components read `event.isTrusted` and only accept
-real events**. The symptom is "the DOM attribute really did change, but the app's
-own state did not react". Measured on NYT Connections tiles: after `click()` the
-underlying checkbox really was `checked:true`, yet the tile didn't highlight and
-Submit stayed locked; `click-mouse` on the same ref worked. Reddit's share and
+A plain `click` uses `element.click()` (script-triggered, `isTrusted:false`);
+`click --mouse true` sends real CDP mouse events (`isTrusted:true`, with a
+visible cursor animation). Most sites treat them the same, but **some custom
+components read `event.isTrusted` and only accept real events**. The symptom is
+"the DOM attribute really did change, but the app's own state did not react".
+Measured on NYT Connections tiles: after `click()` the underlying checkbox
+really was `checked:true`, yet the tile didn't highlight and Submit stayed
+locked; `click --mouse true` on the same ref worked. Reddit's share and
 external-link cards behave the same way.
 
 How to tell: `click` reported `clicked:true` but the expected visual change is
 missing (**confirm with a screenshot, don't trust the return value alone**) —
-retry with `click-mouse`. Prefer `click` for ordinary forms and buttons; it is
-faster.
+retry with `--mouse true`. Prefer the plain form for ordinary forms and
+buttons; it is faster.
 
 ⚠️ **`checked` and `aria-*` are not evidence of "successfully selected"** — they
 can be changed normally by `click()` while the app's own state is something else
@@ -56,8 +84,8 @@ unlock?), not just the DOM attribute.
 
 ## Dragging and canvas drawing
 
-`click` and `click-mouse` both press and release at one point and cannot simulate
-a drag. **Try two `click-mouse` calls first** (click origin, click destination) —
+Both click forms press and release at one point and cannot simulate a drag.
+**Try two `click --mouse true` calls first** (click origin, click destination) —
 measured, that is enough for chess.com's board. Only if the site truly does not
 support click-to-select do you need the three-step `Input.dispatchMouseEvent`
 sequence through `owb cdp` (mousePressed → mouseMoved → mouseReleased), which
@@ -67,6 +95,35 @@ works for drawing in Excalidraw and panning Google Maps.
 element doesn't. Canvas content is not DOM, so `owb page` cannot see it — confirm
 with `owb shot`. **The full template and the map-specific pitfalls are in
 `field-notes.md`.**
+
+## Rich text editors: when `fill` isn't enough
+
+`fill` handles plain `contenteditable` regions (the snapshot gives them refs,
+and fill sets the text plus an InputEvent). But framework editors that **own
+their DOM** — ProseMirror, Slate, Lexical, Quill (docs apps, Notion-style
+pages, the Password Game) — reconcile against internal state and revert or
+desync on a raw text write. Symptom: `fill` reports ok but the editor shows
+nothing, or the text vanishes on the next keystroke.
+
+Go through the real input pipeline instead:
+
+```bash
+owb click @e4                        # 1. focus the editor
+owb keys --text "the text to type"   # 2. insertText — editors treat it as typing
+owb keys --keys "Ctrl+a"             # 3. selection / shortcuts are real key events
+owb keys --keys "Ctrl+b"             #    e.g. bold the current selection
+owb keys --keys Backspace            #    or delete it
+```
+
+- `keys --text` goes through `beforeinput`/`input`, which every major editor
+  implements — the reliable path for **content**.
+- Bold/italic, selection changes and deletions are **commands, not content** —
+  send the editor's own shortcuts with `keys --keys`.
+- Verify against the editor's rendered state, not the value you wrote:
+  `owb eval 'document.querySelector(".ProseMirror").textContent'` (or the
+  page's own API when it exposes one).
+- Still stuck (canvas-based editors, IME-driven widgets)? `handoff` and let
+  the user type that one field.
 
 ## Speeding up slow sites
 
@@ -122,9 +179,10 @@ owb debug console --tab <id> --enabled true          # page errors
 owb har start --tab <id> && owb open <page> --tab <id> && owb har save --args '{"filename":"investigation"}'
 ```
 
-⚠️ **Never `har stop` and then `har save`.** `har save` **already includes stop**;
-stopping first destroys the recorder, so `har save` reports `NOT_RECORDING` and
-**the data is permanently lost**.
+⚠️ **`har save` is the only command that stops AND keeps the recording.**
+`har discard` also stops, but **throws the data away** (that is its job — use it
+only to abandon a recording). Calling `har discard` first and `har save` after
+reports `NOT_RECORDING` and **the data is permanently lost**.
 ⚠️ With an active task, `har save` always writes `tasks/<task id>/recording.har`
 and **ignores `filename`** — don't assume the argument failed.
 
@@ -196,6 +254,40 @@ owb flow run weekly-report     # replay it later with one command
   the user is switching tabs or another flow is running, you get `AMBIGUOUS_TAB`.
   Pass `--keep-tab-ids true` to preserve the original ids, or
   `--continue-on-error true` to keep going after a failed step.
+
+## High-frequency sequences: `owb seq`
+
+Every `owb` invocation pays a process spawn plus a WS handshake (~100–200ms on
+Windows) before the tool even runs. Over a long stretch of **mechanical
+steps** — game moves, dismiss-dialog-then-read, filling many fields — that
+overhead dominates the wall clock. `owb seq` runs the whole stretch over
+**one** process and one connection:
+
+```bash
+owb seq "click @e2" "keys --keys ArrowDown" "keys --keys ArrowDown" "page --since-last true"
+owb seq --file steps.txt --delay-ms 120     # one step per line, # for comments
+owb seq "fill @e3 hello" "keys --keys Enter" --tab 123   # top-level --tab = every step's default
+```
+
+- Each step is a complete owb command **minus the `owb` prefix**. Quote each
+  step, and use the other quote style inside it (`"fill '@e3' 'two words'"`).
+- Output is **one JSON line per step** plus a `{"seq":{steps,ok,failed}}`
+  summary. A failed step stops the run (`--keep-going` to push past it); the
+  exit code is 1 if anything failed.
+- `--delay-ms <n>` pauses between steps — games and animated UIs often need
+  100–200ms to settle before accepting the next input.
+- In `--file`, a line starting with `{` is a JSON step
+  `{"tool":"fill","args":{"ref":"e3","value":"…"}}` — zero shell quoting, the
+  right form for values full of quotes (write the file, then run it).
+- **Batch only the mechanical stretches.** Anything you must *think between*
+  (read state → decide next move) still needs separate invocations — `seq`
+  removes the per-step overhead, not the decision loop. For pure in-page
+  mechanics a single `owb eval` loop is faster still, but its events are
+  `isTrusted:false`; `seq` steps go through the real input pipeline.
+
+`flow save/run` is the neighbouring tool: it **records** calls you already
+made and replays them deterministically later. `seq` is for a sequence you are
+composing right now, without recording anything.
 
 ## Scrolled but nothing new appeared?
 

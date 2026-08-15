@@ -27,7 +27,7 @@ This file is the trunk; **five reference files live in `references/`, read on de
 | `references/field-notes.md` | Long-tail oddities seen in the field (the "Reality check" table below is the symptom index — come here once a symptom matches) |
 | `references/relay.md` | The user asks about remote-controlling their browser, or `daemon-status` reports relay mode |
 
-**For anything not documented here**: this file cannot cover all 82 commands.
+**For anything not documented here**: this file cannot cover all 80 commands.
 `owb help` lists all 16 groups, `owb help <group>` expands one, and
 `owb call <tool> --args '<json>'` calls any underlying tool directly.
 **Don't guess command names — look them up.**
@@ -260,6 +260,13 @@ automatically and marks the result `textSource: "textContent-fallback"`
 visual order**, and includes navigation chrome — fine for reading, not for
 judging layout. Why it happens: `references/field-notes.md`, symptom C.
 
+💡 **Body nearly empty and the DOM really is empty too** (title renders,
+content doesn't — typical of client-side-rendered pages): the result carries a
+`_hint` that says which case you are in — still loading (→ `wait
+--network-idle`), a bot-check interstitial (→ `handoff`), an SPA shell whose
+data never arrived (→ check `net list`), or content behind interaction /
+inside an iframe. Follow the hint instead of re-reading in a loop.
+
 ## Waiting and timeouts
 
 ```bash
@@ -297,11 +304,12 @@ elements in the snapshot. When a snapshot looks suspiciously small, run
 
 ## Common tasks
 
-Longer recipes — structured extraction, `click` vs `click-mouse`, dragging and
-canvas, speeding up slow sites, downloads and uploads, debugging a site,
-responsive/accessibility audits, saving logins, recording flows — live in
-**`references/recipes.md`**. The few below are either used constantly or easy to
-get wrong.
+Longer recipes — structured extraction, live-data provenance, `click` vs
+`click --mouse`, dragging and canvas, rich text editors (ProseMirror-style),
+speeding up slow sites, downloads and uploads, debugging a site,
+responsive/accessibility audits, saving logins, recording flows, high-frequency
+step sequences (`owb seq`) — live in **`references/recipes.md`**. The few below
+are either used constantly or easy to get wrong.
 
 ### Reading content that requires a login
 
@@ -369,8 +377,10 @@ owb net start --tab <id>                             # ② bind capture to it
 owb open http://localhost:3000 --tab <id>            # ③ then navigate
 ```
 
-⚠️ **Never `har stop` and then `har save`.** `har save` already includes stop;
-stopping first destroys the recorder and **the data is permanently lost**.
+⚠️ **`har save` is the only command that stops AND keeps the recording.**
+`har discard` also stops but **throws the data away** — it exists for
+abandoning a recording, never as a step before `save` (that reports
+`NOT_RECORDING` and the data is permanently lost).
 
 **The full ladder — HAR to replay scripts, HAR diffing, assertions, hooks,
 breakpoints, script search and patching, offline signature verification, TLS
@@ -387,6 +397,16 @@ computed" questions. The rest of the recipe is in `references/recipes.md`.
 - Escape hatches: `--raw` for the full result envelope, `--compact` for
   single-line JSON, `--no-autostart` to skip starting the daemon,
   `owb call <tool> --args '<json>'` for any tool, `owb cdp` for raw CDP
+- `owb seq "<step>" "<step>" …` runs several steps over **one** process and
+  connection — reach for it when a stretch of mechanical steps (game moves,
+  multi-field forms) would otherwise pay ~100–200ms of spawn overhead each.
+  Recipe in `references/recipes.md`, flags in `references/commands.md`
+- ⚠️ **PowerShell**: a bare `@e3` is splatting syntax and **silently
+  vanishes** before owb runs (symptom: a confusing `BAD_ARGS`) — always quote
+  refs there: `owb fill '@e3' 'x'`. And Windows hosts that spawn processes
+  without a shell can't execute the `owb.ps1`/`owb.cmd` shims — invoke
+  `node "<npm root -g>\open-web-bridge\owb-daemon\src\cli.js"` instead.
+  Both are detailed in `references/commands.md` under "PowerShell"
 
 Success prints data JSON to stdout; failure prints one line
 `error CODE: message` to stderr with a non-zero exit code (2 for usage errors).
@@ -450,27 +470,27 @@ that road).
 | `TIMEOUT` | Busy main thread (most common) / breakpoint / modal | Try `owb wait --network-idle true` and retry; to wait longer use **`--timeout-ms`** (not `--timeout`). **When even `shot` times out, first add `owb eval "1+1"` to fork the diagnosis** |
 | `ctl call timeout` | You hit the CLI envelope | You raised tool-internal waiting past 110s — also pass `--timeout <seconds>` |
 | `NEED_TASK` | No active task | `owb task begin "<title>"` and retry |
-| `NOT_RECORDING` | The recorder was destroyed | You called `har stop` first; `har save` includes stop, and the data is gone — record again |
+| `NOT_RECORDING` | The recorder was destroyed | You called `har discard` first; discard throws the recording away, and the data is gone — record again, then finish with `har save` alone |
 | `FORBIDDEN` + interstitial | Chrome security page | No workaround; the user must deal with the certificate warning |
 | `FORBIDDEN` + not in an OWB-managed group | You are closing **a user's own tab** | This is the guardrail, not a fault. Check the tabId with `owb tab list`; only consider `--force true` if it really should be closed |
 
 ## Command map
 
-16 groups, 82 commands — **names only, so you know what exists**. Arguments are in
+16 groups, 80 commands — **names only, so you know what exists**. Arguments are in
 `references/commands.md`, or run `owb help <group>`.
 
 | Group | Commands |
 | --- | --- |
-| **core** | open back forward reload page shot click click-mouse fill keys scroll eval wait frames status cdp |
+| **core** | open back forward reload page shot click (`--mouse` for real mouse events) fill keys scroll eval wait frames status cdp |
 | **tab** | tab list / find / close / close-group |
 | **net** | net start / stop / list / detail / initiator / capture |
-| **har** | har start / save / stop / status / to-replay / diff / assert |
+| **har** | har start / save / discard / status / to-replay / diff / assert |
 | **hook** | hook preset / fn / remove / status / logs |
-| **debug** | debug break-xhr / break-fn / break-remove / frames / step / resume / console; **`oracle` is top-level** (`owb oracle`, not `owb debug oracle`) |
+| **debug** | debug break-xhr / break-fn / break-remove / stack / step / resume / console; **`oracle` is top-level** (`owb oracle`, not `owb debug oracle`) |
 | **script** | script list / source / search / patch / unpatch / watch / watch-remove |
 | **verify** | verify signer / replay / evidence |
 | **cookie** | cookie get / set / delete |
-| **state** | state save / load / list / delete / export / import |
+| **state** | state save / load / list / delete (raw primitives: `owb call export_state` / `import_state`) |
 | **env** | env set / reset / compare |
 | **file** | download, upload, pdf are **top-level**; only `file fetch` takes the `file ` prefix |
 | **task** | task begin / end / list |
@@ -491,8 +511,14 @@ not after every command — run:
 owb update check
 ```
 
-- `✓ up to date` → done; no need to mention it to the user.
-- `? could not reach the npm registry` → skip silently; not worth surfacing.
+**This is a background chore, silent by default.** Don't announce that you are
+about to check, and don't narrate the result — the **only** outcome worth a
+sentence to the user is an actual update. Three outcomes:
+
+- `✓ up to date` → **say nothing at all** (no "already on the latest version",
+  no mention that a check happened).
+- `? could not reach the npm registry` → **say nothing**; never retry or
+  troubleshoot this on your own.
 - `⬆ update available` → the output lists the exact upgrade steps
   (`npm i -g open-web-bridge@latest`, then `owb skill install` to refresh this
   skill, then `owb daemon-stop` so the new daemon starts on the next command;

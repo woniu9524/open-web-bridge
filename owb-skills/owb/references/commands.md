@@ -81,8 +81,41 @@ node -e 'console.log(JSON.stringify({expression:require("fs").readFileSync(proce
 owb eval --args "$(cat /tmp/eval-args.json)"
 ```
 
-Simple arguments stay simple (`owb fill @e3 "keyword"`); this pattern is only for
-when quotes collide.
+Simple arguments stay simple (`owb fill @e3 "keyword"` — but on PowerShell,
+quote the ref; next section); the file pattern is only for when quotes collide.
+
+### PowerShell (Windows): quote every `@ref`
+
+In PowerShell a bare `@e3` is **splatting syntax** — "expand the variable
+`$e3`" — and an undefined variable expands to *nothing*, so the ref silently
+vanishes before owb ever runs. `owb fill @e3 "1800"` arrives as `fill "1800"`:
+the value gets promoted to selector and the real value is missing, so the
+error is a confusing `BAD_ARGS: fill: value is required`. This hits **every**
+command that takes an `@ref` (`click`, `fill`, `scroll --ref`):
+
+```powershell
+owb fill '@e3' 'keyword'    # ✓ quoted ref — single or double quotes both work
+owb click '@e5'             # ✓
+```
+
+The bash examples throughout these docs write refs bare because POSIX shells
+don't expand `@`. If a value fights PowerShell quoting on top of that,
+`owb call fill --args '{"ref":"e3","value":"..."}'` sidesteps the shell layer
+entirely (PowerShell single-quoted strings are literal, so the JSON survives).
+
+### Windows hosts that spawn without a shell
+
+Agent runtimes that launch subprocesses directly (Python `CreateProcess`,
+some sandboxes) can't execute npm's `owb.ps1` / `owb.cmd` shims — `owb` works
+in your terminal but the agent reports "command not found". Invoke the entry
+file with node instead:
+
+```powershell
+node "$(npm root -g)\open-web-bridge\owb-daemon\src\cli.js" page --mode text
+```
+
+`npm root -g` prints the global `node_modules` directory; resolve it once and
+reuse the absolute path from any shell-less spawn API.
 
 ## Meta
 
@@ -92,9 +125,10 @@ when quotes collide.
 | `owb setup` | Install walkthrough (extension path + skill install + self-check) |
 | `owb skill install [--to <agents>] [--project] [--dir <path>]` | Install the skill for **every detected agent** (`~/.claude` / `~/.codex` / `~/.cursor` / `~/.opencode`). `--to claude,codex` picks agents, `--project` installs into the current project instead of the home directory, `--dir <path>` installs to `<path>/owb` |
 | `owb skill path` | Print the bundled skill source directory |
-| `owb update check` | Compare the installed version against the npm registry; prints the upgrade steps when a newer version exists. Run once at the end of a session, per SKILL.md "Staying current" |
+| `owb update check` | Compare the installed version against the npm registry; prints the upgrade steps when a newer version exists. Run once at the end of a session, per SKILL.md "Staying current" — **silent chore: only an actual `⬆ update available` is worth mentioning to the user; up-to-date and registry-unreachable results are said to no one** |
 | `owb help [group]` | All commands, or details for one group |
 | `owb call <tool> --args '<json>'` | Call any underlying tool directly (escape hatch for anything the aliases miss) |
+| `owb seq "<step>" "<step>" …` | Run several steps over **one** process and connection (drops the ~100–200ms per-command spawn overhead). Each step is a full owb command minus the `owb` prefix; `--file <path>` adds one step per line (`#` comments; a line starting with `{` is a JSON step `{"tool":…,"args":{…}}` — zero shell quoting); `--delay-ms <n>` pauses between steps; `--keep-going` continues past a failed step; top-level `--tab` / `--timeout` become each step's default. Output: one JSON line per step + a `{"seq":{steps,ok,failed}}` summary; exit 1 if any step failed. Recipe: `recipes.md` |
 
 ## Core
 
@@ -105,8 +139,7 @@ when quotes collide.
 | `reload` | `--bypass-cache` `--timeout-ms` | Hard reload with `--bypass-cache true` |
 | `page` | `--mode snapshot\|article\|text`(default snapshot) `--max-chars`(20000, min 100) `--max-nodes`(400, **max 2000**) `--since-last` | Returns `lines`/`content`/`text`, plus a `text` alias in every mode; sets `truncated`/`omittedNodes` when clipped |
 | `shot` | `--format png\|jpeg`(png) `--quality`(jpeg only, 1-100, default 80) `--full-page` `--out <path>` | Always writes to disk; stdout returns only `{savedTo, bytes}` |
-| `click <@ref\|selector>` | `--ref` / `--selector` (pick one), `--mouse true` switches to `click-mouse` | Disabled elements raise a clear error rather than reporting false success |
-| `click-mouse <@ref\|selector>` | Same, or `--x --y` for coordinates; `--button left\|right\|middle` `--click-count 1\|2` | Real mouse events (`isTrusted:true`), with a cursor animation |
+| `click <@ref\|selector>` | `--ref` / `--selector` (pick one). `--mouse true` sends **real mouse events** (`isTrusted:true`, visible cursor animation) and unlocks `--x --y` (coordinates), `--button left\|right\|middle`, `--click-count 1\|2` | Disabled elements raise a clear error rather than reporting false success |
 | `fill <@ref\|selector> <value>` | `value`(required — omitting it errors rather than silently clearing the field) | Uses the native setter, so React controlled components work |
 | `keys` | `--text <text>` **or** `--keys "<sequence>"` (exactly one; both is an error) | Key names below |
 | `scroll` | `--args '{"to":"top\|bottom"}'`, `--dy`/`--dx` (relative), `--absolute true` with `--dy`, `--selector`/`--ref` (scroll to element), `--settle-ms`(400, cap 5000) | Returns `{x, y, maxY, atBottom}` |
@@ -153,7 +186,7 @@ Recording, replay generation, and regression comparison. Full workflow in
 | --- | --- |
 | `har start` | `--include-bodies` `--max-body-bytes` `--max-total-body-bytes` `--url-pattern` `--exclude-pattern` `--resource-types` `--capture-console` `--capture-screenshots` `--capture-storage` |
 | `har save` | `--args '{"filename":"name"}'` `--title` `--tab`. Writes `work/har/<name>.har`; **with an active task it always writes `tasks/<id>/recording.har` and `filename` is ignored** |
-| `har stop` | `--title`. Stops without saving — **when you are done recording, call `har save` directly** (it stops for you) |
+| `har discard` | `--title`. Stops **and throws the recording away** (no file). `har save` is the only command that stops and writes; there is no plain "stop" |
 | `har status` | — |
 | `har to-replay` | `--path <path under work/>` or `--args '{"har":{...}}'`; `--format python\|curl\|node` `--url-pattern` `--save` |
 | `har diff` | `--baseline <path>` `--current <path>` `--save` |
@@ -178,7 +211,7 @@ prefix.
 | `debug break-xhr` | `--url-substring` or `--url-pattern` |
 | `debug break-fn` | `--function-path`; `--condition` `--url-pattern` `--line-number` `--column-number` |
 | `debug break-remove` | `--url-substring` / `--url-pattern` / `--key` |
-| `debug frames` | `--max-frames` `--prop-limit` `--include-global` `--auto-resume` |
+| `debug stack` | `--max-frames` `--prop-limit` `--include-global` `--auto-resume` |
 | `debug step` | `--action into\|over\|out` (default over); errors clearly if nothing is paused |
 | `debug resume` | — |
 | `debug console` | `--enabled true\|false` |
@@ -212,7 +245,11 @@ Saved login sessions.
 | `state load <name>` | `name`(required) `--tab` | Restore |
 | `state list` | — | What is stored |
 | `state delete <name>` | `name`(required) | Drop stale ones |
-| `state export` / `state import` | `--args '{"state":{...}}'` | Extension-side primitives covering only the current page's storage; prefer the four commands above |
+
+The raw extension-side primitives behind save/load are reachable as
+`owb call export_state` / `owb call import_state --args '{"state":{...}}'`
+(current page's storage only) — the four commands above cover the normal
+workflow.
 
 ⚠️ These files hold **plaintext credentials**. `work/` is gitignored, but be
 careful before packaging or sharing the repo.
