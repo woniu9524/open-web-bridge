@@ -143,7 +143,7 @@ owb cdp --args '{"method":"Input.dispatchMouseEvent","params":
 | --- | --- | --- |
 | **Anti-scraping refusal** | 403 or a shell page; `open` returns `httpErrorHint` (ThePaper, CNKI, some e-commerce) | **Change approach** — don't keep analyzing an empty snapshot |
 | **Chrome security interstitial** | Certificate/privacy error pages forbid debugger attachment; `open` returns `attachHint`, `page` raises `FORBIDDEN` | **No workaround** — have the user handle it in the browser |
-| **Structurally undebuggable URLs** | Web Store, `chrome://`, `devtools://`, other extensions' pages; `open` succeeds, everything after is `FORBIDDEN` | **No workaround** — find another source |
+| **Structurally undebuggable URLs** | The whole `chrome.google.com/webstore/*` domain (**including the developer console** at `/devconsole`, not just the storefront), `chromewebstore.google.com`, `chrome://`, `devtools://`, other extensions' pages. `open` succeeds and everything after is `FORBIDDEN: The extensions gallery cannot be scripted` | **No workaround** — a new tab, a retry and `--force` all fail. Do the work by hand, or find another source |
 | **PDF URLs** | All three read modes return nothing | See below |
 
 **PDFs**: Chrome's built-in viewer renders in a **separate sandboxed view** that
