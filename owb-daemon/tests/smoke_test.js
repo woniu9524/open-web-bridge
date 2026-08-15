@@ -275,15 +275,18 @@ async function main() {
       !res.ok && res.error && ["DISCONNECTED", "SEND_FAILED"].includes(res.error.code),
       jstr(res));
 
-    // 6. session 审计与事件落盘（子进程写盘异步，轮询等落盘）
-    const eventsFile = path.join(workdir, "events", "events.jsonl");
-    const evLines = await waitFor(() => {
-      if (!fs.existsSync(eventsFile)) return null;
-      const lines = fs.readFileSync(eventsFile, "utf8").trim().split("\n").filter(Boolean);
-      return lines.length >= 5 ? lines : null;
-    });
-    check("event 落盘", !!evLines && evLines.length === 5,
-      `lines=${evLines ? evLines.length : 0}`);
+    // 6. session 审计落盘 + 事件**默认不落盘**
+    // events 磁盘日志曾经是无轮转无上限的裸追加流，实测长到 18 GiB，而
+    // 没有任何代码读回它（events / hook_logs 都读内存 ring buffer）。现在
+    // 默认关闭，OWB_EVENTS_LOG=1 才写；写入器本身由 rolling_log_test 覆盖。
+    // 这里守住策略：跑完 5 个事件后，磁盘上不该出现任何 events 分片。
+    await sleep(300);
+    const evDir = path.join(workdir, "events");
+    const evFiles = fs.existsSync(evDir)
+      ? fs.readdirSync(evDir).filter((x) => x.endsWith(".jsonl"))
+      : [];
+    check("event 默认不落盘（OWB_EVENTS_LOG 未开）", evFiles.length === 0,
+      `files=${JSON.stringify(evFiles)}`);
     const sessionText = await waitFor(() => {
       const dir = path.join(workdir, "sessions");
       if (!fs.existsSync(dir)) return null;

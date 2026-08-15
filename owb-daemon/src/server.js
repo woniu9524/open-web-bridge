@@ -23,7 +23,7 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import { isMainModule } from "./ismain.js";
 
-import { EvidenceStore } from "./evidence.js";
+import { EvidenceStore, RollingJsonl, ymd } from "./evidence.js";
 import { verify_signer, dry_run_signer } from "./verify.js";
 import { replay } from "./replay.js";
 import { harToReplay, harDiff, harAssert } from "./harexport.js";
@@ -36,6 +36,21 @@ export const WORK_DIR = process.env.OWB_WORK_DIR || path.join(REPO_ROOT, "work")
 
 const ALLOWED_HOSTS = new Set([`${HOST}:${PORT}`, `localhost:${PORT}`]);
 const EVENT_BUFFER_SIZE = 2000;
+
+function envInt(name, dflt) {
+  const v = parseInt(process.env[name] || "", 10);
+  return Number.isFinite(v) && v >= 0 ? v : dflt;
+}
+
+// ---- 磁盘日志闸门 ----
+// events.jsonl 默认**不写**：补拉走内存 ring buffer（events 与 hook_logs 两个
+// 消费者读的都是 event_buffer），磁盘上那份从来没有任何代码读回 —— 纯只写死重，
+// 实测在开发机上长到 18 GiB。需要跨重启的磁盘取证再用 OWB_EVENTS_LOG=1 打开，
+// 那条路径同样带按天切分 + 大小上限 + 过期清理。
+const EVENTS_LOG_ENABLED =
+  !!process.env.OWB_EVENTS_LOG && process.env.OWB_EVENTS_LOG !== "0";
+const LOG_KEEP_DAYS = envInt("OWB_LOG_KEEP_DAYS", 14);      // 0 = 不清理
+const LOG_MAX_FILE_BYTES = envInt("OWB_LOG_MAX_FILE_MB", 64) * 1024 * 1024;
 const PING_INTERVAL_S = 20;
 // hello.payload.client 须为此值（协议族识别，见 handleExtension 注释）
 const EXTENSION_CLIENT = "open-web-bridge-extension";
@@ -112,11 +127,8 @@ export function _slug(name) {
 }
 
 const pad2 = (n) => String(n).padStart(2, "0");
-
-/** 返回 YYYYMMDD（本地时区）。 */
-function ymd(d = new Date()) {
-  return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
-}
+// ymd 从 evidence.js 导入：磁盘上按天切分的文件名以那边为准，
+// 两处各写一份 YYYYMMDD 格式化必然漂移。
 
 /** 返回 YYYYMMDD-HHMMSS（本地时区）。 */
 function tsId(d = new Date()) {
@@ -127,6 +139,71 @@ function tsId(d = new Date()) {
 function isoSeconds(d = new Date()) {
   return `${ymd(d).replace(/(\d{4})(\d{2})(\d{2})/, "$1-$2-$3")}` +
     `T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+// ---- 审计脱敏 / 体积上限 ----
+//
+// 审计日志要回答的是「谁在什么时候调了什么」，不是留一份载荷副本。原来 _audit
+// 把 payload 原样写盘，同时踩了两个坑：
+//   体积 —— 截图是 base64、read_page 是整页正文、network_detail 带响应体，
+//           实测单行到过 4.4 MB、单日文件 130 MB；
+//   凭据 —— export_state 的 cookie（含 HttpOnly）、cookie_get 的结果原样入库，
+//           等于在 work/ 下又开了一个凭据库，而文档只告诉用户 states/ 敏感。
+//
+// 按**方向**分治，因为两个方向的读者根本不同：
+//   tool_result（两个方向）—— 没有任何代码读回，狠裁：深度抹凭据键 + 总量上限；
+//   tool_call 的 args      —— workflow_save 要靠它重建可回放步骤（见该分支的
+//                             `dir === "ext->"` 过滤），必须保真，只抹掉
+//                             import_state 那种「整包凭据」参数。
+const REDACT_KEYS = new Set([
+  "cookies", "storage", "state", "password", "passwd",
+  "token", "secret", "authorization", "relayToken",
+]);
+const AUDIT_RESULT_MAX_BYTES = 2048;
+
+function redactedLabel(v) {
+  if (typeof v === "string") return `[redacted ${v.length} chars]`;
+  if (Array.isArray(v)) return `[redacted ${v.length} items]`;
+  if (v && typeof v === "object") return `[redacted ${Object.keys(v).length} keys]`;
+  return "[redacted]";
+}
+
+/** 深度抹掉凭据键。只用于 tool_result —— 没有代码读回它们。 */
+function redactDeep(node, depth = 0) {
+  if (!node || typeof node !== "object" || depth > 6) return node;
+  if (Array.isArray(node)) return node.map((x) => redactDeep(x, depth + 1));
+  const out = {};
+  for (const [k, v] of Object.entries(node)) {
+    out[k] = REDACT_KEYS.has(k) ? redactedLabel(v) : redactDeep(v, depth + 1);
+  }
+  return out;
+}
+
+/** 落盘前处理一条审计记录。脱敏本身绝不能让 daemon 挂掉，故整体兜底。 */
+export function auditSafe(entry) {
+  try {
+    const e = { ...entry };
+    const p = e.payload;
+    if (!p || typeof p !== "object") return e;
+    if (e.type === "tool_call") {
+      // args 是回放源，保持原样；只处理整包凭据参数
+      if (p.args && typeof p.args === "object" && p.args.state !== undefined) {
+        e.payload = { ...p, args: { ...p.args, state: redactedLabel(p.args.state) } };
+      }
+      return e;
+    }
+    const slim = redactDeep(p);
+    const s = JSON.stringify(slim);
+    e.payload = s && s.length > AUDIT_RESULT_MAX_BYTES
+      ? { _omitted: `result payload ${s.length} B exceeded the ` +
+                    `${AUDIT_RESULT_MAX_BYTES} B audit cap`,
+          _keys: Object.keys(slim).slice(0, 20) }
+      : slim;
+    return e;
+  } catch (err) {
+    return { ts: entry && entry.ts, dir: entry && entry.dir,
+             type: entry && entry.type, _auditError: String(err) };
+  }
 }
 
 /** 订阅过滤匹配。 */
@@ -157,12 +234,21 @@ export class Bridge {
     this.subscribers = new Map();
     // 当前进行中的 task：{"id","title","rel_dir"} 或 null
     this.current_task = null;
-    this.events_log = this.store.open_jsonl("events/events.jsonl");
-    this.session_log = this.store.open_jsonl(`sessions/${ymd()}.jsonl`);
-    // 落盘流出错（磁盘满/work 目录丢失）不应崩进程：记日志即可，
-    // 事件仍在内存 ring buffer 里，调用方可经 events 接口补拉
-    this.events_log.on("error", (e) => console.error("[owb-daemon] events_log error:", e));
-    this.session_log.on("error", (e) => console.error("[owb-daemon] session_log error:", e));
+    // 两条长生命周期日志都走 RollingJsonl（按天切分 + 大小上限 + 过期清理），
+    // 流内部自己处理写错误：磁盘满/work 丢失不该崩进程，事件仍可经 events
+    // 接口从内存 ring buffer 补拉。
+    // events 默认关闭，理由见 EVENTS_LOG_ENABLED 处的注释。
+    this.events_log = EVENTS_LOG_ENABLED
+      ? new RollingJsonl(this.store, "events",
+                         { maxBytes: LOG_MAX_FILE_BYTES, keepDays: LOG_KEEP_DAYS })
+      : null;
+    this.session_log = new RollingJsonl(this.store, "sessions",
+                                        { maxBytes: LOG_MAX_FILE_BYTES,
+                                          keepDays: LOG_KEEP_DAYS });
+    // 启动扫一次过期分片：daemon 常常一跑就是几天，只靠跨天钩子清不掉
+    // 「上次运行留下的陈年日志」。
+    this.session_log.sweep();
+    if (this.events_log) this.events_log.sweep();
   }
 
   // ---- 安全校验（Host + Origin 防 DNS rebinding / CSRF）----
@@ -288,7 +374,7 @@ export class Bridge {
       };
       this.event_buffer.push(record);
       if (this.event_buffer.length > EVENT_BUFFER_SIZE) this.event_buffer.shift();
-      this.events_log.write(JSON.stringify(record) + "\n");
+      if (this.events_log) this.events_log.write(JSON.stringify(record) + "\n");
       this._broadcast({ type: "event", ...record });
       return;
     }
@@ -557,7 +643,12 @@ export class Bridge {
     if (name === "shutdown") {
       // 升级路径的最后一步：老进程退出，下一条 owb 命令 autostart 时跑的就是
       // npm -g 更新后的新代码。延迟退出是为了让这条结果先送达 ctl 端。
-      setTimeout(() => process.exit(0), 200);
+      // process.exit 不等 pending 写入，退出瞬间的审计记录会丢——先收流。
+      setTimeout(() => {
+        try { this.session_log.end(); } catch (e) {}
+        try { if (this.events_log) this.events_log.end(); } catch (e) {}
+        process.exit(0);
+      }, 200);
       return { ok: true, data: {
         note: "daemon exiting; it restarts on the next owb command",
       } };
@@ -815,6 +906,7 @@ export class Bridge {
       // 从 session 审计日志提取时间窗内的 ext-> tool_call（task_context 是
       // task 分组联动的内部管道，不固化）；坏行跳过
       const steps = [];
+      let skippedState = 0;
       for (const sp of this._glob("sessions", "*.jsonl")) {
         for (const line of fs.readFileSync(sp, "utf8").split("\n")) {
           if (!line) continue;
@@ -831,6 +923,11 @@ export class Bridge {
           }
           const payload = rec.payload || {};
           if (payload.name === "task_context") continue;
+          // import_state 的 args 是整包 cookie/storage。审计侧已按凭据抹掉，
+          // 固化进来只会得到一个 "[redacted …]" 的坏步骤；何况把明文登录态
+          // 焊进 workflow 文件本身就是又复制一份凭据。回放前用
+          // `owb state load <名字>` 恢复登录态才是支持的路径。
+          if (payload.name === "import_state") { skippedState++; continue; }
           steps.push({ name: payload.name ?? null, args: payload.args || {} });
         }
       }
@@ -841,8 +938,14 @@ export class Bridge {
         steps,
         step_count: steps.length,
       });
-      return { ok: true, data: { name: slug, step_count: steps.length,
-                                 path: p } };
+      return { ok: true, data: {
+        name: slug, step_count: steps.length, path: p,
+        _hint: skippedState
+          ? `skipped ${skippedState} import_state step(s) — a saved login is ` +
+            "not baked into the workflow. Run `owb state load <name>` before " +
+            "`owb flow run` to restore the session first."
+          : undefined,
+      } };
     }
     if (name === "workflow_run") {
       const slug = _slug(args.name);
@@ -1230,7 +1333,7 @@ export class Bridge {
 
   _audit(entry) {
     entry.ts = Date.now() / 1000;
-    this.session_log.write(JSON.stringify(entry) + "\n");
+    this.session_log.write(JSON.stringify(auditSafe(entry)) + "\n");
   }
 }
 

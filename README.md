@@ -244,8 +244,16 @@ the developer, and there is no server we operate.
 ## Tests
 
 ```bash
-npm test          # smoke + CLI + slug + doc-example lint + doc-example run + HAR export
+npm test              # every headless suite + a node --check syntax gate over the extension
+npm run test:browser  # end to end on a real browser (needs Chrome)
+npm run test:replay   # TLS replay (needs the curl-impersonate binary)
+npm run test:relay    # relay Durable Object unit tests
 ```
+
+`npm test` collects `owb-daemon/tests/*_test.js` by convention — a new suite is
+picked up without editing any script — runs each one even if an earlier one
+fails, and prints a per-suite summary. The two suites that need external
+things (a real browser, a downloaded binary) are the only ones held out.
 
 Individual suites:
 
@@ -260,8 +268,7 @@ node owb-daemon/tests/relay_test.js          # relay mode integration (mock rela
 node owb-daemon/tests/verify_replay_test.js  # offline verification + replay
 node owb-daemon/tests/e2e_browser_test.js    # end to end on a real browser (headless Chromium + the real extension)
 node owb-daemon/tests/read_page_test.js      # page-expression unit tests (several sibling files cover the rest)
-
-cd owb-relay && node test/relay_test.mjs     # relay Durable Object unit tests
+node owb-daemon/tests/rolling_log_test.js    # log rotation / retention and audit redaction
 ```
 
 The last two doc-example suites exist because of a specific failure: the commands

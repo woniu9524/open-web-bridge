@@ -62,6 +62,19 @@ the daemon:
 - task archives, HAR recordings, screenshots and downloads you asked for
 - **saved login sessions** (`state save`) — cookies, `localStorage` and IndexedDB,
   written **in plaintext** under `work/states/`
+- an audit trail of tool calls under `work/sessions/` — one line per call, kept
+  for 14 days. Results are truncated and credential-bearing fields (cookies,
+  storage dumps, tokens) are redacted before they are written; the **arguments**
+  you passed are kept as-is, because `flow save` reconstructs replayable
+  workflows from them — so a password typed with `fill` does appear there
+
+New files are created with owner-only permissions (`0600`), and directories
+`0700`. Files created by older versions keep whatever permissions they had.
+
+A separate raw event log is **off by default**; set `OWB_EVENTS_LOG=1` only if
+you want one. Both logs roll by day, cap each file (`OWB_LOG_MAX_FILE_MB`,
+default 64) and delete parts older than `OWB_LOG_KEEP_DAYS` (default 14; `0`
+disables the cleanup).
 
 ⚠️ `work/` is gitignored, but it is not encrypted. Anything you save with
 `state save` is a plaintext credential file. Treat it accordingly, and check

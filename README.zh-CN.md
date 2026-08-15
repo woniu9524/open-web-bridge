@@ -206,8 +206,15 @@ owb-daemon                    # 日志会标注「中转模式」
 ## 测试
 
 ```bash
-npm test          # 冒烟 + CLI + slug + 文档示例 lint + 文档示例执行 + HAR 加工
+npm test              # 全部无头套件 + 扩展侧 node --check 语法闸门
+npm run test:browser  # 真机端到端（需要 Chrome）
+npm run test:replay   # TLS 重放（需要 curl-impersonate 二进制）
+npm run test:relay    # 中转 Durable Object 单元测试
 ```
+
+`npm test` 按目录约定收集 `owb-daemon/tests/*_test.js`——新增套件不用改任何
+脚本就会被跑到——且**不会首败即停**，跑完全部再按套件汇总。只有需要外部环境
+（真浏览器、要下载的二进制）的两个套件被排除在外。
 
 单独跑：
 
@@ -222,8 +229,7 @@ node owb-daemon/tests/relay_test.js          # 中转模式集成（mock 中转 
 node owb-daemon/tests/verify_replay_test.js  # 离线验证 + 重放
 node owb-daemon/tests/e2e_browser_test.js    # 真机端到端（headless Chromium + 真扩展）
 node owb-daemon/tests/read_page_test.js      # 页面表达式单测（另有若干同类文件）
-
-cd owb-relay && node test/relay_test.mjs     # 中转 Durable Object 单元测试
+node owb-daemon/tests/rolling_log_test.js    # 日志轮转 / 保留窗口与审计脱敏
 ```
 
 最后那两个文档示例测试是因为一次具体的失败才加的：**测试跑的命令和文档教用户写的

@@ -30,10 +30,13 @@ const { check, summarize } = (function () {
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "owb-har-"));
 const bridge = new Bridge(tmpDir);
-// Bridge 构造时打开了 events/sessions 的 WriteStream；挂 error 监听，
-// 避免 rmSync 删除 tmpDir 后进程退出时流 flush 触发未捕获 error 崩测试。
-bridge.events_log.on("error", () => {});
-bridge.session_log.on("error", () => {});
+// 曾经这里要手动给两条 WriteStream 挂空 error 监听，否则 rmSync 删掉 tmpDir 后
+// 流 flush 会抛未捕获 error 崩掉测试。现在两条日志都走 RollingJsonl，它在内部
+// 给每个分片挂了 error handler；events 更是默认根本不开（见 EVENTS_LOG_ENABLED）。
+// 保留这行断言，免得哪天换回裸流又踩同一个坑。
+if (bridge.events_log && bridge.events_log.stream) {
+  throw new Error("events_log should be off by default");
+}
 
 const SAMPLE_HAR = {
   log: {
