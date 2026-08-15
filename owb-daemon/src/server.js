@@ -88,16 +88,26 @@ function coerceHar(v, label = "har") {
 // --- 小工具 -----------------------------------------------------------------
 
 /** 工作流/会话库文件名 slug：小写、非字母数字转 -、截 40。 */
-function _slug(name) {
-  const raw = String(name || "").toLowerCase();
+// BUG-119: 原来是 `[^a-z0-9]+ → "-"`，把所有非 ASCII 字符全抹掉，于是**纯中文
+// 名字会塌成空串**。后果是 SKILL.md 里自己写的例子就跑不通：
+//   owb flow save 周报   → BAD_ARGS: workflow_save: name is required
+// ——明明给了名字，却说没给。state / har 文件名 / replay 文件名同一条路径。
+// 这个仓库的文档和用户都是中文的，等于所有自然写法都失效。
+// 改成只保留 Unicode 字母/数字（CJK、带重音的拉丁、西里尔都算），
+// 其余（空格、标点、路径分隔符、控制字符）一律折成连字符——
+// 现代文件系统存中文文件名没有任何问题。
+export function _slug(name) {
+  const raw = String(name || "").trim();
   // BUG-5: preserve trailing extension (e.g. .har) so "my_analysis.har"
   // doesn't become "my-analysis-har.har" with double extension.
-  const extMatch = raw.match(/\.([a-z0-9]+)$/);
-  const ext = extMatch ? extMatch[0] : "";
+  const extMatch = raw.match(/\.([A-Za-z0-9]{1,8})$/);
+  const ext = extMatch ? extMatch[0].toLowerCase() : "";
   const base = (ext ? raw.slice(0, -ext.length) : raw)
-    .replace(/[^a-z0-9]+/g, "-")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 40);
+    .slice(0, 40)
+    .replace(/-+$/g, ""); // 截断可能正好切在连字符上
   return base + (base && ext ? ext : "");
 }
 
