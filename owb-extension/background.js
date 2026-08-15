@@ -1814,12 +1814,14 @@ async function resolveTabId(args) {
 // 让「你正在往杂物抽屉里堆东西」这件事可见（见该处注释）。
 // ---------------------------------------------------------------------------
 
-const OWB_GROUP_TITLE = "OWB 临时";
+const OWB_GROUP_TITLE = "OWB scratch";
 // 改名前建的组里可能还有 tab，close_tab/close_group 必须继续认旧名，
 // 否则用户浏览器里的遗留 tab 会突然变成「非 OWB 管理」而关不掉（要 force）。
-const OWB_GROUP_TITLE_LEGACY = "OWB 分析";
+// 名字改过两次（"OWB 分析" → "OWB 临时" → "OWB scratch"）。用户浏览器里可能还
+// 留着旧名字的组——认不出来就意味着 close_tab/close_group 拒关，只能 --force。
+const OWB_GROUP_TITLES_LEGACY = ["OWB 临时", "OWB 分析"];
 const isOwbTempGroupTitle = (t) =>
-  t === OWB_GROUP_TITLE || t === OWB_GROUP_TITLE_LEGACY;
+  t === OWB_GROUP_TITLE || OWB_GROUP_TITLES_LEGACY.includes(t);
 const OWB_GROUP_COLOR = "blue";
 
 // 通用命名组：按标题找已有组或新建（OWB 分析 / task 任务 / handoff 交接共用）
@@ -1846,7 +1848,7 @@ async function isOwbManagedTab(tab) {
     const title = (await chrome.tabGroups.get(tab.groupId)).title || "";
     return (
       isOwbTempGroupTitle(title) ||
-      title === HANDOFF_GROUP_TITLE ||
+      isHandoffGroupTitle(title) ||
       title.startsWith("task: ")
     );
   } catch (e) {
@@ -1888,7 +1890,10 @@ async function ensureTaskGroup(tabId) {
 // handoffState 记录交接中的 tab；wait_user 命中后按它清场。tabs.onRemoved 清理。
 // ---------------------------------------------------------------------------
 
-const HANDOFF_GROUP_TITLE = "✋ OWB 等你操作";
+const HANDOFF_GROUP_TITLE = "✋ OWB waiting for you";
+const HANDOFF_GROUP_TITLES_LEGACY = ["✋ OWB 等你操作"]; // 同上，旧组仍要认得出
+const isHandoffGroupTitle = (t) =>
+  t === HANDOFF_GROUP_TITLE || HANDOFF_GROUP_TITLES_LEGACY.includes(t);
 const HANDOFF_GROUP_COLOR = "orange";
 /** 处于交接态的 tabId 集合 */
 const handoffState = new Set();
@@ -3018,7 +3023,7 @@ const tools = {
       const t = g.title || "";
       if (isOwbTempGroupTitle(t)) return true; // 含改名前的旧组名
       if (t.startsWith("task: ")) return args.include_tasks !== false;
-      if (t === HANDOFF_GROUP_TITLE) return args.include_handoff === true;
+      if (isHandoffGroupTitle(t)) return args.include_handoff === true;
       return false;
     });
     let closed = 0;
@@ -3033,7 +3038,7 @@ const tools = {
       }
     }
     const handoffLeft = all.filter(
-      (g) => g.title === HANDOFF_GROUP_TITLE && args.include_handoff !== true,
+      (g) => isHandoffGroupTitle(g.title) && args.include_handoff !== true,
     ).length;
     return {
       closed,
@@ -5420,7 +5425,7 @@ const tools = {
           const title = group.title || "";
           managed =
             isOwbTempGroupTitle(title) || // 含改名前的旧组名
-            title === HANDOFF_GROUP_TITLE ||
+            isHandoffGroupTitle(title) ||
             title.startsWith("task: ");
         } catch (e) {}
       }

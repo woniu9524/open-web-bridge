@@ -149,7 +149,7 @@
         <path d="M4 8h16M8 4v4"></path>
       </svg>
     </div>
-    <span>浏览器</span>
+    <span>Browser</span>
   </div>
 
   <div class="wire" id="wireA"><span class="brk">✕</span></div>
@@ -160,7 +160,7 @@
         <path d="M6.66 18C4.09 18 2 15.99 2 13.52s2.09-4.48 4.66-4.48c.39-1.76 1.79-3.2 3.67-3.78 1.88-.57 3.96-.19 5.45 1 1.49 1.19 2.16 3.01 1.77 4.77h.99c1.91 0 3.46 1.56 3.46 3.49S20.45 18 18.54 18H6.66z"></path>
       </svg>
     </div>
-    <span>中转</span>
+    <span>Relay</span>
   </div>
 
   <div class="wire" id="wireB"><span class="brk">✕</span></div>
@@ -179,8 +179,8 @@
 
 <div class="stateRow">
   <span class="dot"></span>
-  <span class="state" id="state">查询中…</span>
-  <button id="reconnect" type="button" title="重新连接">
+  <span class="state" id="state">Checking…</span>
+  <button id="reconnect" type="button" title="Reconnect">
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M20 12a8 8 0 1 1-2.4-5.7"></path><path d="M20 4v4h-4"></path>
     </svg>
@@ -191,32 +191,32 @@
 
 <div class="tabs" role="tablist">
   <button class="tab" id="tabLocal" type="button" role="tab" aria-selected="true">
-    <span class="live"></span>本地
+    <span class="live"></span>Local
   </button>
   <button class="tab" id="tabRelay" type="button" role="tab" aria-selected="false">
-    <span class="live"></span>中转
+    <span class="live"></span>Relay
   </button>
 </div>
 
 <div id="paneLocal" class="pane on">
-  <label for="wsUrl">DAEMON 地址</label>
+  <label for="wsUrl">DAEMON ADDRESS</label>
   <input id="wsUrl" type="text" placeholder="ws://127.0.0.1:43917/ws">
-  <p class="hint">直连本机 daemon，留空用默认地址，一般无需改动。</p>
+  <p class="hint">Connects straight to the daemon on this machine. Leave blank to use the default; you rarely need to change it.</p>
 </div>
 
 <div id="paneRelay" class="pane">
-  <label for="relayUrl">中转 URL</label>
-  <input id="relayUrl" type="text" placeholder="wss://owb-relay.你的子域.workers.dev">
-  <label for="relayToken">中转 TOKEN</label>
+  <label for="relayUrl">RELAY URL</label>
+  <input id="relayUrl" type="text" placeholder="wss://owb-relay.your-subdomain.workers.dev">
+  <label for="relayToken">RELAY TOKEN</label>
   <div class="row">
-    <input id="relayToken" type="text" placeholder="与 daemon 端一致">
-    <button id="gen" class="btn" type="button">生成</button>
-    <button id="copy" class="btn" type="button">复制</button>
+    <input id="relayToken" type="text" placeholder="must match the daemon">
+    <button id="gen" class="btn" type="button">Generate</button>
+    <button id="copy" class="btn" type="button">Copy</button>
   </div>
-  <p class="hint">Token 是远程控制你浏览器的唯一钥匙，需与 daemon 端环境变量 <code>OWB_RELAY_TOKEN</code> 完全一致，勿外泄。</p>
+  <p class="hint">This token is the only key to controlling your browser remotely. It must match the daemon's <code>OWB_RELAY_TOKEN</code> exactly — keep it secret.</p>
 </div>
 
-<button id="save" type="button">保存并重连</button>
+<button id="save" type="button">Save and reconnect</button>
 <div id="msg"></div>
 
 <script src="popup.js"></script>

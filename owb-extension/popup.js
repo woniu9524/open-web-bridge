@@ -19,27 +19,27 @@ function render(s) {
   // reached: 拓扑上已点亮到哪一环（0 只有浏览器，1 到中转，2 到 daemon）
   let stateText, phase, reached, note = "";
   if (s.connected) {
-    stateText = "已连接";
+    stateText = "Connected";
     phase = "live";
     reached = 2;
   } else if (s.wsState === 0) {
-    stateText = "连接中…";
+    stateText = "Connecting…";
     phase = "pending";
     reached = 0;
   } else if (s.wsState === 1) {
     // ws 已开但未 helloAcked：relay 等配对，否则等握手 ack
     const pairing = relay && !s.relayPaired;
-    stateText = pairing ? "配对中…" : "握手中…";
+    stateText = pairing ? "Pairing…" : "Handshaking…";
     phase = "pending";
     reached = 1;
-    if (pairing) note = "等待 daemon 用同一 Token 接入中转";
+    if (pairing) note = "Waiting for the daemon to join the relay with the same token";
   } else {
-    stateText = "未连接";
+    stateText = "Not connected";
     phase = "broken";
     reached = 0;
     note = s.reconnectInMs > 0
-      ? `${Math.round(s.reconnectInMs / 1000)}s 后自动重连`
-      : relay ? "检查中转 URL 与 Token 是否两端一致" : "确认本机 daemon 已启动";
+      ? `Reconnecting in ${Math.round(s.reconnectInMs / 1000)}s`
+      : relay ? "Check that the relay URL and token match on both ends" : "Check that the daemon is running on this machine";
   }
 
   document.body.className = phase;
@@ -79,7 +79,7 @@ async function refresh() {
     const s = await chrome.runtime.sendMessage({ cmd: "status" });
     if (s) render(s);
   } catch (e) {
-    $("state").textContent = "后台未响应";
+    $("state").textContent = "Background not responding";
     document.body.className = "broken";
     document.body.style.setProperty("--sc", STATE_COLOR.broken);
   }
@@ -118,18 +118,18 @@ $("gen").addEventListener("click", () => {
   crypto.getRandomValues(bytes);
   $("relayToken").value = btoa(String.fromCharCode(...bytes))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  msg("已生成新 Token，保存后同步到 daemon 端。");
+  msg("New token generated. Save, then copy it to the daemon.");
 });
 
 $("copy").addEventListener("click", async () => {
   const v = $("relayToken").value.trim();
-  if (!v) return msg("Token 为空。", true);
+  if (!v) return msg("Token is empty.", true);
   try {
     await navigator.clipboard.writeText(v);
-    msg("Token 已复制。");
+    msg("Token copied.");
   } catch (e) {
     $("relayToken").select();
-    msg("复制失败，已选中，请按 Ctrl+C。", true);
+    msg("Copy failed — the text is selected, press Ctrl+C.", true);
   }
 });
 
@@ -138,18 +138,18 @@ $("save").addEventListener("click", async () => {
   if (relay) {
     const relayUrl = $("relayUrl").value.trim();
     const relayToken = $("relayToken").value.trim();
-    if (!relayUrl || !relayToken) return msg("中转模式需要填写中转 URL 和 Token。", true);
-    if (!/^wss?:\/\//i.test(relayUrl)) return msg("中转 URL 需以 wss:// 开头。", true);
+    if (!relayUrl || !relayToken) return msg("Relay mode needs both a relay URL and a token.", true);
+    if (!/^wss?:\/\//i.test(relayUrl)) return msg("The relay URL must start with wss://.", true);
     await chrome.storage.local.set({ relayUrl, relayToken });
   } else {
     // 切回本地：清空中转字段，使 background 的 relayMode 判定为 false
     const wsUrl = $("wsUrl").value.trim();
-    if (wsUrl && !/^wss?:\/\//i.test(wsUrl)) return msg("daemon 地址需以 ws:// 开头。", true);
+    if (wsUrl && !/^wss?:\/\//i.test(wsUrl)) return msg("The daemon address must start with ws://.", true);
     const patch = { relayUrl: "", relayToken: "" };
     if (wsUrl) patch.wsUrl = wsUrl;
     await chrome.storage.local.set(patch);
   }
-  msg("已保存，正在重连…");
+  msg("Saved. Reconnecting…");
   setTimeout(refresh, 400);
 });
 
