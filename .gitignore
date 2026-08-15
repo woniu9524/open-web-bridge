@@ -11,6 +11,5 @@ bin/
 work/
 *.tgz
 
-# 实地测试的原始扫描数据（体量大、可重跑）
-docs/field-test/raw*.jsonl
-docs/field-test/sweep*.log
+# 文档不入库
+docs/
