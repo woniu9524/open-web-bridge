@@ -118,11 +118,13 @@ missions end up scattered across each other's groups. Measured: 5 concurrent tas
   *your* task's metadata even if the pointer has moved on (the result carries
   `ended_stale: true` when it wasn't the live one) — but it does **not** retroactively
   fix which group your tabs already landed in.
-- `task end`'s cleanup no longer reaches outside your task: it re-confirms with the
-  extension that the task is still live before touching anything, and stops only the
-  recorders on **your** task's tabs rather than every recorder in the browser. The
-  flip side: a recording running on a tab that never joined your task group is no
-  longer auto-archived by `task end` — the data isn't lost, but you have to
+- `task end`'s cleanup no longer reaches outside your task: it re-confirms ownership
+  with the extension **by task id** before touching anything, and stops only the
+  recorders on **your** task's tabs rather than every recorder in the browser. Tab
+  ownership is tracked per task as you navigate, so it covers tabs you reused as
+  well as ones you opened with `--new-tab`. If a recorder is running on a tab that
+  genuinely isn't yours, `task end` leaves it alone and names it in
+  `recorders_not_archived` — it is never silently dropped, but you do have to
   `har save` it yourself.
 - **Still unfixed — skip `tab close-group` when other missions might be running.**
   It closes by group *name*, and group membership is exactly what's unreliable

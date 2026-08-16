@@ -74,6 +74,7 @@ class MockExtension {
     this.token = token;
     this.ws = null;
     this._handler = null;
+    this.currentTask = null; // task_context 的任务上下文（按 task_id 判身份）
   }
 
   async connect() {
@@ -96,9 +97,35 @@ class MockExtension {
         this.ws.send(jstr({ type: "pong", payload: {} }));
       } else if (msg.type === "tool_call") {
         const name = msg.payload.name;
-        const payload = name === "status"
-          ? { ok: true, data: { ws: 1, attachedTabs: [111], mock: true } }
-          : { ok: false, error: { code: "UNKNOWN_TOOL", message: name, retryable: false } };
+        let payload;
+        if (name === "status") {
+          payload = { ok: true, data: { ws: 1, attachedTabs: [111], mock: true } };
+        } else if (name === "task_context") {
+          // 镜像真扩展的所有权语义：按 task_id（不是标题）判断"当前任务是不是
+          // 你"。标题不唯一，用标题会让两个同名并发任务互相放行。
+          const a = msg.payload.args || {};
+          if (a.action === "clear") {
+            if (!this.currentTask) payload = { ok: true, data: { cleared: false } };
+            else if (a.expected_task_id != null && this.currentTask.task_id
+                     && this.currentTask.task_id !== String(a.expected_task_id)) {
+              payload = { ok: true, data: {
+                cleared: false, reason: "not_current",
+                actual_task_id: this.currentTask.task_id } };
+            } else {
+              const t = this.currentTask;
+              this.currentTask = null;
+              payload = { ok: true, data: {
+                cleared: true, tabs_closed: false, title: t.title,
+                task_id: t.task_id, groupId: null, tabIds: [], tabCount: 0 } };
+            }
+          } else {
+            this.currentTask = { title: String(a.title || ""),
+                                 task_id: a.task_id != null ? String(a.task_id) : null };
+            payload = { ok: true, data: { taskSet: true, title: this.currentTask.title } };
+          }
+        } else {
+          payload = { ok: false, error: { code: "UNKNOWN_TOOL", message: name, retryable: false } };
+        }
         // UX-51 用：slow_ms 让这一条应答故意拖慢，验证它不会堵住后面的调用
         const delay = Number((msg.payload.args || {}).slow_ms) || 0;
         const reply = () =>
@@ -364,6 +391,50 @@ async function main() {
     check("并发：当前任务结束后 current_task 清空",
       res.ok && res.data && res.data.current_task === null,
       jstr((res.data || {}).current_task));
+
+    // 7c. 同名任务并发（关键回归）：标题不唯一——同名 task begin 复用分组是
+    // 文档化行为。所有权校验一旦按标题比，两个同名任务会互相放行，把对方的
+    // 任务上下文/录制/HAR 收走还报告一切正常。必须按 task_id 判身份。
+    const ext3 = new MockExtension(port);
+    await ext3.connect();
+    ext3.serve();
+    res = await ctlCall(ctl, "daemon.task_begin", { title: "同名任务" });
+    const dupA = (res.data || {}).task_id || "";
+    res = await ctlCall(ctl, "daemon.task_begin", { title: "同名任务" });
+    const dupB = (res.data || {}).task_id || "";
+    check("同名并发：两个任务拿到不同 task_id",
+      dupA && dupB && dupA !== dupB, `A=${dupA} B=${dupB}`);
+    res = await ctlCall(ctl, "daemon.task_end", { task_id: dupA });
+    check("同名并发：结束 A 归档为 stale，且没有清掉任何扩展侧上下文",
+      // group 两种正确形态：daemon 早知道 A 不是 current 就直接短路（null），
+      // 或者问了扩展被按 task_id 拒绝（cleared:false）。绝不能是 cleared:true。
+      res.ok && res.data && res.data.id === dupA
+      && res.data.ended_stale === true
+      && (res.data.group == null || res.data.group.cleared === false),
+      jstr(res.data && res.data.group));
+    check("同名并发：B 的任务上下文仍在扩展侧存活",
+      ext3.currentTask && ext3.currentTask.task_id === dupB,
+      jstr(ext3.currentTask));
+    res = await ctlCall(ctl, "daemon.task_end", { task_id: dupB });
+    check("同名并发：B 自己结束时正常清理，不被误标 stale",
+      res.ok && res.data && res.data.id === dupB && !res.data.ended_stale
+      && (res.data.group || {}).cleared === true,
+      jstr(res.data && res.data.group));
+
+    // 7d. 空标题（回归）：task_begin 存的是 taskId 兜底值，收尾若按标题比对
+    // 就永远对不上——任务被误标 stale、扩展上下文永不清理、录制永不停止。
+    res = await ctlCall(ctl, "daemon.task_begin", {});
+    const noTitle = (res.data || {}).task_id || "";
+    res = await ctlCall(ctl, "daemon.task_end", { task_id: noTitle });
+    check("空标题任务能正常收尾（不被误判成别人的任务）",
+      res.ok && res.data && res.data.id === noTitle && !res.data.ended_stale
+      && (res.data.group || {}).cleared === true,
+      jstr(res.data && res.data.group));
+    check("空标题任务收尾后扩展侧上下文已清空",
+      ext3.currentTask === null, jstr(ext3.currentTask));
+    ext3.stop();
+    ext3.ws.close();
+    await sleep(200);
 
     // 8. 宏回放与会话库（无扩展场景）
     // 8a. 无任务时 workflow_save 报 NEED_TASK

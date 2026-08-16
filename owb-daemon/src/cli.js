@@ -212,14 +212,14 @@ const COMMAND_ARGS = {
   "net stop": [],
   "net list": ["url_pattern", "limit", "sort_by", "newest", "order",
                "include_orphans", "include_extensions"],
-  "net detail": ["request_id", "requestId", "include_body", "max_body"],
+  "net detail": ["request_id", "requestId", "include_body", "max_body", "max_frames"],
   "net initiator": ["request_id", "requestId", "url", "url_pattern"],
   "net capture": ["url_pattern", "trigger"],
   "har start": ["include_bodies", "max_body_bytes", "max_total_body_bytes",
                 "url_pattern", "exclude_pattern", "resource_types",
                 "capture_console", "capture_screenshots", "capture_storage"],
   "har save": ["filename", "title"],
-  "har discard": ["title", "tabIds"],
+  "har discard": ["title", "tabIds", "tab_ids"],
   "har status": [],
   "har to-replay": ["har", "path", "format", "url_pattern", "save"],
   "har diff": ["baseline", "current", "save"],
@@ -935,9 +935,13 @@ function resolveInvocation(positionals, args, cli) {
     const unknown = Object.keys(args).filter((k) => !allowed.has(k));
     if (unknown.length) {
       const flags = unknown.map((k) => `--${k.replace(/_/g, "-")}`).join(" ");
+      // 通用 flag 也要列出来：最常见的手滑就是 --tab-id / --timeout 这类，
+      // 只列命令自己的参数会让人以为它们不被接受（其实是允许的）。
+      const universal = "--tab --timeout --timeout-ms --args --raw --compact --out";
       const valid = known.length
-        ? known.map((k) => `--${k.replace(/_/g, "-")}`).join(" ")
-        : "(none beyond the universal flags)";
+        ? `${known.map((k) => `--${k.replace(/_/g, "-")}`).join(" ")}  ` +
+          `(plus the universal ${universal})`
+        : `only the universal flags: ${universal}`;
       throw new UsageError(
         `${cmdName}: unknown ${unknown.length > 1 ? "flags" : "flag"} ${flags}\n` +
         `  ${cmdName} takes: ${valid}\n` +

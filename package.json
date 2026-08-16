@@ -1,15 +1,22 @@
 {
   "name": "open-web-bridge",
   "version": "1.2.0",
-  "description": "让 AI agent 驱动你的真实浏览器——你的登录态、你的指纹、你正在看的页面。CLI 接入，零客户端配置。",
+  "description": "Drive your real Chrome from any AI agent — logged-in sessions, real fingerprint, live tabs. CLI-based, works with Claude Code, Codex, or any shell.",
   "keywords": [
     "ai-agent",
+    "agent-tools",
     "browser-automation",
     "chrome-extension",
+    "chrome-devtools-protocol",
     "cdp",
+    "manifest-v3",
     "claude-code",
+    "codex",
+    "llm",
     "cli",
-    "playwright-alternative"
+    "playwright-alternative",
+    "puppeteer-alternative",
+    "web-scraping"
   ],
   "license": "MIT",
   "author": "woniu9524 (https://github.com/woniu9524)",

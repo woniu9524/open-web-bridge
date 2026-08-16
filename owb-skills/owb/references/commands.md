@@ -184,12 +184,22 @@ Capture and inspect network traffic. Full workflow in `debugging.md`.
 
 **WebSocket**: `net` captures WS connections too — they appear in `net list`
 marked `isWebSocket: true` with `status: 101`, `type: "WebSocket"` and a live
-`frameCount`. `net detail` on one returns the `frames` array (each with
-`dir: send\|recv`, `opcode`, `len`, `data`) instead of a response body, since
-`getResponseBody` is meaningless for a socket. Two caps keep a chatty socket
-from eating memory: only the most recent 200 frames per connection are kept
-(`framesSeen` is the true total, `framesDropped`/`framesNote` appear once
-frames are lost) and each payload is truncated at 2000 chars. **For a complete
+`framesSeen` (frames observed so far). `net detail` on one returns the `frames`
+array (each with `dir: send|recv`, `opcode`, `len`, `data`) instead of a
+response body, since `getResponseBody` is meaningless for a socket.
+
+Three separate numbers, because a chatty socket has to be bounded twice over:
+
+| Field | Meaning |
+| --- | --- |
+| `framesSeen` | every frame observed on this connection |
+| `framesKept` | still in memory — the most recent 200 (`framesDropped` = the rest) |
+| `framesReturned` | how many this call actually returned — the last **50** by default |
+
+Raise the last one with `--max-frames <n>` (it only ever reaches `framesKept`).
+Payloads are truncated at 2000 chars each. The default matters: 200 kept frames
+at full width is ~400 KB in a single reply, which is several times the CLI's
+own output budget and lands entirely in your context. **For a complete
 WebSocket session, record it with `har start` / `har save`** — the HAR path
 keeps every frame.
 

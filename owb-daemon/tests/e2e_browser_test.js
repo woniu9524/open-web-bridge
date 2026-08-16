@@ -370,7 +370,7 @@ async function main() {
     const wsItems = ((res.data || {}).requests || []).filter((r) => r.isWebSocket);
     check("network_list 列出 WebSocket 连接",
       wsItems.length > 0 && wsItems[0].type === "WebSocket"
-      && wsItems[0].status === 101 && wsItems[0].frameCount >= 2,
+      && wsItems[0].status === 101 && wsItems[0].framesSeen >= 2,
       jstr(wsItems).slice(0, 300));
     if (wsItems.length > 0) {
       res = await ctl.call("network_detail", { request_id: wsItems[0].requestId });

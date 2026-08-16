@@ -861,6 +861,16 @@ export class Bridge {
       // 后一个 write_json 直接覆盖前一个任务的元数据。复用唯一真源。
       const slug = _slug(title);
       if (slug) taskId += `-${slug}`;
+      // BUG-119 只修好了"中文标题 slug 塌成空串"这一半：同一秒内两次**同名**
+      // task_begin 依然会算出完全相同的 id（tsId 只到秒 + 相同 slug）。而同名
+      // task begin 复用分组是文档化行为，撞名撞秒并不罕见。后果不止是元数据
+      // 互相覆盖：task_id 是 task_end 判断所有权的唯一凭证，id 一样就等于两个
+      // 任务共用一个身份，谁也认不出谁。撞了就往后加序号，保证 id 真的唯一。
+      if (fs.existsSync(this.store._abs(`tasks/${taskId}/task.json`))) {
+        let n = 2;
+        while (fs.existsSync(this.store._abs(`tasks/${taskId}-${n}/task.json`))) n++;
+        taskId = `${taskId}-${n}`;
+      }
       const meta = { id: taskId, title,
                      began_at: isoSeconds(),
                      began_ts: Date.now() / 1000,
@@ -868,9 +878,12 @@ export class Bridge {
       this.store.write_json(`tasks/${taskId}/task.json`, meta);
       this.current_task = { id: taskId, title,
                             rel_dir: `tasks/${taskId}` };
-      // 扩展侧建 task:<title> 标签分组；扩展不在线或其他失败都容忍
+      // 扩展侧建 task:<title> 标签分组；扩展不在线或其他失败都容忍。
+      // 必须把 task_id 一起传过去：task_end 的所有权校验按 id 比对，标题
+      // 不唯一（同名复用分组是文档化行为），拿标题当身份会互相放行。
       const ext = await this.call_tool("task_context",
-                                       { title: title || taskId }, 10);
+                                       { title: title || taskId,
+                                         task_id: taskId }, 10);
       return { ok: true, data: { task_id: taskId,
                                  dir: `tasks/${taskId}`,
                                  ext_sync: Boolean(ext.ok) } };
@@ -930,19 +943,16 @@ export class Bridge {
       let actuallyCurrent = isCurrent;
       if (isCurrent) {
         const ext = await this.call_tool("task_context",
-          { action: "clear", expected_title: meta.title }, 10);
+          { action: "clear", expected_task_id: target.id }, 10);
         group = ext.ok ? (ext.data ?? null) : null;
         if (group && group.cleared === false && group.reason === "not_current") {
           actuallyCurrent = false;
         }
         // 自动收尾：只停这个任务名下这几个 tab 的 recorder，HAR 落到 task
         // 目录（防忘关录制；task 成为完整会话容器，含 HAR + workflow）。
-        // 显式传 tabIds（刚从 task_context 拿到的、真正属于这个任务的标签页）
-        // 而不是留空触发"停全部合并"——那样会连带停掉、吞并别的并发任务
-        // 自己独立开的录制，即便这里已经确认自己是当前任务。
-        // 反过来的取舍：如果录制跑在一个没编进本任务分组的 tab 上，这里就
-        // 不再自动归档它了——录制本身不受影响、数据没丢，仍可自己
-        // `har save` 拿走，只是 task_end 不再越界替别人收尾。
+        // 显式传 tabIds（扩展刚回的、真正属于这个任务的标签页——它自己记的
+        // 那份 ∪ 分组里现存的）而不是留空触发"停全部合并"，后者会连带停掉、
+        // 吞并别的并发任务自己开的录制。
         const myTabIds = (group && group.tabIds) || [];
         if (actuallyCurrent && myTabIds.length) {
           try {
@@ -955,6 +965,16 @@ export class Bridge {
                               bodyBytes: stopRes.data.bodyBytes || 0 });
             }
           } catch (e) { /* 无录制或扩展离线，忽略 */ }
+        }
+        // 有录制跑在本任务范围之外的 tab 上：不越界替它收尾（那正是并发误伤
+        // 的来源），但必须说出来。以前是静默跳过，调用方会以为"本来就没有
+        // 录制"，实际是录制还在跑、数据一个字节都没落盘。
+        if (group && (group.recordersOutsideTask || []).length) {
+          meta.recorders_not_archived = group.recordersOutsideTask;
+          meta.recorders_not_archived_note =
+            "these tabs were still recording but are not part of this task, " +
+            "so task_end left them alone — call har save on them yourself, " +
+            "or the recording is never written to disk";
         }
       }
       Object.assign(meta, {

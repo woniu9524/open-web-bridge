@@ -980,7 +980,13 @@ function onNetworkEvent(tabId, method, params) {
                            url: params.url });
     return;
   }
+  // ⚠️ 下面几个后续事件都必须先确认见过 webSocketCreated。bufferPut 在查不到
+  // 时会**新建**记录，而这些事件带不出 url/type/startedAt——凭空造出的记录
+  // 没有 type 就躲过 wait_for 的 STREAMING 跳过、没有 startedAt 就躲过僵尸
+  // 清扫，又永远等不到 finished：这个 tab 的 network_idle 从此再不 settle。
+  // （抓包晚于连接建立、或缓冲区被 clear/淘汰时，就会走到这条路径。）
   if (method === "Network.webSocketWillSendHandshakeRequest") {
+    if (!getBuffer(tabId).has(params.requestId)) return;
     bufferPut(tabId, params.requestId, {
       requestHeaders: (params.request || {}).headers,
       wallTime: params.wallTime,
@@ -988,6 +994,7 @@ function onNetworkEvent(tabId, method, params) {
     return;
   }
   if (method === "Network.webSocketHandshakeResponseReceived") {
+    if (!getBuffer(tabId).has(params.requestId)) return;
     const resp = params.response || {};
     bufferPut(tabId, params.requestId, {
       status: resp.status,
@@ -1025,6 +1032,7 @@ function onNetworkEvent(tabId, method, params) {
     return;
   }
   if (method === "Network.webSocketClosed") {
+    if (!getBuffer(tabId).has(params.requestId)) return;
     bufferPut(tabId, params.requestId, {
       finished: true,
       finishedAt: Date.now(),
@@ -1032,6 +1040,7 @@ function onNetworkEvent(tabId, method, params) {
     return;
   }
   if (method === "Network.webSocketFrameError") {
+    if (!getBuffer(tabId).has(params.requestId)) return;
     bufferPut(tabId, params.requestId, {
       failed: true,
       errorText: params.errorMessage,
@@ -3021,6 +3030,10 @@ const tools = {
     // 多少 tab，回传给调用方——不改变行为，只是把「你正在往杂物抽屉里堆
     // 东西」变成可见信息。数字自己会涨，涨起来就是该 task_begin 的信号。
     let tempGroupCount = 0;
+    // 任务归属登记：分组只在 created 分支才建，但"这个任务碰过哪些 tab"必须
+    // 把复用已有标签页的情况也算进去——否则 owb open <url>（不带 --new-tab）
+    // 之后 task_end 会认为这个任务名下一个 tab 都没有，连带把录制静默跳过。
+    if (currentTask && currentTask.tabIds) currentTask.tabIds.add(tabId);
     if (created) {
       try {
         // 有任务上下文时，桥新建的 tab 编到 task 组；否则进「OWB 临时」组
@@ -3484,7 +3497,9 @@ const tools = {
         // WebSocket 连接在列表里要一眼能认出来，并且直接给出帧数——否则
         // 一条 WS 记录看起来就像一个"没有大小、没结束"的可疑 HTTP 请求。
         isWebSocket: rec.isWebSocket || undefined,
-        frameCount: rec.isWebSocket ? (rec.framesSeen || 0) : undefined,
+        // 名字要和 net detail 对得上：这里给的是"一共见过多少帧"，detail 里
+        // 还有个"当前还留着多少帧"。同名不同义会让人以为数字对不上是 bug。
+        framesSeen: rec.isWebSocket ? (rec.framesSeen || 0) : undefined,
       });
     }
     // BUG-74: 按耗时/体积排序，一条命令回答「最慢的是谁」「谁最占带宽」
@@ -3544,19 +3559,33 @@ const tools = {
     // 只会报错），真正的"内容"是帧流。直接回帧，并说清截断口径：
     // frames 是最近 WS_FRAME_KEEP 帧，framesSeen 是真实总帧数。
     if (rec.isWebSocket) {
-      const frames = rec.frames || [];
+      const kept = rec.frames || [];
       const seen = rec.framesSeen || 0;
+      // 帧默认只回最近 max_frames 条。不设默认的话，200 帧 × 2000 字符 ≈ 410KB
+      // 一次性灌进调用方上下文——远超 CLI 那层 60KB 的裁剪阈值，而且那层只裁
+      // **顶层字符串**字段，对 frames 这种对象数组完全不生效，等于没有护栏。
+      const maxFrames = Math.max(Number(args.max_frames) || 50, 1);
+      const frames = kept.length > maxFrames ? kept.slice(-maxFrames) : kept;
       detail.frames = frames;
-      detail.frameCount = frames.length;
+      detail.framesReturned = frames.length;
+      detail.framesKept = kept.length;
       detail.framesSeen = seen;
-      if (seen > frames.length) {
-        detail.framesDropped = seen - frames.length;
-        detail.framesNote =
-          `only the most recent ${frames.length} of ${seen} frames are kept ` +
-          `in memory (per-connection cap); each frame's payload is truncated ` +
-          `at ${WS_FRAME_MAX_CHARS} chars. Use har start/har save for a full ` +
-          `recording of a WebSocket session.`;
+      // 说明放在字段前面拼好：真被外层裁掉时，先被切走的是最后的字段
+      const notes = [];
+      if (seen > kept.length) {
+        detail.framesDropped = seen - kept.length;
+        notes.push(
+          `only the most recent ${kept.length} of ${seen} frames are still in ` +
+          `memory (per-connection cap)`);
       }
+      if (frames.length < kept.length) {
+        notes.push(
+          `returning the last ${frames.length} of them — raise with ` +
+          `--max-frames <n>`);
+      }
+      notes.push(`each payload is truncated at ${WS_FRAME_MAX_CHARS} chars`);
+      notes.push("use har start/har save for a complete WebSocket session");
+      detail.framesNote = notes.join("; ");
       return detail;
     }
     if (args.include_body !== false && rec.finished) {
@@ -5365,30 +5394,39 @@ const tools = {
   async task_context(args) {
     if (args.action === "clear") {
       if (!currentTask) return { cleared: false };
-      // 并发防护：daemon 那边判断"这是不是我的任务"靠的是自己 in-memory
-      // 的 current_task 快照，和这次真正打到这里之间隔着一次 CDP 往返——
-      // 这个窗口里完全可能已经有另一个 task_begin 把 currentTask 换成了
-      // 别的任务。这里用 expected_title 再核对一遍：不是自己的任务就原样
-      // 不动地拒绝，不能因为 action:clear 被调用了就无条件清掉当下真正
-      // current 的那个（可能是别人的）任务。daemon 侧把这种情况当成
-      // "isCurrent 判断在传输途中失效了"处理，不再当自己是 current。
-      if (
-        args.expected_title != null &&
-        currentTask.title !== String(args.expected_title)
-      ) {
+      // 并发防护：daemon 判断"这是不是我的任务"靠的是它自己 in-memory 的
+      // current_task 快照，和这次真正打到扩展之间隔着一次往返——这个窗口里
+      // 完全可能已经有另一个 task_begin 把 currentTask 换掉了。这里按
+      // **task_id** 再核对一遍（不是标题：同名 task begin 复用分组是文档化
+      // 行为，标题天然可重复，拿它当身份两个同名任务会互相放行——正是这个
+      // 守卫要防的那种事）。不是自己的任务就原样不动地拒绝。
+      const expectId = args.expected_task_id != null
+        ? String(args.expected_task_id) : null;
+      if (expectId && currentTask.task_id && currentTask.task_id !== expectId) {
         return { cleared: false, reason: "not_current",
+                 actual_task_id: currentTask.task_id,
                  actual_title: currentTask.title };
       }
       const t = currentTask;
       currentTask = null;
-      let tabIds = [];
+      // 任务碰过的 tab = 自己记的那份 ∪ 分组里现存的。只靠分组会漏掉所有
+      // 复用已有标签页的场景（分组只在 --new-tab 时才建）。
+      const ids = new Set(t.tabIds || []);
       if (t.groupId != null) {
         try {
           const tabs = await chrome.tabs.query({ groupId: t.groupId });
-          tabIds = tabs.map((x) => x.id).filter((id) => id != null);
+          for (const x of tabs) if (x.id != null) ids.add(x.id);
         } catch (e) {
-          // 组已不存在：统计按空返回
+          // 组已不存在：只用自己记的那份
         }
+      }
+      // 已经关掉的 tab 不该再算进来（tabIds 会被拿去停录制/报告产出）
+      const tabIds = [];
+      for (const id of ids) {
+        try {
+          await chrome.tabs.get(id);
+          tabIds.push(id);
+        } catch (e) { /* tab 已关闭 */ }
       }
       return {
         cleared: true,
@@ -5397,9 +5435,13 @@ const tools = {
         // 不会被误读的字段，别指望调用方去翻源码才搞懂 cleared 的真实含义。
         tabs_closed: false,
         title: t.title,
+        task_id: t.task_id,
         groupId: t.groupId,
         tabIds,
         tabCount: tabIds.length,
+        // 这个任务收尾时仍在录制、但不属于它的 tab（不会被 task_end 归档）。
+        // 以前是静默跳过，调用方以为"没有录制"，其实是录制还在跑、数据没落盘。
+        recordersOutsideTask: [...recorders.keys()].filter((id) => !ids.has(id)),
       };
     }
     if (!args.title) {
@@ -5409,7 +5451,17 @@ const tools = {
         false,
       );
     }
-    currentTask = { title: String(args.title), groupId: null };
+    // task_id 是真正的身份凭证。标题**不唯一**（同名 task begin 复用分组是
+    // 文档化行为），拿标题当身份，两个同名并发任务的所有权校验必然互相放行。
+    currentTask = {
+      title: String(args.title),
+      task_id: args.task_id != null ? String(args.task_id) : null,
+      groupId: null,
+      // 分组只在 `--new-tab` 建（ensureTaskGroup 只被 navigate 的 created 分支
+      // 调用），所以不能拿"分组里有哪些 tab"当作"这个任务碰过哪些 tab"——
+      // 复用已有标签页（owb open 不带 --new-tab）时分组恒为空。自己记一份。
+      tabIds: new Set(),
+    };
     return { taskSet: true, title: currentTask.title };
   },
 

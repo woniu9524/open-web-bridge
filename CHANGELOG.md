@@ -3,6 +3,50 @@
 Notable changes per release. Dates are release dates; the repository history
 has the full detail.
 
+## 1.2.1 — 2026-08-16
+
+Follow-up to 1.2.0: an independent review reproduced three real defects in that
+release's `task_end` work, and writing the regression test for them surfaced a
+fourth, older one. **If you are on 1.2.0, upgrade.**
+
+### Fixed
+
+- **`task_end` used the task *title* to prove ownership, and titles are not
+  unique** — running `task begin` with the same title deliberately reuses the
+  group, so two concurrently-running same-named tasks each passed the other's
+  ownership check. The guard permitted exactly what it was written to prevent:
+  one task would clear the other's context, stop its recorder, and file its HAR
+  under its own directory, reporting a clean success. Ownership is now proven
+  with the task id, which `task_begin` hands to the extension.
+- **`task_id` itself was not unique.** It is a second-resolution timestamp plus
+  a title slug, so two same-titled `task_begin` calls in the same second
+  produced the *same* id — colliding metadata files, and two tasks sharing one
+  identity. Ids now get a `-2`, `-3`, … suffix on collision.
+- **A task begun with no title could never be ended.** `task_begin` stored a
+  timestamp fallback while `task_end` compared against the empty title, so the
+  task was always misjudged as someone else's: archived as `ended_stale`, its
+  extension context never cleared, its recorder never stopped.
+- **Task tab ownership no longer depends on tab groups.** Groups are only
+  created for `--new-tab` navigations, so any task that reused an existing tab
+  looked like it owned no tabs at all, and 1.2.0 silently skipped stopping and
+  archiving its recording. Each task now tracks the tabs it navigates. A
+  recorder genuinely outside the task is reported in `recorders_not_archived`
+  rather than passed over in silence.
+- **`net detail` on a WebSocket could dump ~400 KB into the caller's context.**
+  The CLI's output clipper only shrinks top-level strings, so an array of frame
+  objects slipped past it, and `--max-body` did not apply. It now returns the
+  last 50 frames by default (`--max-frames <n>` to raise), and reports
+  `framesReturned` / `framesKept` / `framesSeen` separately.
+- `frameCount` meant "total seen" in `net list` but "currently kept" in
+  `net detail`; both now report `framesSeen`, so the numbers agree.
+- Four WebSocket event handlers wrote to the capture buffer without checking
+  that the connection was known, minting typeless records that never finish —
+  one of which could stop `wait --network-idle` from ever settling again on
+  that tab. All four now ignore frames for connections they never saw open.
+- `owb cookie set --http-only` and `--same-site` reached validation, but the
+  unknown-flag error message never mentioned the universal flags (`--tab`,
+  `--timeout`, …), implying they were rejected too.
+
 ## 1.2.0 — 2026-08-16
 
 ### Breaking
