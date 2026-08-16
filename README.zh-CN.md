@@ -16,12 +16,7 @@
   <img alt="node" src="https://img.shields.io/node/v/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&logo=nodedotjs&logoColor=white" />
   <img alt="Chrome MV3" src="https://img.shields.io/badge/Chrome-MV3-8b5cf6?style=flat-square&labelColor=1c1c1e&logo=googlechrome&logoColor=white" />
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/npm/l/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6" /></a>
-</p>
-
-<p>
-  <a href="https://linux.do?ref=seal-click" target="_blank" rel="noopener noreferrer" title="Best Community · LINUX DO">
-    <img src="https://linuxdo-seal.cuishushu.com/seals/seal-best-community.svg" alt="Best Community · LINUX DO" width="150" height="46" />
-  </a>
+  <a href="https://linux.do?ref=seal-click" target="_blank" rel="noopener noreferrer" title="Best Community · LINUX DO"><img alt="LINUX DO" src="https://img.shields.io/badge/LINUX%20DO-Best%20Community-8b5cf6?style=flat-square&labelColor=1c1c1e" /></a>
 </p>
 
 <p><a href="README.md">English</a> · <b>简体中文</b></p>
