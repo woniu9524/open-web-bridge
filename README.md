@@ -1,72 +1,103 @@
-# open-web-bridge
+<div align="center">
 
-**English** · [简体中文](README.zh-CN.md)
+<img src="https://raw.githubusercontent.com/woniu9524/open-web-bridge/master/owb-extension/icons/icon128.png" width="96" alt="open-web-bridge" />
 
-Let any AI agent drive **your real browser** — your logged-in sessions, your
-fingerprint, the page you are looking at right now.
+<h1>open-web-bridge</h1>
 
-That is the whole point: an agent that opens its own clean browser can only reach
-what is public. An agent driving *your* browser can read the article behind your
-subscription, check the dashboard you are already signed into, and finish the flow
-that needs your identity.
+<p>
+  <b>Let any AI agent drive <i>your real browser</i></b><br/>
+  your logged-in sessions&nbsp; ·&nbsp; your fingerprint&nbsp; ·&nbsp; the tab you are looking at right now
+</p>
+
+<p>
+  <a href="https://www.npmjs.com/package/open-web-bridge"><img alt="npm version" src="https://img.shields.io/npm/v/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&logo=npm&logoColor=white" /></a>
+  <a href="https://www.npmjs.com/package/open-web-bridge"><img alt="npm downloads" src="https://img.shields.io/npm/dm/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&label=downloads" /></a>
+  <a href="https://github.com/woniu9524/open-web-bridge/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/woniu9524/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&logo=github&logoColor=white" /></a>
+  <img alt="node" src="https://img.shields.io/node/v/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&logo=nodedotjs&logoColor=white" />
+  <img alt="Chrome MV3" src="https://img.shields.io/badge/Chrome-MV3-8b5cf6?style=flat-square&labelColor=1c1c1e&logo=googlechrome&logoColor=white" />
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/npm/l/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6" /></a>
+</p>
+
+<p>
+  <a href="https://linux.do?ref=seal-click" target="_blank" rel="noopener noreferrer" title="Best Community · LINUX DO">
+    <img src="https://linuxdo-seal.cuishushu.com/seals/seal-best-community.svg" alt="Best Community · LINUX DO" width="150" height="46" />
+  </a>
+</p>
+
+<p><b>English</b> · <a href="README.zh-CN.md">简体中文</a></p>
+
+</div>
+
+---
+
+## Why not just a headless browser?
+
+An agent that opens its own clean browser can only reach what is public.
+
+An agent driving **your** browser can read the article behind your subscription,
+check the dashboard you are already signed into, and finish the flow that needs
+your identity. That is the whole point.
+
+```bash
+npm i -g open-web-bridge   # CLI + extension files + agent skill, one command
+owb setup                  # walks you through the one step you must do yourself
+owb                        # self-check — two ✓ and you are ready
+```
+
+Then just tell your agent: *"open Hacker News and summarize the top three stories."*
+
+## How it works
+
+```text
+   AI agent               Claude Code · Codex · Kimi Code · anything with a shell
+      │
+      │  owb <command>    the CLI is the entire integration surface — zero client config
+      ▼
+   local daemon           Node.js on 127.0.0.1:43917
+      │
+      │  WebSocket
+      ▼
+   MV3 extension          installed in the browser you actually use
+      │
+      │  Chrome DevTools Protocol
+      ▼
+   your live tab          your cookies · your session · your fingerprint
+```
 
 Two deployment shapes:
 
-- **Local mode** (default) — three layers: AI agent → local daemon (Node.js on
-  `127.0.0.1:43917`) → MV3 Chrome extension → the page, over CDP. Agents connect
-  through the **`owb` CLI**, so anything that can run a shell (Claude Code, Kimi
-  Code, Codex, …) works with zero configuration. A bundled skill teaches the
-  typical workflows.
-- **Relay mode** (optional) — the daemon and the extension both dial out to a
-  public relay (Cloudflare Workers + Durable Objects, paired by token), so a
-  **remote** agent can drive your browser without exposing any port on your
-  machine. Off by default; enabling it does not change local mode.
+- **Local mode** (default) — the chain above. Anything that can run a shell works
+  with zero configuration, and a bundled skill teaches agents the typical workflows.
+- **Relay mode** (optional) — the daemon and the extension both dial out to a public
+  relay (Cloudflare Workers + Durable Objects, paired by token), so a **remote**
+  agent can drive your browser without exposing any port on your machine. Off by
+  default; enabling it does not change local mode. [Jump to setup ↓](#relay-mode-remote-control-optional)
 
 ## What it can do
 
-- **Semantic snapshots** — `read_page` assigns stable `@eN` refs to interactive
-  elements so `click`/`fill`/`screenshot` can reference them directly;
-  `since_last` returns only what changed (the difference between a session that
-  survives and one that drowns in tokens); `article` mode extracts body text as
-  clean markdown
-- **Waiting primitives** — `wait_for` on a selector, text, URL or network idle,
-  instead of polling with `evaluate`
-- **Real mouse events plus a visible cursor** — `mouse_click` dispatches genuine
-  CDP Input events (`isTrusted`), with an in-page bezier cursor animation so a
-  user sitting beside you can see what is happening
-- **Human handoff** — `handoff` / `wait_user` give the tab back to you for a
-  captcha or a QR login, and the agent resumes automatically once you are done
-- **The awkward interactions** — `download`/`upload` (uploads go through an
-  in-page DataTransfer, so no filesystem access is needed), `print_pdf`,
-  `list_frames` + `evaluate frame_pattern` for iframe-targeted evaluation
-- **Environment emulation** — `emulate`/`emulate_reset` covers viewport, network
-  throttling, geolocation, timezone, locale, permissions and UA in one call
-- **Network capture** — full requests and responses including headers and bodies,
-  plus `get_initiator` for the call stack that produced a request
-- **Session recording (HAR)** — `record_start/stop` writes standard HAR 1.2
-  (timing, WebSocket, actively collected bodies, url/resource_type filters,
-  multi-tab merge), with console archives, storage change streams and a
-  navigation screenshot timeline; `daemon_task_end` files the HAR automatically
-- **HAR processing** — `daemon_har_to_replay` (→ python/curl/node replay scripts,
-  with dynamic signature headers marked as placeholders),
-  `daemon_har_diff` (drift between two recordings), `daemon_har_assert`
-- **Tasks and workflows** — `daemon_task_begin/end` for archiving and tab
-  grouping; `daemon_workflow_save/run` turns a working flow into deterministic
-  replay
-- **Per-site session store** — `daemon_state_save/load <name>` saves and restores
-  a login (cookies + localStorage + IndexedDB)
-- **Debugging and analysis** (on demand) — hook presets (xhr/fetch/crypto),
-  breakpoints and call-frame inspection, script patching, offline function
-  verification, TLS fingerprint replay
+| | What you get |
+| --- | --- |
+| 🔍 **Semantic snapshots** | `read_page` assigns stable `@eN` refs to interactive elements so `click`/`fill`/`screenshot` reference them directly. `since_last` returns only what changed — the difference between a session that survives and one that drowns in tokens. `article` mode extracts body text as clean markdown |
+| ⏳ **Waiting primitives** | `wait_for` on a selector, text, URL or network idle, instead of polling with `evaluate` |
+| 🖱️ **Real mouse + visible cursor** | `mouse_click` dispatches genuine CDP Input events (`isTrusted`), with an in-page bezier cursor animation so a user sitting beside you can see what is happening |
+| 🤝 **Human handoff** | `handoff` / `wait_user` give the tab back to you for a captcha or a QR login, and the agent resumes automatically once you are done |
+| 📎 **The awkward interactions** | `download`/`upload` (uploads go through an in-page DataTransfer, so no filesystem access is needed), `print_pdf`, `list_frames` + `evaluate frame_pattern` for iframe-targeted evaluation |
+| 🌍 **Environment emulation** | `emulate`/`emulate_reset` covers viewport, network throttling, geolocation, timezone, locale, permissions and UA in one call |
+| 📡 **Network capture** | Full requests and responses including headers and bodies, plus `get_initiator` for the call stack that produced a request |
+| 🎞️ **Session recording (HAR)** | `record_start/stop` writes standard HAR 1.2 (timing, WebSocket, actively collected bodies, url/resource_type filters, multi-tab merge), with console archives, storage change streams and a navigation screenshot timeline; `daemon_task_end` files the HAR automatically |
+| 🔁 **HAR processing** | `daemon_har_to_replay` (→ python/curl/node replay scripts, with dynamic signature headers marked as placeholders), `daemon_har_diff` (drift between two recordings), `daemon_har_assert` |
+| 🧩 **Tasks and workflows** | `daemon_task_begin/end` for archiving and tab grouping; `daemon_workflow_save/run` turns a working flow into deterministic replay |
+| 🔐 **Per-site session store** | `daemon_state_save/load <name>` saves and restores a login (cookies + localStorage + IndexedDB) |
+| 🛠️ **Debugging and analysis** | On demand: hook presets (xhr/fetch/crypto), breakpoints and call-frame inspection, script patching, offline function verification, TLS fingerprint replay |
 
 ## Install
 
 Requirements: **Node.js ≥ 18** and a Chromium-based browser (Chrome or Edge).
 
-### Let an AI install it for you
+<details>
+<summary><b>Let an AI install it for you</b> — paste this to your agent</summary>
 
-Paste this to your agent (Claude Code / Kimi Code / Codex / …) and it will walk
-you through:
+<br/>
 
 > Install open-web-bridge for me. Do these in order and tell me the result of each:
 >
@@ -81,11 +112,13 @@ you through:
 > After that you can drive my browser with the `owb` command; `owb help` lists
 > everything.
 
+</details>
+
 ### Manual install
 
 ```bash
 npm i -g open-web-bridge     # CLI + extension files + skill, in one command
-owb setup                     # walkthrough: extension path, skill install, self-check
+owb setup                    # walkthrough: extension path, skill install, self-check
 ```
 
 `owb setup` tells you how to install the extension. **That is the one step you
@@ -104,10 +137,11 @@ Later, `owb update check` compares your install against npm and prints the
 upgrade steps when a newer version exists — the skill also teaches agents to
 run it at the end of a session, so you hear about updates without asking.
 
-The skill uses progressive disclosure, and `skill install` copies the whole
-directory:
+### The skill
 
-```
+Progressive disclosure, and `skill install` copies the whole directory:
+
+```text
 owb/SKILL.md                     the trunk — enters context on every trigger
 owb/references/commands.md       arguments for all 80 commands
 owb/references/recipes.md        longer per-task procedures
@@ -138,7 +172,7 @@ owb help                 # all commands
 
 ## Repository layout
 
-```
+```text
 open-web-bridge/          ← npm package root (package.json lives here)
 ├── owb-daemon/src/       owb CLI (the agent-facing surface) + local daemon
 ├── owb-daemon/tests/     tests (not shipped in the npm package)
@@ -157,10 +191,17 @@ package. Runtime artifacts (task archives, saved sessions, HAR files) go to
 Lets a **remote** agent drive your browser over the public internet without
 exposing any port on your machine. Off by default.
 
-Topology: the extension (your machine) and the daemon (the agent's machine) both
-dial out to a public relay and pair by token; once paired the relay forwards
-transparently in both directions. The relay runs on Cloudflare Workers + Durable
-Objects (sleeps when idle, friendly to the free tier, TLS included).
+```text
+   your machine                    Cloudflare                 agent's machine
+   ┌──────────────┐                ┌──────────┐               ┌──────────────┐
+   │  extension   │ ──── wss ────▶ │  relay   │ ◀──── wss ─── │    daemon    │
+   └──────────────┘                └──────────┘               └──────────────┘
+        paired by token · rooms addressed by sha256(token) · idle-sleeping Worker
+```
+
+The relay runs on Cloudflare Workers + Durable Objects (sleeps when idle, friendly
+to the free tier, TLS included), and forwards transparently in both directions
+once paired.
 
 **1. Deploy the relay (about 2 minutes, once):**
 
@@ -171,7 +212,7 @@ npx wrangler login          # one browser authorization
 npx wrangler deploy         # prints https://owb-relay2.<subdomain>.workers.dev
 ```
 
-See `owb-relay/README.md` for details.
+See [`owb-relay/README.md`](owb-relay/README.md) for details.
 
 **2. Configure the extension:** click the extension icon in your browser toolbar →
 switch to the **Relay** tab → enter the relay URL (e.g.
@@ -192,8 +233,8 @@ Once paired, `owb daemon-status` reports `mode: relay` and a remote agent drives
 the browser exactly as it would locally. The CLI surface is unchanged (it still
 connects to the local `/ctl`).
 
-⚠️ The daemon reads these variables **only at startup**. If a local-mode daemon is
-already running, stop it first — setting the variables alone does nothing.
+> ⚠️ The daemon reads these variables **only at startup**. If a local-mode daemon is
+> already running, stop it first — setting the variables alone does nothing.
 
 ## Optional: TLS fingerprint replay
 
@@ -255,7 +296,10 @@ picked up without editing any script — runs each one even if an earlier one
 fails, and prints a per-suite summary. The two suites that need external
 things (a real browser, a downloaded binary) are the only ones held out.
 
-Individual suites:
+<details>
+<summary>Individual suites</summary>
+
+<br/>
 
 ```bash
 node owb-daemon/tests/smoke_test.js          # protocol / daemon / orchestration (spawns its own daemon)
@@ -271,10 +315,12 @@ node owb-daemon/tests/read_page_test.js      # page-expression unit tests (sever
 node owb-daemon/tests/rolling_log_test.js    # log rotation / retention and audit redaction
 ```
 
+</details>
+
 The last two doc-example suites exist because of a specific failure: the commands
 the tests exercised and the commands the documentation taught had drifted apart,
 so documented examples could break while every test stayed green.
 
 ## License
 
-MIT
+MIT © [woniu9524](https://github.com/woniu9524)

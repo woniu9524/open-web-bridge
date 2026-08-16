@@ -1,58 +1,101 @@
-# open-web-bridge
+<div align="center">
 
-[English](README.md) · **简体中文**
+<img src="https://raw.githubusercontent.com/woniu9524/open-web-bridge/master/owb-extension/icons/icon128.png" width="96" alt="open-web-bridge" />
 
-让任何 AI agent 驱动你的**真实浏览器**——你的登录态、你的指纹、你正在看的那个页面。
+<h1>open-web-bridge</h1>
 
-这正是它存在的理由：agent 自己开一个干净浏览器，能看到的只有公开内容；驱动**你的**
-浏览器，它才能读你订阅的那篇文章、看你已经登录的后台、走完那个需要你身份的流程。
+<p>
+  <b>让任何 AI agent 驱动你的<i>真实浏览器</i></b><br/>
+  你的登录态&nbsp; ·&nbsp; 你的指纹&nbsp; ·&nbsp; 你正在看的那个页面
+</p>
+
+<p>
+  <a href="https://www.npmjs.com/package/open-web-bridge"><img alt="npm version" src="https://img.shields.io/npm/v/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&logo=npm&logoColor=white" /></a>
+  <a href="https://www.npmjs.com/package/open-web-bridge"><img alt="npm downloads" src="https://img.shields.io/npm/dm/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&label=downloads" /></a>
+  <a href="https://github.com/woniu9524/open-web-bridge/stargazers"><img alt="stars" src="https://img.shields.io/github/stars/woniu9524/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&logo=github&logoColor=white" /></a>
+  <img alt="node" src="https://img.shields.io/node/v/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6&logo=nodedotjs&logoColor=white" />
+  <img alt="Chrome MV3" src="https://img.shields.io/badge/Chrome-MV3-8b5cf6?style=flat-square&labelColor=1c1c1e&logo=googlechrome&logoColor=white" />
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/npm/l/open-web-bridge?style=flat-square&labelColor=1c1c1e&color=8b5cf6" /></a>
+</p>
+
+<p>
+  <a href="https://linux.do?ref=seal-click" target="_blank" rel="noopener noreferrer" title="Best Community · LINUX DO">
+    <img src="https://linuxdo-seal.cuishushu.com/seals/seal-best-community.svg" alt="Best Community · LINUX DO" width="150" height="46" />
+  </a>
+</p>
+
+<p><a href="README.md">English</a> · <b>简体中文</b></p>
+
+</div>
+
+---
+
+## 为什么不用无头浏览器？
+
+agent 自己开一个干净浏览器，能看到的只有公开内容。
+
+驱动**你的**浏览器，它才能读你订阅的那篇文章、看你已经登录的后台、走完那个需要
+你身份的流程。这正是本项目存在的理由。
+
+```bash
+npm i -g open-web-bridge   # CLI + 扩展文件 + agent skill，一条命令装齐
+owb setup                  # 引导你走完唯一需要手动做的那一步
+owb                        # 自检 —— 两个 ✓ 就绪
+```
+
+然后对 agent 说一句：*「打开 Hacker News，把前三条整理给我。」*
+
+## 工作原理
+
+```text
+   AI agent               Claude Code · Codex · Kimi Code · 任何能跑 shell 的工具
+      │
+      │  owb <命令>        CLI 就是全部接入面 —— 客户端零配置
+      ▼
+   本地 daemon             Node.js，127.0.0.1:43917
+      │
+      │  WebSocket
+      ▼
+   MV3 扩展                装在你平时用的那个浏览器里
+      │
+      │  Chrome DevTools Protocol
+      ▼
+   你正开着的标签页          你的 cookie · 你的登录态 · 你的指纹
+```
 
 两种部署形态：
 
-- **本地模式**（默认）——三层架构：AI agent → 本地 daemon（Node.js，
-  `127.0.0.1:43917`）→ MV3 Chrome 扩展 → 经 CDP 操作页面。agent 通过 **`owb` CLI**
-  接入，任何能跑 shell 的工具（Claude Code / Kimi Code / Codex 等）零配置直用，
-  配套 skill 教典型流程。
+- **本地模式**（默认）——就是上面这条链路。任何能跑 shell 的工具零配置直用，
+  配套 skill 教 agent 典型流程。
 - **中转模式**（可选）——daemon 与扩展都拨出到一个公网中转（Cloudflare Workers +
   Durable Objects，按 token 配对），让**远程** agent 经公网控制你的浏览器，
-  不暴露本机任何端口。默认关闭，开启不影响本地模式。
+  不暴露本机任何端口。默认关闭，开启不影响本地模式。[跳到配置 ↓](#中转模式远程控制可选)
 
 ## 能干什么
 
-- **语义快照**——`read_page` 给可交互元素打稳定的 `@eN` 编号，`click`/`fill`/
-  `screenshot` 直接按编号引用；`since_last` 只返回变化的部分（长会话能不能撑住
-  全看这一条）；`article` 模式把正文提取成干净的 markdown
-- **等待原语**——`wait_for` 等 selector / 文字 / URL / 网络空闲，不用再拿
-  `evaluate` 轮询
-- **真实鼠标 + 可见光标**——`mouse_click` 走 CDP Input 域发真实鼠标事件
-  （`isTrusted`），页面内有贝塞尔光标动画，用户在旁边看得见你在干什么
-- **人机交接**——`handoff` / `wait_user`：撞上验证码或要扫码登录时把标签页交还给你，
-  你弄完 agent 自动接管继续
-- **补齐尴尬的交互**——`download`/`upload`（上传走页面内 DataTransfer，不需要文件
-  系统权限）、`print_pdf`、`list_frames` + `evaluate frame_pattern` 定向求值 iframe
-- **环境模拟**——`emulate`/`emulate_reset` 一次覆盖设备视口、网络节流、地理位置、
-  时区、语言、权限和 UA
-- **网络抓包**——完整的请求与响应（含头和 body），外加 `get_initiator` 定位是哪段
-  代码发出的
-- **会话录制（HAR）**——`record_start/stop` 录成标准 HAR 1.2（含 timing、WebSocket、
-  主动收取的 body，支持 url/resource_type 过滤与多标签页合并），另附 console 归档、
-  storage 变更流、导航截图时间线；`daemon_task_end` 会自动把 HAR 入档
-- **HAR 加工**——`daemon_har_to_replay`（→ python/curl/node 重放脚本，动态签名头标成
-  占位符）、`daemon_har_diff`（两份录制之间的漂移）、`daemon_har_assert`（断言校验）
-- **任务与工作流**——`daemon_task_begin/end` 负责归档和标签分组；
-  `daemon_workflow_save/run` 把跑通的流程固化成确定性回放
-- **站点会话库**——`daemon_state_save/load <名字>` 一键保存/恢复登录态
-  （cookie + localStorage + IndexedDB）
-- **调试与分析**（按需）——hook 预设（xhr/fetch/crypto）、断点与调用帧读取、
-  脚本改写、函数离线验证、TLS 指纹重放
+| | 你能得到什么 |
+| --- | --- |
+| 🔍 **语义快照** | `read_page` 给可交互元素打稳定的 `@eN` 编号，`click`/`fill`/`screenshot` 直接按编号引用；`since_last` 只返回变化的部分（长会话能不能撑住全看这一条）；`article` 模式把正文提取成干净的 markdown |
+| ⏳ **等待原语** | `wait_for` 等 selector / 文字 / URL / 网络空闲，不用再拿 `evaluate` 轮询 |
+| 🖱️ **真实鼠标 + 可见光标** | `mouse_click` 走 CDP Input 域发真实鼠标事件（`isTrusted`），页面内有贝塞尔光标动画，用户在旁边看得见你在干什么 |
+| 🤝 **人机交接** | `handoff` / `wait_user`：撞上验证码或要扫码登录时把标签页交还给你，你弄完 agent 自动接管继续 |
+| 📎 **补齐尴尬的交互** | `download`/`upload`（上传走页面内 DataTransfer，不需要文件系统权限）、`print_pdf`、`list_frames` + `evaluate frame_pattern` 定向求值 iframe |
+| 🌍 **环境模拟** | `emulate`/`emulate_reset` 一次覆盖设备视口、网络节流、地理位置、时区、语言、权限和 UA |
+| 📡 **网络抓包** | 完整的请求与响应（含头和 body），外加 `get_initiator` 定位是哪段代码发出的 |
+| 🎞️ **会话录制（HAR）** | `record_start/stop` 录成标准 HAR 1.2（含 timing、WebSocket、主动收取的 body，支持 url/resource_type 过滤与多标签页合并），另附 console 归档、storage 变更流、导航截图时间线；`daemon_task_end` 会自动把 HAR 入档 |
+| 🔁 **HAR 加工** | `daemon_har_to_replay`（→ python/curl/node 重放脚本，动态签名头标成占位符）、`daemon_har_diff`（两份录制之间的漂移）、`daemon_har_assert`（断言校验） |
+| 🧩 **任务与工作流** | `daemon_task_begin/end` 负责归档和标签分组；`daemon_workflow_save/run` 把跑通的流程固化成确定性回放 |
+| 🔐 **站点会话库** | `daemon_state_save/load <名字>` 一键保存/恢复登录态（cookie + localStorage + IndexedDB） |
+| 🛠️ **调试与分析** | 按需：hook 预设（xhr/fetch/crypto）、断点与调用帧读取、脚本改写、函数离线验证、TLS 指纹重放 |
 
 ## 安装
 
 前提：**Node.js ≥ 18** + 一个 Chromium 系浏览器（Chrome / Edge）。
 
-### 让 AI 帮你装
+<details>
+<summary><b>让 AI 帮你装</b> —— 把这段整段发给你的 agent</summary>
 
-把下面这段整段发给你的 agent（Claude Code / Kimi Code / Codex 等），它会带你走完：
+<br/>
 
 > 帮我安装 open-web-bridge，按顺序做，每步做完告诉我结果：
 >
@@ -65,11 +108,13 @@
 >
 > 装好后你就能用 `owb` 命令驱动我的浏览器了，`owb help` 看全部命令。
 
+</details>
+
 ### 手动装
 
 ```bash
 npm i -g open-web-bridge     # CLI + 扩展文件 + skill，一条命令装齐
-owb setup                     # 引导：扩展安装路径、装 skill、连通性自检
+owb setup                    # 引导：扩展安装路径、装 skill、连通性自检
 ```
 
 `owb setup` 会告诉你扩展怎么装。**这是唯一需要你手动做的一步**——扩展必须装进你
@@ -84,9 +129,11 @@ owb setup                     # 引导：扩展安装路径、装 skill、连通
 之后可以用 `owb update check` 对比 npm 上的最新版本，有新版会打印升级步骤——
 skill 也教了 agent 在任务收尾时跑一次，所以有更新你不用自己盯。
 
-skill 是渐进披露结构，`skill install` 会把整个目录装好：
+### 关于 skill
 
-```
+渐进披露结构，`skill install` 会把整个目录装好：
+
+```text
 owb/SKILL.md                     主干——每次触发都进上下文
 owb/references/commands.md       80 条命令的参数速查
 owb/references/recipes.md        按任务查的长配方
@@ -116,7 +163,7 @@ owb help                 # 全部命令
 
 ## 目录结构
 
-```
+```text
 open-web-bridge/          ← npm 包根（package.json 在这里）
 ├── owb-daemon/src/       owb CLI（agent 接入面）+ 本地 daemon
 ├── owb-daemon/tests/     测试（不进 npm 包）
@@ -133,9 +180,16 @@ open-web-bridge/          ← npm 包根（package.json 在这里）
 
 让**远程** agent 经公网控制你的浏览器，不用暴露本机端口。默认关闭。
 
-拓扑：扩展（你的机器）与 daemon（agent 的机器）都拨出到一个公网中转，按 token
-配对，配对后中转做透明双向转发。中转跑在 Cloudflare Workers + Durable Objects 上
-（空闲休眠，免费额度友好，TLS 内置）。
+```text
+     你的机器                    Cloudflare                agent 的机器
+   ┌──────────────┐             ┌──────────┐             ┌──────────────┐
+   │    扩展      │ ─── wss ──▶ │   中转   │ ◀─── wss ─── │    daemon    │
+   └──────────────┘             └──────────┘             └──────────────┘
+       按 token 配对 · 房间按 sha256(token) 寻址 · Worker 空闲即休眠
+```
+
+中转跑在 Cloudflare Workers + Durable Objects 上（空闲休眠，免费额度友好，
+TLS 内置），配对后做透明的双向转发。
 
 **1. 部署中转（约 2 分钟，一次性）：**
 
@@ -146,7 +200,7 @@ npx wrangler login          # 浏览器授权一次
 npx wrangler deploy         # 输出 https://owb-relay2.<你的子域>.workers.dev
 ```
 
-详见 `owb-relay/README.md`。
+详见 [`owb-relay/README.md`](owb-relay/README.md)。
 
 **2. 扩展端配置：** 点浏览器工具栏的扩展图标 → 切到「中转」页 → 填中转 URL
 （如 `wss://owb-relay2.xxx.workers.dev`）→ 点「生成」→「保存并重连」。
@@ -163,8 +217,8 @@ owb-daemon                    # 日志会标注「中转模式」
 配对后 `owb daemon-status` 的 `mode` 变成 `relay`，远程 agent 就能像本地一样驱动
 浏览器。CLI 接入面不变（仍连本机 `/ctl`）。
 
-⚠️ daemon **只在启动时读环境变量**。如果已经有一个本地模式的 daemon 在跑，
-必须先停掉它——光设环境变量没有任何作用。
+> ⚠️ daemon **只在启动时读环境变量**。如果已经有一个本地模式的 daemon 在跑，
+> 必须先停掉它——光设环境变量没有任何作用。
 
 ## 可选：TLS 指纹重放
 
@@ -216,7 +270,10 @@ npm run test:relay    # 中转 Durable Object 单元测试
 脚本就会被跑到——且**不会首败即停**，跑完全部再按套件汇总。只有需要外部环境
 （真浏览器、要下载的二进制）的两个套件被排除在外。
 
-单独跑：
+<details>
+<summary>单独跑</summary>
+
+<br/>
 
 ```bash
 node owb-daemon/tests/smoke_test.js          # 协议 / 守护 / 编排（自起子进程，无需停 daemon）
@@ -232,9 +289,11 @@ node owb-daemon/tests/read_page_test.js      # 页面表达式单测（另有若
 node owb-daemon/tests/rolling_log_test.js    # 日志轮转 / 保留窗口与审计脱敏
 ```
 
+</details>
+
 最后那两个文档示例测试是因为一次具体的失败才加的：**测试跑的命令和文档教用户写的
 命令是两套东西**，于是文档里的示例可以坏掉，而所有测试照样全绿。
 
 ## License
 
-MIT
+MIT © [woniu9524](https://github.com/woniu9524)
