@@ -3,7 +3,7 @@
   "name": "Open Web Bridge",
   "description": "Let AI agents drive your real browser — page snapshots, network capture, hooks and human handoff, driven from your terminal.",
   "homepage_url": "https://github.com/woniu9524/open-web-bridge",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
