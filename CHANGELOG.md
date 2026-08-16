@@ -3,6 +3,46 @@
 Notable changes per release. Dates are release dates; the repository history
 has the full detail.
 
+## 1.2.0 — 2026-08-16
+
+### Breaking
+
+- **A flag a command doesn't take is now a usage error** (exit 2) instead of
+  being silently dropped. `owb page --url <url>` used to exit 0 having done
+  nothing — it re-snapshotted whatever the tab was already showing, and the
+  stale result was indistinguishable from a successful navigation. The error
+  names the offending flag and lists the valid ones. `owb call <tool>` is
+  exempt (its argument surface can't be enumerated) and the contents of
+  `--args` are never checked, so both escape hatches still pass anything.
+
+### Added
+
+- **`net` sees WebSocket traffic.** Connections show up in `net list` with
+  `isWebSocket: true`, `status: 101` and a live `frameCount`; `net detail`
+  returns the frames (`dir`/`opcode`/`len`/`data`) instead of a response body.
+  Only the HAR path could see WebSockets before, so `net` alone would report a
+  push-driven page as having no traffic. Two caps keep a chatty socket bounded:
+  the most recent 200 frames per connection (`framesSeen` is the true total,
+  `framesDropped`/`framesNote` appear once frames are lost) and 2000 chars per
+  payload — record with `har start`/`har save` for a complete session.
+
+### Fixed
+
+- `task_end` no longer reaches outside its own task when cleaning up. It
+  confirms with the extension that the task is still the live one before
+  clearing anything, and stops only the recorders on **its own** tabs rather
+  than every recorder in the browser — previously, ending one task could stop
+  and absorb a concurrently-running task's recording into its own HAR, and
+  clear that task's tab group. The trade-off: a recording on a tab that never
+  joined the task's group is no longer auto-archived by `task_end` (the data is
+  still there — `har save` it yourself).
+- `cookie set --http-only` and `--same-site` were documented but dead: the CLI
+  turns them into `http_only`/`same_site` and the implementation read only the
+  camelCase spelling, so both were silently discarded. Both spellings now work.
+- `task_end`'s result reports `tabs_closed: false` alongside `group.cleared`,
+  which only ever meant "the task pointer was cleared" — never that any tab was
+  closed.
+
 ## 1.1.1 — 2026-08-16
 
 ### Fixed
