@@ -269,7 +269,7 @@ Device, network, geolocation and UA emulation.
 | Command | Arguments | Where the file lands |
 | --- | --- | --- |
 | `download` | `--url` or `--selector`; `--filename` `--timeout-ms` | The system download directory **on the machine running the browser**; the result has no `dir`/`originalPath` |
-| `file fetch` | `--url`(required) `--timeout-ms` | Daemon-side fetch, copied into `work/downloads/`; returns `path`/`originalPath`/`dir` |
+| `file fetch` | `--url`(required) `--timeout-ms` | Same underlying mechanism as `download` (Chrome's download API only accepts a filename relative to *its own* download folder, not an arbitrary path) — the file lands in the system download directory first, then gets **copied** (not moved) into `work/downloads/`; the original is left in place, not deleted. Returns `path`/`originalPath`/`dir` |
 | `upload` | `--ref`/`--selector` plus `--args '{"files":[{"name":"a.txt","base64":"..."}]}'` (**does not take a file path**) | Builds a File inside the page, bypassing the filesystem |
 | `pdf` | `--format A4\|Letter…` `--landscape` `--print-background` `--margin-top/-bottom/-left/-right` `--prefer-css-page-size` `--out <path>` | Always to disk; stdout returns the path |
 
