@@ -3,6 +3,32 @@
 Notable changes per release. Dates are release dates; the repository history
 has the full detail.
 
+## 1.1.1 — 2026-08-16
+
+### Fixed
+
+- `task_end` takes an explicit `--task-id` (mirroring `flow save`) instead of
+  always trusting the daemon's single shared "current task" pointer. With
+  several agents driving one browser, whichever `task_begin` ran last owned
+  that pointer, so an earlier task's plain `task_end` either raised `NO_TASK`
+  or — worse — returned `ok` while archiving *someone else's* task. Ending a
+  task that is no longer current now archives it as `ended_stale` without
+  touching the live recorder, tab group, or pointer, and the pointer is
+  re-checked immediately before it is cleared so a `task_begin` landing during
+  `task_end`'s own awaits can't have its task closed out from under it.
+- `frames` no longer accumulates execution contexts from pages the tab has
+  already navigated away from. The registry is cleared on
+  `Runtime.executionContextsCleared` rather than `Page.frameNavigated`: the
+  latter is a different CDP domain with no ordering guarantee against the new
+  page's `executionContextCreated`, so the stale entries survived and could
+  shadow the real context — `eval --frame-pattern` could silently resolve
+  against a context that no longer existed instead of erroring.
+- `cdp` explains itself when its params arrive empty. It is the one command
+  that does not fold flat `--foo-bar` flags into CDP params, and reaching for
+  them produced Chrome's opaque `BINDINGS: mandatory field missing at
+  position N` under an `INTERNAL` code that invited retries; it is now
+  `BAD_ARGS` naming the nested `--args '{"method":…,"params":{…}}'` form.
+
 ## 1.1.0 — 2026-08-16
 
 ### Breaking
