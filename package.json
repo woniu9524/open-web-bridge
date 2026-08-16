@@ -1,6 +1,6 @@
 {
   "name": "open-web-bridge",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Drive your real Chrome from any AI agent — logged-in sessions, real fingerprint, live tabs. CLI-based, works with Claude Code, Codex, or any shell.",
   "keywords": [
     "ai-agent",
