@@ -20,7 +20,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { isMainModule } from "../src/ismain.js";
 import { HOST, makeChecker, freePort, waitPort, killProc, onceOpen, tk } from "./kit.js";
 
@@ -76,6 +76,17 @@ async function fireRequest() {
   return sig;
 }
 window.fireRequest = fireRequest;
+// WebSocket 靶点：net 抓包对 WS 的支持只能在真机验证（mock 扩展不产生 CDP
+// Network.webSocket* 事件）。开一条到同源 /ws 的连接，发一帧、收一帧回显。
+function fireWebSocket() {
+  return new Promise(function (resolve) {
+    var ws = new WebSocket("ws://" + location.host + "/ws");
+    ws.onopen = function () { ws.send("ping-from-page"); };
+    ws.onmessage = function (ev) { resolve(String(ev.data)); };
+    setTimeout(function () { resolve("timeout"); }, 5000);
+  });
+}
+window.fireWebSocket = fireWebSocket;
 // 真人检验：isTrusted 只有真实输入管线（CDP Input.dispatchMouseEvent / 人手）才为 true
 document.getElementById('btn2').addEventListener('click', function(ev) {
   var prev = window.__owbTrust || { count: 0 };
@@ -145,6 +156,14 @@ function startTargetServer() {
         res.end(body);
       });
     }
+  });
+  // /ws 上挂一个回显 WebSocket 服务端，供 net 抓包的 WS 支持做真机验证
+  const wss = new WebSocketServer({ server, path: "/ws" });
+  wss.on("connection", (sock) => {
+    sock.on("error", () => {});
+    sock.on("message", (data) => {
+      try { sock.send("echo:" + data.toString()); } catch (e) {}
+    });
   });
   return new Promise((resolve) => {
     server.listen(0, HOST, () => resolve({ server, port: server.address().port }));
@@ -337,6 +356,31 @@ async function main() {
       check("network_detail 有响应体",
         res.ok && String((res.data || {}).body).includes('"ok": true'),
         String((res.data || {}).body).slice(0, 100));
+    }
+
+    // 6b. WebSocket 抓包：net 这条链路以前完全看不到 WS 流量（只接了 5 个
+    // HTTP 生命周期事件）。只能真机验证——mock 扩展不产生 CDP webSocket* 事件。
+    res = await ctl.call("evaluate", {
+      expression: "window.fireWebSocket()", awaitPromise: true });
+    check("WebSocket 回显到达页面",
+      String((res.data || {}).value) === "echo:ping-from-page",
+      jstr((res.data || {}).value));
+    await sleep(500);
+    res = await ctl.call("network_list", { url_pattern: "/ws" });
+    const wsItems = ((res.data || {}).requests || []).filter((r) => r.isWebSocket);
+    check("network_list 列出 WebSocket 连接",
+      wsItems.length > 0 && wsItems[0].type === "WebSocket"
+      && wsItems[0].status === 101 && wsItems[0].frameCount >= 2,
+      jstr(wsItems).slice(0, 300));
+    if (wsItems.length > 0) {
+      res = await ctl.call("network_detail", { request_id: wsItems[0].requestId });
+      const frames = (res.data || {}).frames || [];
+      const sent = frames.find((f) => f.dir === "send");
+      const recv = frames.find((f) => f.dir === "recv");
+      check("network_detail 回收发双向帧内容",
+        res.ok && sent && recv
+        && sent.data === "ping-from-page" && recv.data === "echo:ping-from-page",
+        jstr(frames).slice(0, 300));
     }
 
     // 7. hook_preset(xhr)：注入 + reload + 事件流

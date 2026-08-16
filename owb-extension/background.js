@@ -433,6 +433,10 @@ async function evaluateJs(tabId, expression, opts = {}) {
 const networkBuffers = new Map();
 const networkEnabledTabs = new Set();
 const MAX_BUFFER_PER_TAB = 500;
+// WebSocket 帧的双重护栏：单帧 payload 截断长度 + 每个连接保留的最近帧数。
+// 帧流没有天然上限，不设限一个长连接就能撑爆 service worker 内存。
+const WS_FRAME_MAX_CHARS = 2000;
+const WS_FRAME_KEEP = 200;
 
 // attach + Network.enable + 登记（network_start/capture_request/wait_for/watch_script 共用）
 async function ensureNetwork(tabId) {
@@ -689,12 +693,17 @@ async function finalizeRecorder(tabId, rec, title) {
   return buildRecorderPage(rec, tabId, tabTitle);
 }
 
-// 停所有活动 recorder，合并为多 page HAR
-async function stopAllRecorders(title) {
+// 停所有活动 recorder，合并为多 page HAR。传 onlyTabIds 时只停/合并这个
+// 子集——task_end 按任务收尾时用得上：不传就是"不管是谁的，全停"，那是
+// har_save 这类直接命令的正确语义，但task_end按自己任务的tabIds传进来，
+// 就不会连带停掉、吞并别的并发任务还在跑的录制。
+async function stopAllRecorders(title, onlyTabIds) {
   const pages = [];
   let totalEntries = 0,
     totalBodyBytes = 0;
-  const tabIds = [...recorders.keys()];
+  const tabIds = onlyTabIds
+    ? [...recorders.keys()].filter((id) => onlyTabIds.includes(id))
+    : [...recorders.keys()];
   for (const tabId of tabIds) {
     const rec = recorders.get(tabId);
     if (!rec) continue;
@@ -945,6 +954,87 @@ function onNetworkEvent(tabId, method, params) {
     bufferPut(tabId, params.requestId, {
       failed: true,
       errorText: params.errorText,
+    });
+    return;
+  }
+  // ---- WebSocket ----
+  // net 这条链路以前完全没接 WebSocket 事件：Network.* 里只处理了 5 个 HTTP
+  // 生命周期事件，webSocket* 一个都没接，于是 net list/detail 结构性看不见
+  // 任何 WS 流量——而 har 那条链路（har/stats.js）早就完整支持。同一个
+  // "抓包"心智模型下两套能力不对等，排查实时推送类功能时会得出"这个页面
+  // 没有网络请求"的错误结论。这里按 HTTP 记录同样的形状补上，让 WS 连接在
+  // net list 里就是一条带 isWebSocket 标记的记录。
+  if (method === "Network.webSocketCreated") {
+    bufferPut(tabId, params.requestId, {
+      requestId: params.requestId,
+      url: params.url,
+      method: "GET",
+      type: "WebSocket",
+      isWebSocket: true,
+      initiator: params.initiator || null,
+      startedAt: Date.now(),
+      frames: [],
+      framesSeen: 0,
+    });
+    pushEvent("network", { tabId, phase: "ws-open", requestId: params.requestId,
+                           url: params.url });
+    return;
+  }
+  if (method === "Network.webSocketWillSendHandshakeRequest") {
+    bufferPut(tabId, params.requestId, {
+      requestHeaders: (params.request || {}).headers,
+      wallTime: params.wallTime,
+    });
+    return;
+  }
+  if (method === "Network.webSocketHandshakeResponseReceived") {
+    const resp = params.response || {};
+    bufferPut(tabId, params.requestId, {
+      status: resp.status,
+      responseHeaders: resp.headers,
+    });
+    return;
+  }
+  if (
+    method === "Network.webSocketFrameSent" ||
+    method === "Network.webSocketFrameReceived"
+  ) {
+    const buf = getBuffer(tabId);
+    const prev = buf.get(params.requestId);
+    if (!prev) return; // 没见过握手（抓包晚于连接建立），无身份不记
+    const resp = params.response || {};
+    // 帧是无上限的流（行情/聊天/游戏推送轻松每秒几十上百帧），必须双重设限：
+    // 单帧 payload 截断 + 每连接只留最近 WS_FRAME_KEEP 帧，另记录真实总数，
+    // 否则一个长连接就能把 service worker 的内存吃光。
+    const data = typeof resp.payloadData === "string" ? resp.payloadData : "";
+    const frames = prev.frames || [];
+    frames.push({
+      dir: method === "Network.webSocketFrameSent" ? "send" : "recv",
+      t: params.timestamp,
+      opcode: resp.opcode,
+      len: data.length,
+      data: data.length > WS_FRAME_MAX_CHARS
+        ? data.slice(0, WS_FRAME_MAX_CHARS) + "…(truncated)"
+        : data,
+    });
+    while (frames.length > WS_FRAME_KEEP) frames.shift();
+    bufferPut(tabId, params.requestId, {
+      frames,
+      framesSeen: (prev.framesSeen || 0) + 1,
+    });
+    return;
+  }
+  if (method === "Network.webSocketClosed") {
+    bufferPut(tabId, params.requestId, {
+      finished: true,
+      finishedAt: Date.now(),
+    });
+    return;
+  }
+  if (method === "Network.webSocketFrameError") {
+    bufferPut(tabId, params.requestId, {
+      failed: true,
+      errorText: params.errorMessage,
     });
   }
 }
@@ -3391,6 +3481,10 @@ const tools = {
         // 常年是 0，dataReceived 累加值才是真实到达字节数。
         size: Math.max(rec.encodedDataLength || 0, rec.receivedBytes || 0),
         fromCache: rec.fromCache || undefined,
+        // WebSocket 连接在列表里要一眼能认出来，并且直接给出帧数——否则
+        // 一条 WS 记录看起来就像一个"没有大小、没结束"的可疑 HTTP 请求。
+        isWebSocket: rec.isWebSocket || undefined,
+        frameCount: rec.isWebSocket ? (rec.framesSeen || 0) : undefined,
       });
     }
     // BUG-74: 按耗时/体积排序，一条命令回答「最慢的是谁」「谁最占带宽」
@@ -3446,6 +3540,25 @@ const tools = {
           "live ids (the buffer is per-tab and rotates as new requests arrive)",
       );
     const detail = { ...rec };
+    // WebSocket：Network.getResponseBody 对 WS 请求没有意义（拿不到东西，
+    // 只会报错），真正的"内容"是帧流。直接回帧，并说清截断口径：
+    // frames 是最近 WS_FRAME_KEEP 帧，framesSeen 是真实总帧数。
+    if (rec.isWebSocket) {
+      const frames = rec.frames || [];
+      const seen = rec.framesSeen || 0;
+      detail.frames = frames;
+      detail.frameCount = frames.length;
+      detail.framesSeen = seen;
+      if (seen > frames.length) {
+        detail.framesDropped = seen - frames.length;
+        detail.framesNote =
+          `only the most recent ${frames.length} of ${seen} frames are kept ` +
+          `in memory (per-connection cap); each frame's payload is truncated ` +
+          `at ${WS_FRAME_MAX_CHARS} chars. Use har start/har save for a full ` +
+          `recording of a WebSocket session.`;
+      }
+      return detail;
+    }
     if (args.include_body !== false && rec.finished) {
       try {
         const body = await cdpCall(tabId, "Network.getResponseBody", {
@@ -3601,6 +3714,15 @@ const tools = {
   },
 
   async record_stop(args) {
+    // 传 tabIds（数组）：只停/合并这个子集，其余 tab 的 recorder 原样不动——
+    // task_end 按任务收尾用这条，避免误停并发的别的任务的录制。空数组/一个
+    // 都不在录，视为"这个任务本来就没在录"，静默返回，不报 NOT_RECORDING
+    // （task_end 不该因为没录制过就失败）。
+    if (Array.isArray(args.tabIds)) {
+      const hit = args.tabIds.filter((id) => recorders.has(id));
+      if (!hit.length) return { tabIds: [], recording: false, entries: 0, bodyBytes: 0, har: null };
+      return stopAllRecorders(args.title, args.tabIds);
+    }
     // 不指定 tabId：
     //   多个 recorder 在录 → 停全部合并为多 page HAR
     //   恰好一个 recorder 在录 → 停那个（不管是否当前活动 tab）
@@ -5243,6 +5365,20 @@ const tools = {
   async task_context(args) {
     if (args.action === "clear") {
       if (!currentTask) return { cleared: false };
+      // 并发防护：daemon 那边判断"这是不是我的任务"靠的是自己 in-memory
+      // 的 current_task 快照，和这次真正打到这里之间隔着一次 CDP 往返——
+      // 这个窗口里完全可能已经有另一个 task_begin 把 currentTask 换成了
+      // 别的任务。这里用 expected_title 再核对一遍：不是自己的任务就原样
+      // 不动地拒绝，不能因为 action:clear 被调用了就无条件清掉当下真正
+      // current 的那个（可能是别人的）任务。daemon 侧把这种情况当成
+      // "isCurrent 判断在传输途中失效了"处理，不再当自己是 current。
+      if (
+        args.expected_title != null &&
+        currentTask.title !== String(args.expected_title)
+      ) {
+        return { cleared: false, reason: "not_current",
+                 actual_title: currentTask.title };
+      }
       const t = currentTask;
       currentTask = null;
       let tabIds = [];
@@ -5256,6 +5392,10 @@ const tools = {
       }
       return {
         cleared: true,
+        // UX：cleared 只表示"扩展内部的任务指针清空了"，不代表标签页被
+        // 关闭——这两件事经常被混淆（task_end 不关标签页），显式给一个
+        // 不会被误读的字段，别指望调用方去翻源码才搞懂 cleared 的真实含义。
+        tabs_closed: false,
         title: t.title,
         groupId: t.groupId,
         tabIds,
@@ -6116,6 +6256,19 @@ const tools = {
       "expires",
     ]) {
       if (args[k] !== undefined) params[k] = args[k];
+    }
+    // CLI 把 `--foo-bar` 转成 `foo_bar`，所以文档里写着的 `--http-only` /
+    // `--same-site` 到这里是 http_only / same_site，上面那张只认 camelCase 的
+    // 名单一个都接不住——两个**文档写了、实际静默失效**的参数。补收 snake_case
+    // 别名（camelCase 已给的优先，不覆盖）。
+    if (params.httpOnly === undefined && args.http_only !== undefined) {
+      params.httpOnly = args.http_only;
+    }
+    if (params.sameSite === undefined && args.same_site !== undefined) {
+      params.sameSite = args.same_site;
+    }
+    if (params.expires === undefined && args.expirationDate !== undefined) {
+      params.expires = args.expirationDate;
     }
     // UX-94: CDP 静默丢弃非法 sameSite（返回 success:true 但 cookie 没这属性）
     if (params.sameSite !== undefined) {

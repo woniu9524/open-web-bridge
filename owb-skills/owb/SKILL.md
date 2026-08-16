@@ -112,17 +112,26 @@ someone else's task, with no error to catch it**. New tabs opened in between two
 `task begin` calls get grouped under whichever task happened to be "current" at
 that exact moment, not the one that opened them — so tabs from different parallel
 missions end up scattered across each other's groups. Measured: 5 concurrent tasks,
-5/5 hit this. **Two mitigations, not a full fix:**
-- `task begin` now returns `task_id` — hold onto it, and pass it back as
+5/5 hit this. **What's fixed, and what still isn't:**
+- `task begin` returns `task_id` — hold onto it, and pass it back as
   `task end --task-id <id>` instead of a bare `task end`. That reliably archives
   *your* task's metadata even if the pointer has moved on (the result carries
   `ended_stale: true` when it wasn't the live one) — but it does **not** retroactively
   fix which group your tabs already landed in.
-- **Skip `tab close-group` entirely when other missions might still be running.**
-  It still closes by group *name*, and group membership is exactly what's unreliable
+- `task end`'s cleanup no longer reaches outside your task: it re-confirms with the
+  extension that the task is still live before touching anything, and stops only the
+  recorders on **your** task's tabs rather than every recorder in the browser. The
+  flip side: a recording running on a tab that never joined your task group is no
+  longer auto-archived by `task end` — the data isn't lost, but you have to
+  `har save` it yourself.
+- **Still unfixed — skip `tab close-group` when other missions might be running.**
+  It closes by group *name*, and group membership is exactly what's unreliable
   under concurrency — it can just as easily close another mission's live tabs as
   your own. Track the tabIds you actually opened yourself and `owb tab close --tab
   <id>` each one individually (or batch them with `owb seq`) instead.
+- ⚠️ `task end`'s result has `group.cleared: true` — that means the **task context**
+  was cleared, not that any tab was closed (`tabs_closed: false` says so explicitly).
+  Closing tabs is always a separate step.
 
 ## Your tabs and the user's tabs
 

@@ -26,6 +26,13 @@ faster than guessing. `owb help <group>` is the same information, shorter.
 - `--args '<json>'` is merged wholesale and has **highest priority**. Object-shaped
   arguments (`network`, `geolocation`, `files`, `assertions`) can only be passed
   this way.
+- **A flag the command doesn't take is a usage error** (exit 2), naming the bad
+  flag and listing the valid ones. It used to be dropped silently, so
+  `owb page --url <url>` exited 0 while doing nothing — it just re-snapshotted the
+  page the tab was already on, and the stale result looked like a successful
+  navigation. Two deliberate exceptions: `owb call <tool>` accepts anything (its
+  tool surface can't be enumerated), and the contents of `--args` are never
+  checked — that remains the way to pass an argument the alias layer doesn't know.
 - `--out <path>` only means anything for screenshots and PDFs (binary to disk).
 - `--raw` prints the full result envelope, `--compact` prints single-line JSON,
   `--no-autostart` stops the CLI from starting a daemon.
@@ -174,6 +181,18 @@ Capture and inspect network traffic. Full workflow in `debugging.md`.
 | `net stop` | — |
 | `net list` | `--url-pattern` `--limit` `--sort-by duration\|size` `--newest` `--include-orphans` `--include-extensions` |
 | `net detail` | `--request-id`(required) `--include-body` `--max-body` |
+
+**WebSocket**: `net` captures WS connections too — they appear in `net list`
+marked `isWebSocket: true` with `status: 101`, `type: "WebSocket"` and a live
+`frameCount`. `net detail` on one returns the `frames` array (each with
+`dir: send\|recv`, `opcode`, `len`, `data`) instead of a response body, since
+`getResponseBody` is meaningless for a socket. Two caps keep a chatty socket
+from eating memory: only the most recent 200 frames per connection are kept
+(`framesSeen` is the true total, `framesDropped`/`framesNote` appear once
+frames are lost) and each payload is truncated at 2000 chars. **For a complete
+WebSocket session, record it with `har start` / `har save`** — the HAR path
+keeps every frame.
+
 | `net initiator` | `--request-id`, or `--url-pattern`/`--url` |
 | `net capture` | `--url-pattern`(required) `--trigger '<JS expression>'` `--timeout-ms` |
 

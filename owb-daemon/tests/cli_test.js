@@ -260,6 +260,30 @@ async function main() {
     r = await runCli(["state", "export"], env);
     check("state export 指路 call export_state", r.code === 2 && /export_state/.test(r.err),
       `code=${r.code} ${r.err.slice(0, 120)}`);
+
+    // 10. 未知 flag 必须报用法错误，不能静默丢弃
+    // （`owb page --url ...` 以前 exit 0 却什么都没做，只是把旧页面又快照一遍）
+    r = await runCli(["page", "--url", "https://example.com"], env);
+    check("未知 flag 报用法错误而不是静默丢弃",
+      r.code === 2 && /unknown flag --url/.test(r.err) && /page takes:/.test(r.err),
+      `code=${r.code} ${r.err.slice(0, 160)}`);
+    r = await runCli(["page", "--mode", "text", "--bogus", "1", "--alsobad", "2"], env);
+    check("多个未知 flag 一次报全",
+      r.code === 2 && /--bogus/.test(r.err) && /--alsobad/.test(r.err),
+      `code=${r.code} ${r.err.slice(0, 160)}`);
+    // 逃生舱不校验：call 走任意工具名，参数面无从枚举
+    // （用 daemon 本地工具，不碰扩展——否则要等满 NO_EXTENSION 的 35s 重试退避）
+    r = await runCli(["call", "daemon.task_list", "--whatever", "1"], env);
+    check("call 逃生舱不做 flag 校验",
+      r.code !== 2 && !/unknown flag/.test(r.err),
+      `code=${r.code} ${(r.err || r.out).slice(0, 120)}`);
+    // 通用 flag 与 --args 旁路都不能被误杀
+    r = await runCli(["task", "list", "--raw", "--compact"], env);
+    check("通用 CLI flag 不被当成未知 flag",
+      !/unknown flag/.test(r.err), `${r.err.slice(0, 120)}`);
+    r = await runCli(["task", "list", "--args", '{"anything":1}'], env);
+    check("--args 内容不参与 flag 校验",
+      !/unknown flag/.test(r.err), `${r.err.slice(0, 120)}`);
   } finally {
     await killProc(daemon);
   }

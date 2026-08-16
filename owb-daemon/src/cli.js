@@ -176,6 +176,115 @@ for (const group of Object.values(GROUPS)) {
   for (const [name, spec] of Object.entries(group)) COMMANDS.set(name, spec);
 }
 
+// 每个命令认得的参数名（已按 parseArgv 的 `--foo-bar` → `foo_bar` 规范化）。
+// 目的：未知 flag 以前是**静默丢弃**——`owb page --url https://x` 会正常返回
+// exit 0，实际什么都没做，只是把旧页面又快照了一遍。命令表面成功、内容却是
+// 陈旧的，比直接报错危险得多（实测有 agent 据此以为已经导航过去了）。
+// 边界：
+//   - 通用 CLI flag（tab/timeout/raw/compact/no-autostart/args/out）全局放行；
+//   - 表里没有条目的命令（`call` 这类逃生舱）不校验，保持可传任意参数；
+//   - `--args '<json>'` 里的内容不校验，它本来就是"绕过别名层"的正式出口。
+// 宁可放宽也不要误杀：拿不准的别名一律收进来（camelCase 兼容名同理）。
+const UNIVERSAL_ARGS = new Set(["tabId", "timeout", "timeout_ms"]);
+const COMMAND_ARGS = {
+  "open": ["url", "new_tab", "active", "wait_until", "waitUntil"],
+  "back": ["action", "bypass_cache"],
+  "forward": ["action", "bypass_cache"],
+  "reload": ["action", "bypass_cache"],
+  "page": ["mode", "max_chars", "max_nodes", "since_last"],
+  "shot": ["format", "quality", "full_page", "selector", "ref"],
+  "click": ["selector", "ref", "mouse", "x", "y", "button", "click_count"],
+  "fill": ["selector", "ref", "value"],
+  "keys": ["text", "keys"],
+  "scroll": ["selector", "ref", "to", "dx", "dy", "x", "y", "absolute", "settle_ms"],
+  "eval": ["expression", "frame_pattern", "await_promise", "awaitPromise",
+           "return_by_value", "returnByValue"],
+  "wait": ["selector", "text", "url_pattern", "network_idle", "state",
+           "idle_ms", "stale_ms"],
+  "frames": ["include_extensions"],
+  "status": [],
+  "cdp": ["method", "params"],
+  "tab list": [],
+  "tab find": ["url_pattern"],
+  "tab close": ["force"],
+  "tab close-group": ["include_tasks", "include_handoff"],
+  "net start": ["clear"],
+  "net stop": [],
+  "net list": ["url_pattern", "limit", "sort_by", "newest", "order",
+               "include_orphans", "include_extensions"],
+  "net detail": ["request_id", "requestId", "include_body", "max_body"],
+  "net initiator": ["request_id", "requestId", "url", "url_pattern"],
+  "net capture": ["url_pattern", "trigger"],
+  "har start": ["include_bodies", "max_body_bytes", "max_total_body_bytes",
+                "url_pattern", "exclude_pattern", "resource_types",
+                "capture_console", "capture_screenshots", "capture_storage"],
+  "har save": ["filename", "title"],
+  "har discard": ["title", "tabIds"],
+  "har status": [],
+  "har to-replay": ["har", "path", "format", "url_pattern", "save"],
+  "har diff": ["baseline", "current", "save"],
+  "har assert": ["har", "path", "assertions"],
+  "hook preset": ["preset", "presets", "reload", "ignore_cache", "ignoreCache"],
+  "hook fn": ["function_path", "position", "hook_code", "replacement",
+              "trace_args", "trace_ret", "trace_stack", "non_overridable",
+              "reload", "ignore_cache", "ignoreCache"],
+  "hook remove": ["preset", "presets"],
+  "hook status": [],
+  "hook logs": ["source", "since_seq", "since", "limit"],
+  "debug break-xhr": ["url_substring", "url_pattern"],
+  "debug break-fn": ["function_path", "condition", "url_pattern",
+                     "line_number", "column_number"],
+  "debug break-remove": ["url_substring", "url_pattern", "key"],
+  "debug stack": ["max_frames", "prop_limit", "include_global", "auto_resume"],
+  "debug step": ["action"],
+  "debug resume": [],
+  "debug console": ["enabled"],
+  "oracle": ["function_path", "object_id", "call_args", "freeze"],
+  "script list": ["url_pattern", "wait_ms", "include_extensions"],
+  "script source": ["script_id", "max_chars"],
+  "script search": ["query", "url_pattern", "limit", "case_sensitive",
+                    "is_regex", "isRegex", "include_extensions"],
+  "script patch": ["url_pattern", "code", "patch_type", "type"],
+  "script unpatch": ["id", "url_pattern"],
+  "script watch": ["url_pattern", "action", "event", "patch_type", "type", "code"],
+  "script watch-remove": ["id", "url_pattern"],
+  "cookie get": ["urls"],
+  "cookie set": ["name", "value", "url", "domain", "path", "secure",
+                 "httpOnly", "http_only", "sameSite", "same_site",
+                 "expires", "expirationDate"],
+  "cookie delete": ["name", "url", "domain", "path"],
+  "state save": ["name"],
+  "state load": ["name"],
+  "state list": [],
+  "state delete": ["name"],
+  "env set": ["device", "viewport", "width", "height", "mobile", "touch",
+              "network", "geolocation", "timezone", "locale",
+              "permissions", "user_agent"],
+  "env reset": [],
+  "env compare": [],
+  "download": ["url", "selector", "filename"],
+  "upload": ["selector", "ref", "files"],
+  "pdf": ["format", "landscape", "print_background", "margin_top",
+          "margin_bottom", "margin_left", "margin_right",
+          "prefer_css_page_size"],
+  "file fetch": ["url", "selector"],
+  "task begin": ["title", "name"],
+  "task end": ["task_id"],
+  "task list": [],
+  "flow save": ["name", "task_id"],
+  "flow run": ["name", "keep_tab_ids", "continue_on_error", "timeout_s"],
+  "flow list": [],
+  "verify signer": ["source", "signer_code", "samples", "calls"],
+  "verify replay": ["url", "method", "headers", "body", "params", "impersonate",
+                    "allow_redirects", "max_body"],
+  "verify evidence": ["path", "content"],
+  "handoff": ["reason"],
+  "wait-user": ["condition", "selector", "text", "clear"],
+  "daemon-status": [],
+  "daemon-stop": [],
+  "reload-ext": [],
+};
+
 // 修剪/改名过的命令：报错时指路，不做静默别名——命令表就是文档，
 // 藏一个表里没有的可用名字等于让表说谎（docs 测试也会跟着失明）。
 const RENAMED = new Map([
@@ -815,6 +924,27 @@ function resolveInvocation(positionals, args, cli) {
       throw new UsageError(`${RENAMED.has(two) ? two : positionals[0]}: ${renamed}`);
     }
     throw new UsageError(`unknown command: ${positionals[0]} (run owb help for the list)`);
+  }
+
+  // 未知 flag 拦截：只查用户在命令行上真正打出来的那些（args），不查
+  // preset/positional 填进去的。命令名取匹配到的那一条（两词命令用两词）。
+  const cmdName = consumed === 2 ? two : positionals[0];
+  const known = COMMAND_ARGS[cmdName];
+  if (known) {
+    const allowed = new Set([...known, ...UNIVERSAL_ARGS, ...(spec.pos || [])]);
+    const unknown = Object.keys(args).filter((k) => !allowed.has(k));
+    if (unknown.length) {
+      const flags = unknown.map((k) => `--${k.replace(/_/g, "-")}`).join(" ");
+      const valid = known.length
+        ? known.map((k) => `--${k.replace(/_/g, "-")}`).join(" ")
+        : "(none beyond the universal flags)";
+      throw new UsageError(
+        `${cmdName}: unknown ${unknown.length > 1 ? "flags" : "flag"} ${flags}\n` +
+        `  ${cmdName} takes: ${valid}\n` +
+        "  Unknown flags used to be dropped silently, which made the command " +
+        "look like it worked. If the tool really does take this argument, " +
+        `pass it through: owb ${cmdName} --args '{"...":"..."}'`);
+    }
   }
 
   const callArgs = { ...(spec.preset || {}) };

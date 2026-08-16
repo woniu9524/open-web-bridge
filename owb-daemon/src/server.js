@@ -909,7 +909,7 @@ export class Bridge {
           code: "NOT_FOUND", message: `task not found: ${target.id}`,
           retryable: false } };
       }
-      // 只有 target 仍然是扩展侧真正持有的“当前任务”时，才去停录制/清分组——
+      // 只有 target 仍然是扩展侧真正持有的"当前任务"时，才去停录制/清分组——
       // 如果它已经被后来的 task_begin 顶替，扩展里的录制和标签分组早就归了
       // 别的任务，这时候动它们只会误伤别人；这种情况下只把自己的 task.json
       // 收尾归档，不碰扩展状态、也不清全局指针（不是自己的，没资格清）。
@@ -918,22 +918,44 @@ export class Bridge {
       const relDir = target.rel_dir;
       const harFiles = [];
       let group = null;
+      // isCurrent 只是"打这通调用前一刻"的快照，接下来这次 await 期间完全
+      // 可能被另一个并发 task_begin 顶替——不能拿它直接指挥停录制/清分组这
+      // 两个有真实副作用的动作。先问扩展"你现在真的还认我是当前任务吗"
+      // （带 expected_title 核对，见 task_context 实现），拿它当下的活答案。
+      // ⚠️ 只有扩展**明确回答"现在的 current 不是你"**（reason:not_current）
+      // 才认定自己已被顶替。扩展离线、SW 被回收、根本没有任务上下文这些情况
+      // 都不构成"我不是 current"的证据——那时 daemon 侧的 current_task 就是
+      // 唯一可信来源，维持原判。（第一版没分清这两者，扩展一掉线所有正常收尾
+      // 都被误标成 ended_stale，冒烟测试当场抓到。）
+      let actuallyCurrent = isCurrent;
       if (isCurrent) {
-        // 自动收尾：停所有活动 recorder，HAR 落到 task 目录
-        // （防忘关录制；task 成为完整会话容器，含 HAR + workflow）
-        try {
-          const stopRes = await this.call_tool("record_stop",
-            { title: meta.title || target.id }, 30);
-          if (stopRes.ok && stopRes.data && stopRes.data.har) {
-            const harPath = `${relDir}/recording.har`;
-            this.store.write_json(harPath, stopRes.data.har);
-            harFiles.push({ path: harPath, entries: stopRes.data.entries || 0,
-                            bodyBytes: stopRes.data.bodyBytes || 0 });
-          }
-        } catch (e) { /* 无录制或扩展离线，忽略 */ }
-        // 拿扩展侧分组统计（action:clear 顺带清分组）；失败容忍，group=null
-        const ext = await this.call_tool("task_context", { action: "clear" }, 10);
+        const ext = await this.call_tool("task_context",
+          { action: "clear", expected_title: meta.title }, 10);
         group = ext.ok ? (ext.data ?? null) : null;
+        if (group && group.cleared === false && group.reason === "not_current") {
+          actuallyCurrent = false;
+        }
+        // 自动收尾：只停这个任务名下这几个 tab 的 recorder，HAR 落到 task
+        // 目录（防忘关录制；task 成为完整会话容器，含 HAR + workflow）。
+        // 显式传 tabIds（刚从 task_context 拿到的、真正属于这个任务的标签页）
+        // 而不是留空触发"停全部合并"——那样会连带停掉、吞并别的并发任务
+        // 自己独立开的录制，即便这里已经确认自己是当前任务。
+        // 反过来的取舍：如果录制跑在一个没编进本任务分组的 tab 上，这里就
+        // 不再自动归档它了——录制本身不受影响、数据没丢，仍可自己
+        // `har save` 拿走，只是 task_end 不再越界替别人收尾。
+        const myTabIds = (group && group.tabIds) || [];
+        if (actuallyCurrent && myTabIds.length) {
+          try {
+            const stopRes = await this.call_tool("record_stop",
+              { title: meta.title || target.id, tabIds: myTabIds }, 30);
+            if (stopRes.ok && stopRes.data && stopRes.data.har) {
+              const harPath = `${relDir}/recording.har`;
+              this.store.write_json(harPath, stopRes.data.har);
+              harFiles.push({ path: harPath, entries: stopRes.data.entries || 0,
+                              bodyBytes: stopRes.data.bodyBytes || 0 });
+            }
+          } catch (e) { /* 无录制或扩展离线，忽略 */ }
+        }
       }
       Object.assign(meta, {
         ended_at: isoSeconds(),
@@ -943,11 +965,11 @@ export class Bridge {
         // 场景下"从 begin_event_seq 到现在"这段窗口早就被别的任务的事件
         // 灌满了，report 出一个数字只会显得精确、实则没有意义——不如明确
         // 给 null，让调用方知道这不是"这个任务真实产生了多少事件"。
-        event_count: isCurrent ? this.event_seq - meta.begin_event_seq : null,
+        event_count: actuallyCurrent ? this.event_seq - meta.begin_event_seq : null,
         group,
         har_files: harFiles.length ? harFiles : undefined,
       });
-      if (!isCurrent) meta.ended_stale = true;
+      if (!actuallyCurrent) meta.ended_stale = true;
       this.store.write_json(`${relDir}/task.json`, meta);
       // 收尾前再核对一遍活指针，而不是复用上面 await 之前拍下的快照——
       // record_stop/task_context 那两个 await 期间，另一个并行调用方完全
