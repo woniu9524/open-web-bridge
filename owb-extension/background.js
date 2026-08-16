@@ -972,6 +972,10 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   ) {
     // BUG-1/2/53/59: 主帧导航 → 清零 per-tab 状态，防跨页 ref 污染、假 removed、
     // 旧脚本残留。新页面 ref 从 e1 重编，since_last 首次返回全 added（正确语义）。
+    // frameContexts 不在这份名单里是刻意的：它现在由同域的
+    // Runtime.executionContextsCleared 负责清零（见下方），实测 Runtime 域事件
+    // 有时先于这个 Page 域事件到达——在这里再清一遍，反而可能把刚注册好的
+    // 新页面上下文连带清掉，比不清更糟。
     readPageNextRef.delete(tabId);
     readPageSnapshots.delete(tabId);
     scriptRegistryMap.delete(tabId);
@@ -988,6 +992,18 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     return onContextCreated(tabId, params);
   if (method === "Runtime.executionContextDestroyed")
     return onContextDestroyed(tabId, params);
+  // 导航整批清空：Chrome 在同文档/跨文档导航时发的是这个（不是逐个 destroyed）。
+  // 之前只在 Page.frameNavigated 里清 frameContexts，但那是 Page 域事件，
+  // 和这里的 Runtime 域事件之间没有跨域顺序保证——实测新页面的
+  // executionContextCreated 有时先于 Page.frameNavigated 到达，先清后建的
+  // 假设不成立，旧记录没清掉，新记录又被"同 contextId 不重复登记"的去重挡在
+  // 门外，最终两头落空。Runtime.executionContextsCleared 和后续的
+  // executionContextCreated 同属 Runtime 域，CDP 保证同域内事件顺序，
+  // 在这里清才是真的先清后建。
+  if (method === "Runtime.executionContextsCleared") {
+    frameContexts.delete(tabId);
+    return;
+  }
   // Fetch 域脚本改写（async fire-and-forget，内部异常自吞并放行）
   if (method === "Fetch.requestPaused") {
     handleFetchPaused(tabId, params);
@@ -1761,6 +1777,20 @@ const CDP_ERROR_RULES = [
     "script_id is stale (script GC'd or page navigated); re-run script_list"],
   [/was ?n[o']?t found|method not found|-32601/i, "BAD_ARGS", false,
     "no such CDP method — check the domain and spelling"],
+  // 今晚一轮探索误判过一次：owb cdp 打多字段 CDP 方法（Emulation.
+  // setDeviceMetricsOverride 等）稳定失败，报 "mandatory field missing at
+  // position N"，一度被当成 owb 绑定层的 bug、还写进了报告。复现后发现是
+  // 用法陷阱，不是 bug——cdp 是目前唯一要求把参数嵌套进
+  // --args '{"method":...,"params":{...}}' 的命令，其余命令都吃平铺的
+  // --foo-bar；很自然地会有人（或 agent）沿用别的命令那套写法传
+  // --width 390 --height 844，这些 flag 全落进顶层 args，cdp() 读到的
+  // args.params 只剩空对象 {}，Chrome 自己的 CDP 绑定层一校验必填字段就报
+  // 这句话——"position N" 在同一个 CDP 方法下永远不变，是协议 struct 里那个
+  // 字段的固定序号，不是随机错位，之前被当成"可疑的一致性"其实是这个原因。
+  [/BINDINGS: mandatory field missing/i, "BAD_ARGS", false,
+    "cdp's params came through empty/incomplete — unlike every other owb " +
+    "command, cdp does NOT fold flat --foo-bar flags into CDP params; nest " +
+    "them instead: --args '{\"method\":\"<CDP method>\",\"params\":{...}}'"],
   [/must be enabled|agent is not enabled|domain .* not enabled/i,
     "BAD_ARGS", false, "enable the CDP domain first (network_start / script_list / break_*)"],
   [/not allowed/i, "FORBIDDEN", false,

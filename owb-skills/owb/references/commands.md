@@ -287,7 +287,7 @@ owb upload --args "$(cat /tmp/up.json)"
 | Command | Arguments | Notes |
 | --- | --- | --- |
 | `task begin <title>` | `title` (positional) | Creates a `task: <title>` tab group plus a `work/tasks/<id>/` archive directory |
-| `task end` | — | Stops recording, archives the HAR, clears task context. **Does not close tabs** |
+| `task end` | `--task-id` (optional) | Stops recording, archives the HAR, clears task context. **Does not close tabs**. Bare `task end` targets whatever the daemon currently thinks is "the" active task — under concurrent OWB usage (multiple `owb` processes/agents driving the same browser at once) that pointer is shared and gets stomped by the most recent `task begin`, so pass `--task-id <id>` (the `task_id` `task begin` returned) to reliably end *your* task instead of silently ending someone else's. If the id you pass isn't the daemon's current task, `task end` still archives its metadata (`ended_stale: true` in the result) but leaves the live recorder/tab-group alone, since those already belong to whoever holds the pointer now |
 | `task list` | — | Past tasks |
 | `flow save <name>` | `name`(required) `--task-id` | Captures calls within the task's time window; without an active task it raises `NEED_TASK` |
 | `flow run <name>` | `name`(required) `--keep-tab-ids` `--continue-on-error` | Recorded tabIds are dropped by default and each step resolves to the active tab |

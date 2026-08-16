@@ -102,6 +102,28 @@ run `task begin` again (same title reuses the group). (2) **`task end` reports
 since it matches by group name. If you need the archive, confirm
 `owb daemon-status` still shows `current_task` before closing out.
 
+🚨 **Running several OWB missions at once (multiple agents/processes driving the
+same browser concurrently) is a different failure mode from the one above, and
+it's not idle recycling — it's contention.** The daemon tracks "the current task"
+as one shared value, not one per caller. Whichever `task begin` runs *last* holds
+it; every earlier task's plain `task end` then either raises `NO_TASK` (if the
+pointer's since gone null) or — worse — **returns `ok:true` while archiving
+someone else's task, with no error to catch it**. New tabs opened in between two
+`task begin` calls get grouped under whichever task happened to be "current" at
+that exact moment, not the one that opened them — so tabs from different parallel
+missions end up scattered across each other's groups. Measured: 5 concurrent tasks,
+5/5 hit this. **Two mitigations, not a full fix:**
+- `task begin` now returns `task_id` — hold onto it, and pass it back as
+  `task end --task-id <id>` instead of a bare `task end`. That reliably archives
+  *your* task's metadata even if the pointer has moved on (the result carries
+  `ended_stale: true` when it wasn't the live one) — but it does **not** retroactively
+  fix which group your tabs already landed in.
+- **Skip `tab close-group` entirely when other missions might still be running.**
+  It still closes by group *name*, and group membership is exactly what's unreliable
+  under concurrency — it can just as easily close another mission's live tabs as
+  your own. Track the tabIds you actually opened yourself and `owb tab close --tab
+  <id>` each one individually (or batch them with `owb seq`) instead.
+
 ## Your tabs and the user's tabs
 
 `owb` runs inside **the browser the user is using right now**, so there are always

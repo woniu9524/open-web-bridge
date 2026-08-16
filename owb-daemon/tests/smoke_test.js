@@ -339,6 +339,32 @@ async function main() {
       && res.error.retryable === false,
       jstr(res));
 
+    // 7b. 并发场景：多个调用方共享同一个 Bridge 单例时，后开的 task_begin 会
+    // 顶替 current_task 全局指针——task_end 现在应该认 args.task_id，让先开的
+    // 那个任务能精确结束自己，而不是打偏（关掉别人）或扑空（NO_TASK）。
+    res = await ctlCall(ctl, "daemon.task_begin", { title: "concurrent A" });
+    const taskA = (res.data || {}).task_id || "";
+    res = await ctlCall(ctl, "daemon.task_begin", { title: "concurrent B" });
+    const taskB = (res.data || {}).task_id || "";
+    check("并发：后开的 task_begin 顶替 current_task",
+      taskA && taskB && taskA !== taskB, `A=${taskA} B=${taskB}`);
+    res = await ctlCall(ctl, "daemon.task_end", { task_id: taskA });
+    check("并发：显式 task_id 结束非当前任务不报错",
+      res.ok && res.data && res.data.id === taskA && res.data.ended_stale === true,
+      jstr(res));
+    res = await ctlCall(ctl, "daemon.status");
+    check("并发：结束旧任务不清掉别人的 current_task",
+      res.ok && res.data && res.data.current_task === taskB,
+      jstr((res.data || {}).current_task));
+    res = await ctlCall(ctl, "daemon.task_end");
+    check("并发：裸 task_end 仍能正常收尾真正的当前任务",
+      res.ok && res.data && res.data.id === taskB && !res.data.ended_stale,
+      jstr(res));
+    res = await ctlCall(ctl, "daemon.status");
+    check("并发：当前任务结束后 current_task 清空",
+      res.ok && res.data && res.data.current_task === null,
+      jstr((res.data || {}).current_task));
+
     // 8. 宏回放与会话库（无扩展场景）
     // 8a. 无任务时 workflow_save 报 NEED_TASK
     res = await ctlCall(ctl, "daemon.workflow_save", { name: "nothing" });

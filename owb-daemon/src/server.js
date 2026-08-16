@@ -876,41 +876,88 @@ export class Bridge {
                                  ext_sync: Boolean(ext.ok) } };
     }
     if (name === "task_end") {
-      if (!this.current_task) {
+      // 并发修复：current_task 是这个 Bridge 单例上唯一一份全局指针，被多个
+      // 并行调用方共享——不传 task_id 时谁的 task_begin 后调用，指针就归谁，
+      // 之前所有调用方的裸 task_end 要么扑空（NO_TASK）要么打偏（成功但
+      // 关掉了别人的任务，且没有任何报错信号）。呼应 workflow_save 早就有的
+      // args.task_id 兜底：允许显式指定要结束哪个任务，不再必须依赖“当前”。
+      const explicitId = args && args.task_id ? String(args.task_id) : null;
+      const target = explicitId
+        ? { id: explicitId, rel_dir: `tasks/${explicitId}` }
+        : this.current_task;
+      if (!target) {
         return { ok: false, error: {
           code: "NO_TASK",
           message: "no active task; call task_begin first",
           retryable: false } };
       }
-      const relDir = this.current_task.rel_dir;
-      const meta = JSON.parse(fs.readFileSync(
-        this.store._abs(`${relDir}/task.json`), "utf8"));
-      // 自动收尾：停所有活动 recorder，HAR 落到 task 目录
-      // （防忘关录制；task 成为完整会话容器，含 HAR + workflow）
-      const harFiles = [];
+      let meta;
       try {
-        const stopRes = await this.call_tool("record_stop",
-          { title: this.current_task.title || this.current_task.id }, 30);
-        if (stopRes.ok && stopRes.data && stopRes.data.har) {
-          const harPath = `${relDir}/recording.har`;
-          this.store.write_json(harPath, stopRes.data.har);
-          harFiles.push({ path: harPath, entries: stopRes.data.entries || 0,
-                          bodyBytes: stopRes.data.bodyBytes || 0 });
+        meta = JSON.parse(fs.readFileSync(
+          this.store._abs(`${target.rel_dir}/task.json`), "utf8"));
+      } catch (e) {
+        // _abs 拒绝越权路径（task_id 里带 "../"）时抛的是"path escapes work
+        // dir"，和"这个 id 压根没有对应任务"是两回事——前者是坏输入，
+        // 后者才是真的 NOT_FOUND，别用同一个错误码把两种原因焐在一起。
+        const msg = String((e && e.message) || e);
+        if (/escapes work dir/.test(msg)) {
+          return { ok: false, error: {
+            code: "BAD_ARGS", message: `task_end: invalid task_id: ${msg}`,
+            retryable: false } };
         }
-      } catch (e) { /* 无录制或扩展离线，忽略 */ }
-      // 拿扩展侧分组统计（action:clear 顺带清分组）；失败容忍，group=null
-      const ext = await this.call_tool("task_context", { action: "clear" }, 10);
-      const group = ext.ok ? (ext.data ?? null) : null;
+        return { ok: false, error: {
+          code: "NOT_FOUND", message: `task not found: ${target.id}`,
+          retryable: false } };
+      }
+      // 只有 target 仍然是扩展侧真正持有的“当前任务”时，才去停录制/清分组——
+      // 如果它已经被后来的 task_begin 顶替，扩展里的录制和标签分组早就归了
+      // 别的任务，这时候动它们只会误伤别人；这种情况下只把自己的 task.json
+      // 收尾归档，不碰扩展状态、也不清全局指针（不是自己的，没资格清）。
+      const isCurrent = Boolean(this.current_task) &&
+        this.current_task.id === target.id;
+      const relDir = target.rel_dir;
+      const harFiles = [];
+      let group = null;
+      if (isCurrent) {
+        // 自动收尾：停所有活动 recorder，HAR 落到 task 目录
+        // （防忘关录制；task 成为完整会话容器，含 HAR + workflow）
+        try {
+          const stopRes = await this.call_tool("record_stop",
+            { title: meta.title || target.id }, 30);
+          if (stopRes.ok && stopRes.data && stopRes.data.har) {
+            const harPath = `${relDir}/recording.har`;
+            this.store.write_json(harPath, stopRes.data.har);
+            harFiles.push({ path: harPath, entries: stopRes.data.entries || 0,
+                            bodyBytes: stopRes.data.bodyBytes || 0 });
+          }
+        } catch (e) { /* 无录制或扩展离线，忽略 */ }
+        // 拿扩展侧分组统计（action:clear 顺带清分组）；失败容忍，group=null
+        const ext = await this.call_tool("task_context", { action: "clear" }, 10);
+        group = ext.ok ? (ext.data ?? null) : null;
+      }
       Object.assign(meta, {
         ended_at: isoSeconds(),
         ended_ts: Date.now() / 1000,
         end_event_seq: this.event_seq,
-        event_count: this.event_seq - meta.begin_event_seq,
+        // event_seq 是整个 daemon 唯一一份全局计数器，不分任务。ended_stale
+        // 场景下"从 begin_event_seq 到现在"这段窗口早就被别的任务的事件
+        // 灌满了，report 出一个数字只会显得精确、实则没有意义——不如明确
+        // 给 null，让调用方知道这不是"这个任务真实产生了多少事件"。
+        event_count: isCurrent ? this.event_seq - meta.begin_event_seq : null,
         group,
         har_files: harFiles.length ? harFiles : undefined,
       });
+      if (!isCurrent) meta.ended_stale = true;
       this.store.write_json(`${relDir}/task.json`, meta);
-      this.current_task = null;
+      // 收尾前再核对一遍活指针，而不是复用上面 await 之前拍下的快照——
+      // record_stop/task_context 那两个 await 期间，另一个并行调用方完全
+      // 可能已经 task_begin 了一个新任务，把 current_task 顶替成了 C。
+      // 这时候如果还照抄旧的 isCurrent（当时是 true）去清 current_task，
+      // 清掉的就是跟这次 task_end 毫无关系的 C，而不是自己。收尾前用当下
+      // 的活指针重新判一次，只清真的还指向自己的那份。
+      if (this.current_task && this.current_task.id === target.id) {
+        this.current_task = null;
+      }
       return { ok: true, data: meta };
     }
     if (name === "task_list") {
